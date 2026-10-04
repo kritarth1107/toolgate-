@@ -102,12 +102,12 @@ mod tests {
 
         let expected: Vec<u8> = vec![
             0x00, 0x04, b'r', b'e', b'a', b'd', // tool_name
-            0x00, 0x02,       // arg_keys count
+            0x00, 0x02, // arg_keys count
             0x00, 0x01, b'a', // key "a"
             0x00, 0x01, b'b', // key "b"
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xE8, // expiry 1000
             0x00, 0x02, 0xAB, 0xCD, // nonce
-            0x00, 0x00,       // audience length 0 (unbound)
+            0x00, 0x00, // audience length 0 (unbound)
         ];
 
         assert_eq!(bytes, expected);
@@ -130,12 +130,11 @@ mod tests {
 
     #[test]
     fn encoding_with_audience() {
-        let bytes =
-            encode_canonical_v2("read", &["a".into()], 1000, &[0xAB], Some("client-123"));
+        let bytes = encode_canonical_v2("read", &["a".into()], 1000, &[0xAB], Some("client-123"));
 
         let expected: Vec<u8> = vec![
             0x00, 0x04, b'r', b'e', b'a', b'd', // tool_name
-            0x00, 0x01,       // arg_keys count
+            0x00, 0x01, // arg_keys count
             0x00, 0x01, b'a', // key "a"
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xE8, // expiry 1000
             0x00, 0x01, 0xAB, // nonce

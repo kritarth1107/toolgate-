@@ -166,19 +166,20 @@ fn handle_check() -> Result<(), Box<dyn std::error::Error>> {
     let secret = decode_secret(&input.secret);
     let current_time = input.current_time.unwrap_or_else(current_unix_time);
 
-    let output = match input
-        .token
-        .verify_with_audience(&secret, current_time, input.audience.as_deref())
-    {
-        Ok(()) => CheckOutput {
-            valid: true,
-            error: None,
-        },
-        Err(e) => CheckOutput {
-            valid: false,
-            error: Some(error_to_string(&e)),
-        },
-    };
+    let output =
+        match input
+            .token
+            .verify_with_audience(&secret, current_time, input.audience.as_deref())
+        {
+            Ok(()) => CheckOutput {
+                valid: true,
+                error: None,
+            },
+            Err(e) => CheckOutput {
+                valid: false,
+                error: Some(error_to_string(&e)),
+            },
+        };
 
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())

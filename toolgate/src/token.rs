@@ -560,11 +560,22 @@ mod tests {
         );
 
         assert!(token
-            .verify_call(SECRET, 1999999999, "read_file", &["path"], Some("client-abc"))
+            .verify_call(
+                SECRET,
+                1999999999,
+                "read_file",
+                &["path"],
+                Some("client-abc")
+            )
             .is_ok());
 
-        let result =
-            token.verify_call(SECRET, 1999999999, "read_file", &["path"], Some("client-xyz"));
+        let result = token.verify_call(
+            SECRET,
+            1999999999,
+            "read_file",
+            &["path"],
+            Some("client-xyz"),
+        );
         assert_eq!(result, Err(TokenError::AudienceMismatch));
     }
 
