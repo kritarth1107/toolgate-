@@ -1,5 +1,10 @@
+# Build output
 /target/
-Cargo.lock
+**/target/
+
+# Editor swap files
 *.swp
 *.swo
+
+# macOS
 .DS_Store
