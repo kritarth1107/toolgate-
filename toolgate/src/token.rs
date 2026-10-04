@@ -4,7 +4,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
-use crate::encoding::encode_canonical;
+use crate::encoding::encode_canonical_v2;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -18,6 +18,8 @@ pub struct Token {
     pub nonce: Vec<u8>,
     #[serde(with = "hex_bytes")]
     pub mac: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience: Option<String>,
 }
 
 /// Errors that can occur during token operations.
@@ -26,6 +28,7 @@ pub enum TokenError {
     InvalidMac,
     Expired,
     AttenuationWidens,
+    AudienceMismatch,
 }
 
 impl std::fmt::Display for TokenError {
@@ -34,6 +37,7 @@ impl std::fmt::Display for TokenError {
             TokenError::InvalidMac => write!(f, "invalid MAC"),
             TokenError::Expired => write!(f, "token expired"),
             TokenError::AttenuationWidens => write!(f, "attenuation cannot widen capabilities"),
+            TokenError::AudienceMismatch => write!(f, "audience mismatch"),
         }
     }
 }
@@ -42,16 +46,34 @@ impl std::error::Error for TokenError {}
 
 impl Token {
     /// Mint a new token with the given parameters.
+    ///
+    /// Use `mint_with_audience` to create a token bound to a specific audience.
     pub fn mint(
         secret: &[u8],
         tool_name: impl Into<String>,
         arg_keys: Vec<String>,
         expiry: u64,
     ) -> Self {
+        Self::mint_with_audience(secret, tool_name, arg_keys, expiry, None)
+    }
+
+    /// Mint a new token with an optional audience binding.
+    ///
+    /// When `audience` is `Some(value)`, the token is bound to that audience
+    /// and verification will fail if a different audience is expected.
+    /// When `audience` is `None`, the token is unbound.
+    pub fn mint_with_audience(
+        secret: &[u8],
+        tool_name: impl Into<String>,
+        arg_keys: Vec<String>,
+        expiry: u64,
+        audience: Option<String>,
+    ) -> Self {
         let tool_name = tool_name.into();
         let nonce: [u8; 16] = rand::random();
 
-        let canonical = encode_canonical(&tool_name, &arg_keys, expiry, &nonce);
+        let canonical =
+            encode_canonical_v2(&tool_name, &arg_keys, expiry, &nonce, audience.as_deref());
         let mut hmac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
         hmac.update(&canonical);
         let mac = hmac.finalize().into_bytes().to_vec();
@@ -62,19 +84,55 @@ impl Token {
             expiry,
             nonce: nonce.to_vec(),
             mac,
+            audience,
         }
     }
 
     /// Verify the token's MAC and check expiry.
     /// Uses constant-time comparison for the MAC.
+    ///
+    /// This does not check audience. Use `verify_with_audience` if you need
+    /// to verify that the token is bound to a specific audience.
     pub fn verify(&self, secret: &[u8], current_time: u64) -> Result<(), TokenError> {
+        self.verify_with_audience(secret, current_time, None)
+    }
+
+    /// Verify the token's MAC, expiry, and optionally audience.
+    ///
+    /// If `expected_audience` is `Some(aud)`:
+    /// - Token must have a matching audience, or
+    /// - Token must be unbound (audience=None), which matches any expected audience
+    ///
+    /// If `expected_audience` is `None`, audience is not checked.
+    pub fn verify_with_audience(
+        &self,
+        secret: &[u8],
+        current_time: u64,
+        expected_audience: Option<&str>,
+    ) -> Result<(), TokenError> {
         // Check expiry first
         if current_time > self.expiry {
             return Err(TokenError::Expired);
         }
 
+        // Check audience if required
+        if let Some(expected) = expected_audience {
+            if let Some(ref token_aud) = self.audience {
+                if token_aud != expected {
+                    return Err(TokenError::AudienceMismatch);
+                }
+            }
+            // Token with no audience (unbound) matches any expected audience
+        }
+
         // Recompute MAC
-        let canonical = encode_canonical(&self.tool_name, &self.arg_keys, self.expiry, &self.nonce);
+        let canonical = encode_canonical_v2(
+            &self.tool_name,
+            &self.arg_keys,
+            self.expiry,
+            &self.nonce,
+            self.audience.as_deref(),
+        );
         let mut hmac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
         hmac.update(&canonical);
         let expected = hmac.finalize().into_bytes();
@@ -88,7 +146,7 @@ impl Token {
     }
 
     /// Attenuate the token by removing argument keys or shortening expiry.
-    /// Cannot add keys or extend expiry.
+    /// Cannot add keys or extend expiry. Audience is preserved unchanged.
     pub fn attenuate(
         &self,
         secret: &[u8],
@@ -120,8 +178,15 @@ impl Token {
         };
 
         // Generate new nonce and MAC for the attenuated token
+        // Audience is preserved unchanged
         let nonce: [u8; 16] = rand::random();
-        let canonical = encode_canonical(&self.tool_name, &final_arg_keys, final_expiry, &nonce);
+        let canonical = encode_canonical_v2(
+            &self.tool_name,
+            &final_arg_keys,
+            final_expiry,
+            &nonce,
+            self.audience.as_deref(),
+        );
         let mut hmac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
         hmac.update(&canonical);
         let mac = hmac.finalize().into_bytes().to_vec();
@@ -132,6 +197,7 @@ impl Token {
             expiry: final_expiry,
             nonce: nonce.to_vec(),
             mac,
+            audience: self.audience.clone(),
         })
     }
 }
