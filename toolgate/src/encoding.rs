@@ -1,18 +1,36 @@
 //! Canonical byte encoding for tokens.
 //!
-//! Format (all integers are big-endian):
+//! Format v1 (all integers are big-endian):
 //! - tool_name: u16 length + UTF-8 bytes
 //! - arg_keys_count: u16
 //! - for each arg_key: u16 length + UTF-8 bytes (keys sorted lexicographically)
 //! - expiry: u64 (unix seconds)
 //! - nonce: u16 length + bytes
+//!
+//! Format v2 (backward-compatible extension):
+//! - All v1 fields
+//! - audience: u16 length + UTF-8 bytes (length 0 means unbound/None)
+//!
+//! The v2 format appends audience after nonce. Tokens without audience
+//! encode with length 0, ensuring backward-compatible MAC verification.
 
-/// Encode a token's fields into canonical bytes for signing/verification.
+/// Encode a token's fields into canonical bytes for signing/verification (v1 format).
 pub fn encode_canonical(
     tool_name: &str,
     arg_keys: &[String],
     expiry: u64,
     nonce: &[u8],
+) -> Vec<u8> {
+    encode_canonical_v2(tool_name, arg_keys, expiry, nonce, None)
+}
+
+/// Encode a token's fields into canonical bytes for signing/verification (v2 format with audience).
+pub fn encode_canonical_v2(
+    tool_name: &str,
+    arg_keys: &[String],
+    expiry: u64,
+    nonce: &[u8],
+    audience: Option<&str>,
 ) -> Vec<u8> {
     let mut buf = Vec::new();
 
@@ -38,6 +56,18 @@ pub fn encode_canonical(
     // Nonce: length-prefixed
     buf.extend_from_slice(&(nonce.len() as u16).to_be_bytes());
     buf.extend_from_slice(nonce);
+
+    // Audience: length-prefixed (0 means unbound)
+    match audience {
+        Some(aud) => {
+            let aud_bytes = aud.as_bytes();
+            buf.extend_from_slice(&(aud_bytes.len() as u16).to_be_bytes());
+            buf.extend_from_slice(aud_bytes);
+        }
+        None => {
+            buf.extend_from_slice(&0u16.to_be_bytes());
+        }
+    }
 
     buf
 }
@@ -67,22 +97,17 @@ mod tests {
     #[test]
     fn encoding_is_stable() {
         // Known inputs produce known output - this ensures cross-implementation compatibility
+        // v2 format includes audience (length 0 for unbound)
         let bytes = encode_canonical("read", &["a".into(), "b".into()], 1000, &[0xAB, 0xCD]);
 
-        // Expected encoding:
-        // tool_name "read": 00 04 r e a d
-        // arg_keys count 2: 00 02
-        // key "a": 00 01 a
-        // key "b": 00 01 b
-        // expiry 1000: 00 00 00 00 00 00 03 e8
-        // nonce [0xAB, 0xCD]: 00 02 AB CD
         let expected: Vec<u8> = vec![
             0x00, 0x04, b'r', b'e', b'a', b'd', // tool_name
-            0x00, 0x02, // arg_keys count
+            0x00, 0x02,       // arg_keys count
             0x00, 0x01, b'a', // key "a"
             0x00, 0x01, b'b', // key "b"
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xE8, // expiry 1000
             0x00, 0x02, 0xAB, 0xCD, // nonce
+            0x00, 0x00,       // audience length 0 (unbound)
         ];
 
         assert_eq!(bytes, expected);
@@ -97,8 +122,34 @@ mod tests {
             0x00, 0x00, // zero arg_keys
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // expiry 0
             0x00, 0x00, // empty nonce
+            0x00, 0x00, // audience length 0
         ];
 
         assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn encoding_with_audience() {
+        let bytes =
+            encode_canonical_v2("read", &["a".into()], 1000, &[0xAB], Some("client-123"));
+
+        let expected: Vec<u8> = vec![
+            0x00, 0x04, b'r', b'e', b'a', b'd', // tool_name
+            0x00, 0x01,       // arg_keys count
+            0x00, 0x01, b'a', // key "a"
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xE8, // expiry 1000
+            0x00, 0x01, 0xAB, // nonce
+            0x00, 0x0A, // audience length 10
+            b'c', b'l', b'i', b'e', b'n', b't', b'-', b'1', b'2', b'3', // "client-123"
+        ];
+
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn encoding_none_audience_equals_empty() {
+        let with_none = encode_canonical_v2("tool", &[], 0, &[], None);
+        let without_audience = encode_canonical("tool", &[], 0, &[]);
+        assert_eq!(with_none, without_audience);
     }
 }
