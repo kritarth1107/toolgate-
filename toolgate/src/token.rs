@@ -29,6 +29,8 @@ pub enum TokenError {
     Expired,
     AttenuationWidens,
     AudienceMismatch,
+    ToolMismatch { expected: String, got: String },
+    ArgKeyNotAllowed { key: String },
 }
 
 impl std::fmt::Display for TokenError {
@@ -38,6 +40,12 @@ impl std::fmt::Display for TokenError {
             TokenError::Expired => write!(f, "token expired"),
             TokenError::AttenuationWidens => write!(f, "attenuation cannot widen capabilities"),
             TokenError::AudienceMismatch => write!(f, "audience mismatch"),
+            TokenError::ToolMismatch { expected, got } => {
+                write!(f, "tool mismatch: expected '{}', got '{}'", expected, got)
+            }
+            TokenError::ArgKeyNotAllowed { key } => {
+                write!(f, "argument key '{}' not in token allowlist", key)
+            }
         }
     }
 }
@@ -143,6 +151,47 @@ impl Token {
         } else {
             Err(TokenError::InvalidMac)
         }
+    }
+
+    /// Verify that this token authorizes a specific tool call.
+    ///
+    /// This performs full verification:
+    /// 1. MAC validity
+    /// 2. Expiry check
+    /// 3. Audience match (if `expected_audience` is provided)
+    /// 4. Tool name must match exactly
+    /// 5. All requested argument keys must be in the token's allowlist
+    ///
+    /// Returns `Ok(())` if the call is authorized, or a specific error.
+    pub fn verify_call(
+        &self,
+        secret: &[u8],
+        current_time: u64,
+        tool_name: &str,
+        requested_arg_keys: &[&str],
+        expected_audience: Option<&str>,
+    ) -> Result<(), TokenError> {
+        // First verify MAC, expiry, and audience
+        self.verify_with_audience(secret, current_time, expected_audience)?;
+
+        // Check tool name matches
+        if self.tool_name != tool_name {
+            return Err(TokenError::ToolMismatch {
+                expected: tool_name.to_string(),
+                got: self.tool_name.clone(),
+            });
+        }
+
+        // Check all requested arg keys are in the allowlist
+        for key in requested_arg_keys {
+            if !self.arg_keys.iter().any(|k| k == *key) {
+                return Err(TokenError::ArgKeyNotAllowed {
+                    key: (*key).to_string(),
+                });
+            }
+        }
+
+        Ok(())
     }
 
     /// Attenuate the token by removing argument keys or shortening expiry.
