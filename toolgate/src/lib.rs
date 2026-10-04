@@ -1,8 +1,8 @@
 //! toolgate: Macaroon-style capability tokens for tool calls.
 //!
 //! A token binds a tool name, an allowlist of argument keys, an expiry
-//! (unix seconds), and a random nonce. Tokens can be attenuated (drop
-//! argument keys or shorten expiry) but never widened.
+//! (unix seconds), an optional audience, and a random nonce. Tokens can
+//! be attenuated (drop argument keys or shorten expiry) but never widened.
 //!
 //! # Example
 //!
@@ -30,9 +30,20 @@
 //! ).unwrap();
 //!
 //! assert_eq!(restricted.arg_keys, vec!["path"]);
+//!
+//! // Verify a specific tool call
+//! assert!(token.verify_call(
+//!     secret,
+//!     1999999999,
+//!     "read_file",
+//!     &["path"],
+//!     None,
+//! ).is_ok());
 //! ```
 
 pub mod encoding;
 pub mod token;
+pub mod wire;
 
 pub use token::{Token, TokenError};
+pub use wire::WireError;
