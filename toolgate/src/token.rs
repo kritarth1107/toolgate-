@@ -290,6 +290,7 @@ mod tests {
         assert_eq!(token.expiry, 2000000000);
         assert_eq!(token.nonce.len(), 16);
         assert_eq!(token.mac.len(), 32);
+        assert_eq!(token.audience, None);
 
         // Verify with time before expiry
         assert!(token.verify(SECRET, 1999999999).is_ok());
@@ -387,5 +388,212 @@ mod tests {
         assert_eq!(parsed.nonce, token.nonce);
         assert_eq!(parsed.mac, token.mac);
         assert!(parsed.verify(SECRET, 1999999999).is_ok());
+    }
+
+    // ===== Audience tests =====
+
+    #[test]
+    fn mint_with_audience() {
+        let token = Token::mint_with_audience(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            Some("client-abc".to_string()),
+        );
+
+        assert_eq!(token.audience, Some("client-abc".to_string()));
+        assert!(token.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn audience_match_succeeds() {
+        let token = Token::mint_with_audience(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            Some("client-abc".to_string()),
+        );
+
+        assert!(token
+            .verify_with_audience(SECRET, 1999999999, Some("client-abc"))
+            .is_ok());
+    }
+
+    #[test]
+    fn audience_mismatch_fails() {
+        let token = Token::mint_with_audience(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            Some("client-abc".to_string()),
+        );
+
+        let result = token.verify_with_audience(SECRET, 1999999999, Some("client-xyz"));
+        assert_eq!(result, Err(TokenError::AudienceMismatch));
+    }
+
+    #[test]
+    fn unbound_token_matches_any_audience() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+
+        assert!(token
+            .verify_with_audience(SECRET, 1999999999, Some("any-client"))
+            .is_ok());
+        assert!(token
+            .verify_with_audience(SECRET, 1999999999, Some("other-client"))
+            .is_ok());
+    }
+
+    #[test]
+    fn audience_preserved_after_attenuation() {
+        let token = Token::mint_with_audience(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into()],
+            2000000000,
+            Some("client-abc".to_string()),
+        );
+
+        let attenuated = token
+            .attenuate(SECRET, Some(vec!["path".into()]), None)
+            .unwrap();
+
+        assert_eq!(attenuated.audience, Some("client-abc".to_string()));
+        assert!(attenuated
+            .verify_with_audience(SECRET, 1999999999, Some("client-abc"))
+            .is_ok());
+    }
+
+    #[test]
+    fn audience_json_roundtrip() {
+        let token = Token::mint_with_audience(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            Some("client-123".to_string()),
+        );
+
+        let json = serde_json::to_string(&token).unwrap();
+        let parsed: Token = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.audience, Some("client-123".to_string()));
+        assert!(parsed
+            .verify_with_audience(SECRET, 1999999999, Some("client-123"))
+            .is_ok());
+    }
+
+    #[test]
+    fn no_audience_omitted_from_json() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+
+        let json = serde_json::to_string(&token).unwrap();
+        assert!(!json.contains("audience"));
+    }
+
+    // ===== verify_call tests =====
+
+    #[test]
+    fn verify_call_happy_path() {
+        let token = Token::mint(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into()],
+            2000000000,
+        );
+
+        assert!(token
+            .verify_call(SECRET, 1999999999, "read_file", &["path", "limit"], None)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_call_subset_of_keys() {
+        let token = Token::mint(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into(), "offset".into()],
+            2000000000,
+        );
+
+        assert!(token
+            .verify_call(SECRET, 1999999999, "read_file", &["path"], None)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_call_tool_mismatch() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+
+        let result = token.verify_call(SECRET, 1999999999, "write_file", &["path"], None);
+        assert!(matches!(result, Err(TokenError::ToolMismatch { .. })));
+
+        if let Err(TokenError::ToolMismatch { expected, got }) = result {
+            assert_eq!(expected, "write_file");
+            assert_eq!(got, "read_file");
+        }
+    }
+
+    #[test]
+    fn verify_call_arg_key_not_allowed() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+
+        let result = token.verify_call(SECRET, 1999999999, "read_file", &["path", "limit"], None);
+        assert!(matches!(result, Err(TokenError::ArgKeyNotAllowed { .. })));
+
+        if let Err(TokenError::ArgKeyNotAllowed { key }) = result {
+            assert_eq!(key, "limit");
+        }
+    }
+
+    #[test]
+    fn verify_call_with_audience() {
+        let token = Token::mint_with_audience(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            Some("client-abc".to_string()),
+        );
+
+        assert!(token
+            .verify_call(SECRET, 1999999999, "read_file", &["path"], Some("client-abc"))
+            .is_ok());
+
+        let result =
+            token.verify_call(SECRET, 1999999999, "read_file", &["path"], Some("client-xyz"));
+        assert_eq!(result, Err(TokenError::AudienceMismatch));
+    }
+
+    #[test]
+    fn verify_call_expired() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 1700000000);
+
+        let result = token.verify_call(SECRET, 1700000001, "read_file", &["path"], None);
+        assert_eq!(result, Err(TokenError::Expired));
+    }
+
+    #[test]
+    fn verify_call_invalid_mac() {
+        let mut token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+        token.mac[0] ^= 0xFF;
+
+        let result = token.verify_call(SECRET, 1999999999, "read_file", &["path"], None);
+        assert_eq!(result, Err(TokenError::InvalidMac));
+    }
+
+    #[test]
+    fn verify_call_empty_keys() {
+        let token = Token::mint(SECRET, "ping", vec![], 2000000000);
+
+        assert!(token
+            .verify_call(SECRET, 1999999999, "ping", &[], None)
+            .is_ok());
+
+        let result = token.verify_call(SECRET, 1999999999, "ping", &["extra"], None);
+        assert!(matches!(result, Err(TokenError::ArgKeyNotAllowed { .. })));
     }
 }
