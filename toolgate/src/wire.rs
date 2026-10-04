@@ -165,7 +165,12 @@ mod tests {
 
     #[test]
     fn wire_roundtrip_basic() {
-        let token = Token::mint(SECRET, "read_file", vec!["path".into(), "limit".into()], 2000000000);
+        let token = Token::mint(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into()],
+            2000000000,
+        );
 
         let wire = token.to_wire();
         let decoded = Token::from_wire(&wire).unwrap();
@@ -193,7 +198,9 @@ mod tests {
         let decoded = Token::from_wire(&wire).unwrap();
 
         assert_eq!(decoded.audience, Some("client-xyz".to_string()));
-        assert!(decoded.verify_with_audience(SECRET, 1999999999, Some("client-xyz")).is_ok());
+        assert!(decoded
+            .verify_with_audience(SECRET, 1999999999, Some("client-xyz"))
+            .is_ok());
     }
 
     #[test]
@@ -211,7 +218,7 @@ mod tests {
     fn wire_format_version() {
         let token = Token::mint(SECRET, "test", vec![], 1000);
         let wire = token.to_wire();
-        
+
         assert_eq!(wire[0], WIRE_VERSION);
     }
 
@@ -220,7 +227,7 @@ mod tests {
         let mut data = vec![99u8]; // Invalid version
         data.extend_from_slice(&[0, 4]); // tool name length
         data.extend_from_slice(b"test");
-        
+
         let result = Token::from_wire(&data);
         assert_eq!(result, Err(WireError::UnsupportedVersion(99)));
     }
@@ -229,7 +236,7 @@ mod tests {
     fn wire_truncated_data() {
         let token = Token::mint(SECRET, "test", vec![], 1000);
         let wire = token.to_wire();
-        
+
         let truncated = &wire[..wire.len() / 2];
         let result = Token::from_wire(truncated);
         assert_eq!(result, Err(WireError::UnexpectedEof));
@@ -238,10 +245,13 @@ mod tests {
     #[test]
     fn wire_is_compact() {
         let token = Token::mint(SECRET, "read", vec!["a".into()], 1000);
-        
+
         let wire = token.to_wire();
         let json = serde_json::to_string(&token).unwrap();
-        
-        assert!(wire.len() < json.len(), "wire format should be smaller than JSON");
+
+        assert!(
+            wire.len() < json.len(),
+            "wire format should be smaller than JSON"
+        );
     }
 }
