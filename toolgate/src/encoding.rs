@@ -63,4 +63,42 @@ mod tests {
         // Keys are sorted, so order shouldn't matter
         assert_eq!(bytes1, bytes2);
     }
+
+    #[test]
+    fn encoding_is_stable() {
+        // Known inputs produce known output - this ensures cross-implementation compatibility
+        let bytes = encode_canonical("read", &["a".into(), "b".into()], 1000, &[0xAB, 0xCD]);
+
+        // Expected encoding:
+        // tool_name "read": 00 04 r e a d
+        // arg_keys count 2: 00 02
+        // key "a": 00 01 a
+        // key "b": 00 01 b
+        // expiry 1000: 00 00 00 00 00 00 03 e8
+        // nonce [0xAB, 0xCD]: 00 02 AB CD
+        let expected: Vec<u8> = vec![
+            0x00, 0x04, b'r', b'e', b'a', b'd', // tool_name
+            0x00, 0x02, // arg_keys count
+            0x00, 0x01, b'a', // key "a"
+            0x00, 0x01, b'b', // key "b"
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xE8, // expiry 1000
+            0x00, 0x02, 0xAB, 0xCD, // nonce
+        ];
+
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn encoding_empty_keys() {
+        let bytes = encode_canonical("tool", &[], 0, &[]);
+
+        let expected: Vec<u8> = vec![
+            0x00, 0x04, b't', b'o', b'o', b'l', // tool_name
+            0x00, 0x00, // zero arg_keys
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // expiry 0
+            0x00, 0x00, // empty nonce
+        ];
+
+        assert_eq!(bytes, expected);
+    }
 }

@@ -9,7 +9,7 @@ use crate::encoding::encode_canonical;
 type HmacSha256 = Hmac<Sha256>;
 
 /// A capability token for a tool call.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Token {
     pub tool_name: String,
     pub arg_keys: Vec<String>,
@@ -152,5 +152,125 @@ mod hex_bytes {
     {
         let s = String::deserialize(deserializer)?;
         hex::decode(&s).map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SECRET: &[u8] = b"test-secret-key-32-bytes-long!!";
+
+    #[test]
+    fn mint_and_verify_happy_path() {
+        let token = Token::mint(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "offset".into()],
+            2000000000,
+        );
+
+        assert_eq!(token.tool_name, "read_file");
+        assert_eq!(token.arg_keys, vec!["path", "offset"]);
+        assert_eq!(token.expiry, 2000000000);
+        assert_eq!(token.nonce.len(), 16);
+        assert_eq!(token.mac.len(), 32);
+
+        // Verify with time before expiry
+        assert!(token.verify(SECRET, 1999999999).is_ok());
+        assert!(token.verify(SECRET, 2000000000).is_ok());
+    }
+
+    #[test]
+    fn expired_token_fails() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 1700000000);
+
+        // Time after expiry
+        let result = token.verify(SECRET, 1700000001);
+        assert_eq!(result, Err(TokenError::Expired));
+    }
+
+    #[test]
+    fn tampered_mac_fails() {
+        let mut token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+
+        // Tamper with MAC
+        token.mac[0] ^= 0xFF;
+
+        let result = token.verify(SECRET, 1999999999);
+        assert_eq!(result, Err(TokenError::InvalidMac));
+    }
+
+    #[test]
+    fn wrong_secret_fails() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+
+        let result = token.verify(b"wrong-secret", 1999999999);
+        assert_eq!(result, Err(TokenError::InvalidMac));
+    }
+
+    #[test]
+    fn attenuate_can_drop_keys() {
+        let token = Token::mint(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "offset".into(), "limit".into()],
+            2000000000,
+        );
+
+        let attenuated = token
+            .attenuate(SECRET, Some(vec!["path".into()]), None)
+            .unwrap();
+
+        assert_eq!(attenuated.tool_name, "read_file");
+        assert_eq!(attenuated.arg_keys, vec!["path"]);
+        assert_eq!(attenuated.expiry, 2000000000);
+        assert!(attenuated.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn attenuate_can_shorten_expiry() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+
+        let attenuated = token.attenuate(SECRET, None, Some(1900000000)).unwrap();
+
+        assert_eq!(attenuated.expiry, 1900000000);
+        assert!(attenuated.verify(SECRET, 1899999999).is_ok());
+    }
+
+    #[test]
+    fn attenuation_cannot_add_keys() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+
+        let result = token.attenuate(SECRET, Some(vec!["path".into(), "offset".into()]), None);
+        assert_eq!(result, Err(TokenError::AttenuationWidens));
+    }
+
+    #[test]
+    fn attenuation_cannot_extend_expiry() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+
+        let result = token.attenuate(SECRET, None, Some(2100000000));
+        assert_eq!(result, Err(TokenError::AttenuationWidens));
+    }
+
+    #[test]
+    fn token_json_roundtrip() {
+        let token = Token::mint(
+            SECRET,
+            "write_file",
+            vec!["path".into(), "data".into()],
+            2000000000,
+        );
+
+        let json = serde_json::to_string(&token).unwrap();
+        let parsed: Token = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.tool_name, token.tool_name);
+        assert_eq!(parsed.arg_keys, token.arg_keys);
+        assert_eq!(parsed.expiry, token.expiry);
+        assert_eq!(parsed.nonce, token.nonce);
+        assert_eq!(parsed.mac, token.mac);
+        assert!(parsed.verify(SECRET, 1999999999).is_ok());
     }
 }
