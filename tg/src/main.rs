@@ -226,6 +226,7 @@ fn error_to_string(e: &TokenError) -> String {
         TokenError::UnknownKeyId { .. } => "unknown_key_id".to_string(),
         TokenError::NoActiveKey => "no_active_key".to_string(),
         TokenError::MissingKeyId => "missing_key_id".to_string(),
+        TokenError::ConstraintViolation { .. } => "constraint_violation".to_string(),
     }
 }
 
@@ -240,5 +241,6 @@ fn error_to_kind(e: &TokenError) -> String {
         TokenError::UnknownKeyId { .. } => "unknown_key_id".to_string(),
         TokenError::NoActiveKey => "no_active_key".to_string(),
         TokenError::MissingKeyId => "missing_key_id".to_string(),
+        TokenError::ConstraintViolation { .. } => "constraint_violation".to_string(),
     }
 }
