@@ -1,8 +1,9 @@
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::time::{SystemTime, UNIX_EPOCH};
-use toolgate::{Token, TokenError};
+use toolgate::{Constraints, Token, TokenError};
 
 #[derive(Parser)]
 #[command(name = "tg")]
@@ -33,6 +34,8 @@ struct MintInput {
     expiry: u64,
     #[serde(default)]
     audience: Option<String>,
+    #[serde(default)]
+    constraints: Option<Constraints>,
 }
 
 #[derive(Serialize)]
@@ -48,6 +51,8 @@ struct AttenuateInput {
     arg_keys: Option<Vec<String>>,
     #[serde(default)]
     expiry: Option<u64>,
+    #[serde(default)]
+    constraints: Option<Constraints>,
 }
 
 #[derive(Serialize)]
@@ -72,6 +77,8 @@ struct CheckCallInput {
     tool_name: String,
     #[serde(default)]
     arg_keys: Vec<String>,
+    #[serde(default)]
+    args: Option<BTreeMap<String, String>>,
     #[serde(default)]
     current_time: Option<u64>,
     #[serde(default)]
@@ -135,12 +142,14 @@ fn handle_mint() -> Result<(), Box<dyn std::error::Error>> {
     let input: MintInput = serde_json::from_str(&read_stdin()?)?;
     let secret = decode_secret(&input.secret);
 
-    let token = Token::mint_with_audience(
+    let token = Token::mint_full(
         &secret,
         input.tool_name,
         input.arg_keys,
         input.expiry,
         input.audience,
+        None,
+        input.constraints,
     );
 
     let output = MintOutput { token };
@@ -152,9 +161,12 @@ fn handle_attenuate() -> Result<(), Box<dyn std::error::Error>> {
     let input: AttenuateInput = serde_json::from_str(&read_stdin()?)?;
     let secret = decode_secret(&input.secret);
 
-    let attenuated = input
-        .token
-        .attenuate(&secret, input.arg_keys, input.expiry)?;
+    let attenuated = input.token.attenuate_with_constraints(
+        &secret,
+        input.arg_keys,
+        input.expiry,
+        input.constraints,
+    )?;
 
     let output = AttenuateOutput { token: attenuated };
     println!("{}", serde_json::to_string_pretty(&output)?);
@@ -190,15 +202,28 @@ fn handle_check_call() -> Result<(), Box<dyn std::error::Error>> {
     let secret = decode_secret(&input.secret);
     let current_time = input.current_time.unwrap_or_else(current_unix_time);
 
-    let arg_keys_refs: Vec<&str> = input.arg_keys.iter().map(|s| s.as_str()).collect();
+    // If args provided, use verify_call_with_args for constraint checking
+    // Otherwise fall back to verify_call with just arg_keys
+    let result = if let Some(ref args) = input.args {
+        input.token.verify_call_with_args(
+            &secret,
+            current_time,
+            &input.tool_name,
+            args,
+            input.audience.as_deref(),
+        )
+    } else {
+        let arg_keys_refs: Vec<&str> = input.arg_keys.iter().map(|s| s.as_str()).collect();
+        input.token.verify_call(
+            &secret,
+            current_time,
+            &input.tool_name,
+            &arg_keys_refs,
+            input.audience.as_deref(),
+        )
+    };
 
-    let output = match input.token.verify_call(
-        &secret,
-        current_time,
-        &input.tool_name,
-        &arg_keys_refs,
-        input.audience.as_deref(),
-    ) {
+    let output = match result {
         Ok(()) => CheckCallOutput {
             authorized: true,
             error: None,
