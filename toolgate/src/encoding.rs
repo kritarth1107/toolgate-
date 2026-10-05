@@ -15,8 +15,25 @@
 //! - All v2 fields
 //! - kid: u16 length + UTF-8 bytes (length 0 means no key id)
 //!
-//! The v3 format appends kid after audience. Tokens without kid
-//! encode with length 0, ensuring backward-compatible MAC verification.
+//! Format v4 (backward-compatible extension):
+//! - All v3 fields
+//! - constraints_count: u16
+//! - for each constraint (sorted by key):
+//!   - key: u16 length + UTF-8 bytes
+//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange)
+//!   - constraint_data: type-specific encoding
+//!
+//! Constraint data encoding:
+//! - Exact: u16 length + UTF-8 bytes
+//! - OneOf: u16 count + (for each value, sorted: u16 length + UTF-8 bytes)
+//! - Prefix: u16 length + UTF-8 bytes
+//! - MaxLen: u64
+//! - IntRange: i64 min + i64 max
+//!
+//! The v4 format appends constraints after kid. Tokens without constraints
+//! encode with count 0, ensuring backward-compatible MAC verification with v3.
+
+use crate::constraint::{Constraint, Constraints};
 
 /// Encode a token's fields into canonical bytes for signing/verification (v1 format).
 pub fn encode_canonical(
@@ -25,7 +42,7 @@ pub fn encode_canonical(
     expiry: u64,
     nonce: &[u8],
 ) -> Vec<u8> {
-    encode_canonical_v3(tool_name, arg_keys, expiry, nonce, None, None)
+    encode_canonical_v4(tool_name, arg_keys, expiry, nonce, None, None, None)
 }
 
 /// Encode a token's fields into canonical bytes for signing/verification (v2 format with audience).
@@ -36,7 +53,7 @@ pub fn encode_canonical_v2(
     nonce: &[u8],
     audience: Option<&str>,
 ) -> Vec<u8> {
-    encode_canonical_v3(tool_name, arg_keys, expiry, nonce, audience, None)
+    encode_canonical_v4(tool_name, arg_keys, expiry, nonce, audience, None, None)
 }
 
 /// Encode a token's fields into canonical bytes for signing/verification (v3 format with kid).
@@ -47,6 +64,19 @@ pub fn encode_canonical_v3(
     nonce: &[u8],
     audience: Option<&str>,
     kid: Option<&str>,
+) -> Vec<u8> {
+    encode_canonical_v4(tool_name, arg_keys, expiry, nonce, audience, kid, None)
+}
+
+/// Encode a token's fields into canonical bytes for signing/verification (v4 format with constraints).
+pub fn encode_canonical_v4(
+    tool_name: &str,
+    arg_keys: &[String],
+    expiry: u64,
+    nonce: &[u8],
+    audience: Option<&str>,
+    kid: Option<&str>,
+    constraints: Option<&Constraints>,
 ) -> Vec<u8> {
     let mut buf = Vec::new();
 
@@ -97,7 +127,64 @@ pub fn encode_canonical_v3(
         }
     }
 
+    // Constraints: only encoded if non-empty (v4 extension)
+    // Empty/None constraints produce identical encoding to v3 for backward compatibility
+    if let Some(c) = constraints {
+        if !c.is_empty() {
+            buf.extend_from_slice(&(c.len() as u16).to_be_bytes());
+            // BTreeMap iterates in sorted order by key
+            for (key, constraint) in c.iter() {
+                // Key: length-prefixed
+                let key_bytes = key.as_bytes();
+                buf.extend_from_slice(&(key_bytes.len() as u16).to_be_bytes());
+                buf.extend_from_slice(key_bytes);
+
+                // Constraint type + data
+                encode_constraint(&mut buf, constraint);
+            }
+        }
+    }
+
     buf
+}
+
+/// Encode a single constraint to the buffer.
+fn encode_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
+    match constraint {
+        Constraint::Exact(value) => {
+            buf.push(0); // type = Exact
+            let value_bytes = value.as_bytes();
+            buf.extend_from_slice(&(value_bytes.len() as u16).to_be_bytes());
+            buf.extend_from_slice(value_bytes);
+        }
+        Constraint::OneOf(values) => {
+            buf.push(1); // type = OneOf
+            buf.extend_from_slice(&(values.len() as u16).to_be_bytes());
+            // Sort values for deterministic encoding
+            let mut sorted: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
+            sorted.sort();
+            for value in sorted {
+                let value_bytes = value.as_bytes();
+                buf.extend_from_slice(&(value_bytes.len() as u16).to_be_bytes());
+                buf.extend_from_slice(value_bytes);
+            }
+        }
+        Constraint::Prefix(prefix) => {
+            buf.push(2); // type = Prefix
+            let prefix_bytes = prefix.as_bytes();
+            buf.extend_from_slice(&(prefix_bytes.len() as u16).to_be_bytes());
+            buf.extend_from_slice(prefix_bytes);
+        }
+        Constraint::MaxLen(max) => {
+            buf.push(3); // type = MaxLen
+            buf.extend_from_slice(&(*max as u64).to_be_bytes());
+        }
+        Constraint::IntRange { min, max } => {
+            buf.push(4); // type = IntRange
+            buf.extend_from_slice(&min.to_be_bytes());
+            buf.extend_from_slice(&max.to_be_bytes());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -222,5 +309,163 @@ mod tests {
         let v2 = encode_canonical_v2("tool", &["a".into()], 1000, &[1, 2], Some("aud"));
         let v3 = encode_canonical_v3("tool", &["a".into()], 1000, &[1, 2], Some("aud"), None);
         assert_eq!(v2, v3);
+    }
+
+    #[test]
+    fn encoding_v3_equals_v4_without_constraints() {
+        let v3 = encode_canonical_v3(
+            "tool",
+            &["a".into()],
+            1000,
+            &[1, 2],
+            Some("aud"),
+            Some("k1"),
+        );
+        let v4 = encode_canonical_v4(
+            "tool",
+            &["a".into()],
+            1000,
+            &[1, 2],
+            Some("aud"),
+            Some("k1"),
+            None,
+        );
+        assert_eq!(v3, v4);
+    }
+
+    #[test]
+    fn encoding_v4_empty_constraints_equals_none() {
+        use std::collections::BTreeMap;
+        let empty: Constraints = BTreeMap::new();
+        let v4_none = encode_canonical_v4("tool", &[], 0, &[], None, None, None);
+        let v4_empty = encode_canonical_v4("tool", &[], 0, &[], None, None, Some(&empty));
+        assert_eq!(v4_none, v4_empty);
+    }
+
+    #[test]
+    fn encoding_with_constraints() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+
+        let bytes = encode_canonical_v4(
+            "read",
+            &["path".into()],
+            1000,
+            &[],
+            None,
+            None,
+            Some(&constraints),
+        );
+
+        let expected: Vec<u8> = vec![
+            0x00, 0x04, b'r', b'e', b'a', b'd', // tool_name
+            0x00, 0x01, // 1 arg key
+            0x00, 0x04, b'p', b'a', b't', b'h', // key "path"
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xE8, // expiry 1000
+            0x00, 0x00, // empty nonce
+            0x00, 0x00, // no audience
+            0x00, 0x00, // no kid
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'p', b'a', b't', b'h', // constraint key "path"
+            0x02, // type = Prefix
+            0x00, 0x05, b'/', b't', b'm', b'p', b'/', // prefix "/tmp/"
+        ];
+
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn encoding_constraint_exact() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("mode".to_string(), Constraint::Exact("read".to_string()));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        // Find the constraint section (after kid length 0x00 0x00)
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'm', b'o', b'd', b'e', // key "mode"
+            0x00, // type = Exact
+            0x00, 0x04, b'r', b'e', b'a', b'd', // value "read"
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_oneof() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "mode".to_string(),
+            Constraint::OneOf(vec!["write".to_string(), "read".to_string()]), // unsorted
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        // Values should be sorted in encoding
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'm', b'o', b'd', b'e', // key "mode"
+            0x01, // type = OneOf
+            0x00, 0x02, // 2 values
+            0x00, 0x04, b'r', b'e', b'a', b'd', // "read" (sorted first)
+            0x00, 0x05, b'w', b'r', b'i', b't', b'e', // "write" (sorted second)
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_maxlen() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("q".to_string(), Constraint::MaxLen(256));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x01, b'q', // key "q"
+            0x03, // type = MaxLen
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, // u64 256
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_intrange() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "n".to_string(),
+            Constraint::IntRange {
+                min: -100,
+                max: 100,
+            },
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        // i64 -100 = 0xFFFFFFFFFFFFFF9C, i64 100 = 0x0000000000000064
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x01, b'n', // key "n"
+            0x04, // type = IntRange
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x9C, // min = -100
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, // max = 100
+        ]));
+    }
+
+    #[test]
+    fn encoding_multiple_constraints_sorted() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("z".to_string(), Constraint::MaxLen(10));
+        constraints.insert("a".to_string(), Constraint::MaxLen(20));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        // Constraints should be sorted by key: "a" before "z"
+        let constraint_section = &bytes[bytes.len() - 26..]; // 2 + (2+1+1+8) + (2+1+1+8)
+        assert_eq!(constraint_section[0..2], [0x00, 0x02]); // 2 constraints
+        assert_eq!(constraint_section[2..5], [0x00, 0x01, b'a']); // first key is "a"
     }
 }
