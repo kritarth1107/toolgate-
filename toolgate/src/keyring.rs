@@ -194,6 +194,21 @@ impl Keyring {
         )
     }
 
+    /// Verify that a token authorizes a specific tool call with argument values.
+    ///
+    /// This performs full verification including constraint checking on argument values.
+    pub fn verify_call_with_args(
+        &self,
+        token: &Token,
+        current_time: u64,
+        tool_name: &str,
+        args: &std::collections::BTreeMap<String, String>,
+        expected_audience: Option<&str>,
+    ) -> Result<(), TokenError> {
+        let secret = self.get_secret_for_token(token)?;
+        token.verify_call_with_args(secret, current_time, tool_name, args, expected_audience)
+    }
+
     /// Attenuate a token using the keyring.
     ///
     /// The attenuated token preserves the original `kid`.
@@ -408,5 +423,46 @@ mod tests {
         let mut ids: Vec<_> = keyring.key_ids().collect();
         ids.sort();
         assert_eq!(ids, vec!["key-a", "key-b"]);
+    }
+
+    #[test]
+    fn verify_call_with_args_through_keyring() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut keyring = Keyring::new();
+        keyring.add("key-1", SECRET_1.to_vec());
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+
+        let token = Token::mint_full(
+            SECRET_1,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            Some("key-1".to_string()),
+            Some(constraints),
+        );
+
+        // Valid args
+        let mut args = BTreeMap::new();
+        args.insert("path".to_string(), "/tmp/test.txt".to_string());
+
+        assert!(keyring
+            .verify_call_with_args(&token, 1999999999, "read_file", &args, None)
+            .is_ok());
+
+        // Invalid args
+        let mut bad_args = BTreeMap::new();
+        bad_args.insert("path".to_string(), "/etc/passwd".to_string());
+
+        let result =
+            keyring.verify_call_with_args(&token, 1999999999, "read_file", &bad_args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { key }) if key == "path"
+        ));
     }
 }
