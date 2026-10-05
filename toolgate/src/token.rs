@@ -818,4 +818,446 @@ mod tests {
         let json = serde_json::to_string(&token).unwrap();
         assert!(!json.contains("kid"));
     }
+
+    // ===== Constraints tests =====
+
+    #[test]
+    fn mint_with_constraints() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        assert_eq!(token.constraints, Some(constraints));
+        assert!(token.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn constraints_included_in_mac() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        // Tamper with constraints
+        let mut tampered = token.clone();
+        let mut new_constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        new_constraints.insert("path".to_string(), Constraint::Prefix("/var/".to_string()));
+        tampered.constraints = Some(new_constraints);
+
+        assert_eq!(
+            tampered.verify(SECRET, 1999999999),
+            Err(TokenError::InvalidMac)
+        );
+    }
+
+    #[test]
+    fn attenuation_can_add_constraint_to_unconstrained_key() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+        assert!(token.constraints.is_none());
+
+        let mut new_constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        new_constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(new_constraints.clone()))
+            .unwrap();
+
+        assert_eq!(attenuated.constraints, Some(new_constraints));
+        assert!(attenuated.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn attenuation_can_tighten_prefix() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        // Tighten prefix from /tmp/ to /tmp/subdir/
+        let mut tighter: BTreeMap<String, Constraint> = BTreeMap::new();
+        tighter.insert(
+            "path".to_string(),
+            Constraint::Prefix("/tmp/subdir/".to_string()),
+        );
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(tighter.clone()))
+            .unwrap();
+
+        // Should have the tighter constraint
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("path"),
+            tighter.get("path")
+        );
+        assert!(attenuated.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn attenuation_cannot_loosen_prefix() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "path".to_string(),
+            Constraint::Prefix("/tmp/subdir/".to_string()),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        // Try to loosen prefix from /tmp/subdir/ to /tmp/
+        let mut looser: BTreeMap<String, Constraint> = BTreeMap::new();
+        looser.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+
+        let result = token.attenuate_with_constraints(SECRET, None, None, Some(looser));
+        assert_eq!(result, Err(TokenError::AttenuationWidens));
+    }
+
+    #[test]
+    fn attenuation_can_narrow_oneof() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "mode".to_string(),
+            Constraint::OneOf(vec![
+                "read".to_string(),
+                "write".to_string(),
+                "list".to_string(),
+            ]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "file_op",
+            vec!["mode".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        // Narrow to only read|list
+        let mut narrower: BTreeMap<String, Constraint> = BTreeMap::new();
+        narrower.insert(
+            "mode".to_string(),
+            Constraint::OneOf(vec!["read".to_string(), "list".to_string()]),
+        );
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(narrower))
+            .unwrap();
+
+        assert!(attenuated.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn attenuation_cannot_widen_oneof() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "mode".to_string(),
+            Constraint::OneOf(vec!["read".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "file_op",
+            vec!["mode".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        // Try to widen to read|write
+        let mut wider: BTreeMap<String, Constraint> = BTreeMap::new();
+        wider.insert(
+            "mode".to_string(),
+            Constraint::OneOf(vec!["read".to_string(), "write".to_string()]),
+        );
+
+        let result = token.attenuate_with_constraints(SECRET, None, None, Some(wider));
+        assert_eq!(result, Err(TokenError::AttenuationWidens));
+    }
+
+    #[test]
+    fn attenuation_can_reduce_maxlen() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::MaxLen(256));
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        // Reduce max length
+        let mut smaller: BTreeMap<String, Constraint> = BTreeMap::new();
+        smaller.insert("query".to_string(), Constraint::MaxLen(100));
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(smaller))
+            .unwrap();
+
+        assert!(attenuated.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn attenuation_cannot_increase_maxlen() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::MaxLen(100));
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        // Try to increase max length
+        let mut larger: BTreeMap<String, Constraint> = BTreeMap::new();
+        larger.insert("query".to_string(), Constraint::MaxLen(256));
+
+        let result = token.attenuate_with_constraints(SECRET, None, None, Some(larger));
+        assert_eq!(result, Err(TokenError::AttenuationWidens));
+    }
+
+    #[test]
+    fn attenuation_can_narrow_intrange() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "limit".to_string(),
+            Constraint::IntRange { min: 1, max: 100 },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "fetch",
+            vec!["limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        // Narrow to 1..50
+        let mut narrower: BTreeMap<String, Constraint> = BTreeMap::new();
+        narrower.insert(
+            "limit".to_string(),
+            Constraint::IntRange { min: 1, max: 50 },
+        );
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(narrower))
+            .unwrap();
+
+        assert!(attenuated.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn attenuation_cannot_widen_intrange() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "limit".to_string(),
+            Constraint::IntRange { min: 10, max: 50 },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "fetch",
+            vec!["limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        // Try to widen to 1..100
+        let mut wider: BTreeMap<String, Constraint> = BTreeMap::new();
+        wider.insert(
+            "limit".to_string(),
+            Constraint::IntRange { min: 1, max: 100 },
+        );
+
+        let result = token.attenuate_with_constraints(SECRET, None, None, Some(wider));
+        assert_eq!(result, Err(TokenError::AttenuationWidens));
+    }
+
+    #[test]
+    fn attenuation_can_replace_with_exact() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "mode".to_string(),
+            Constraint::OneOf(vec!["read".to_string(), "write".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "file_op",
+            vec!["mode".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        // Replace with exact value that satisfies the OneOf
+        let mut exact: BTreeMap<String, Constraint> = BTreeMap::new();
+        exact.insert("mode".to_string(), Constraint::Exact("read".to_string()));
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(exact))
+            .unwrap();
+
+        assert!(attenuated.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn attenuation_preserves_existing_constraints() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+        constraints.insert("mode".to_string(), Constraint::Exact("read".to_string()));
+
+        let token = Token::mint_full(
+            SECRET,
+            "file_op",
+            vec!["path".into(), "mode".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        // Only tighten path, mode should be preserved
+        let mut update: BTreeMap<String, Constraint> = BTreeMap::new();
+        update.insert(
+            "path".to_string(),
+            Constraint::Prefix("/tmp/subdir/".to_string()),
+        );
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(update))
+            .unwrap();
+
+        let final_constraints = attenuated.constraints.as_ref().unwrap();
+        assert_eq!(
+            final_constraints.get("path"),
+            Some(&Constraint::Prefix("/tmp/subdir/".to_string()))
+        );
+        assert_eq!(
+            final_constraints.get("mode"),
+            Some(&Constraint::Exact("read".to_string()))
+        );
+        assert!(attenuated.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn constraints_json_roundtrip() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+        constraints.insert(
+            "limit".to_string(),
+            Constraint::IntRange { min: 1, max: 100 },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let json = serde_json::to_string(&token).unwrap();
+        let parsed: Token = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.constraints, Some(constraints));
+        assert!(parsed.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn no_constraints_omitted_from_json() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+        let json = serde_json::to_string(&token).unwrap();
+        assert!(!json.contains("constraints"));
+    }
 }
