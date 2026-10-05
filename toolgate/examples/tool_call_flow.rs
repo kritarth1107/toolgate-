@@ -1,9 +1,10 @@
 //! Example demonstrating the complete token flow:
-//! mint → attenuate → verify_call
+//! mint → attenuate → verify_call (with value constraints)
 //!
 //! Run with: cargo run --example tool_call_flow
 
-use toolgate::Token;
+use std::collections::BTreeMap;
+use toolgate::{Constraint, Token};
 
 fn main() {
     let secret = b"example-secret-key-32-bytes-!!";
@@ -12,90 +13,126 @@ fn main() {
 
     println!("=== Toolgate Token Flow Example ===\n");
 
-    // Step 1: Server mints a token for a client
-    println!("1. Minting token for file_manager tool...");
-    let token = Token::mint_with_audience(
+    // Step 1: Server mints a token with constraints
+    println!("1. Minting token for read_file tool with constraints...");
+
+    let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+    constraints.insert("path".to_string(), Constraint::Prefix("/data/".to_string()));
+    constraints.insert(
+        "limit".to_string(),
+        Constraint::IntRange { min: 1, max: 1000 },
+    );
+
+    let token = Token::mint_full(
         secret,
-        "file_manager",
-        vec!["read".into(), "write".into(), "delete".into()],
+        "read_file",
+        vec!["path".into(), "limit".into(), "format".into()],
         expiry,
         Some("client-abc".to_string()),
+        None,
+        Some(constraints),
     );
+
     println!("   Tool: {}", token.tool_name);
     println!("   Allowed args: {:?}", token.arg_keys);
+    println!("   Constraints: {:?}", token.constraints);
     println!("   Audience: {:?}", token.audience);
-    println!("   Expiry: {}", token.expiry);
     println!();
 
-    // Step 2: Token is attenuated to reduce capabilities
-    println!("2. Attenuating token (removing 'delete' permission)...");
+    // Step 2: Token is attenuated to tighten constraints
+    println!("2. Attenuating token (tightening path constraint to /data/public/)...");
+
+    let mut tighter: BTreeMap<String, Constraint> = BTreeMap::new();
+    tighter.insert(
+        "path".to_string(),
+        Constraint::Prefix("/data/public/".to_string()),
+    );
+    tighter.insert(
+        "limit".to_string(),
+        Constraint::IntRange { min: 1, max: 100 },
+    );
+
     let attenuated = token
-        .attenuate(secret, Some(vec!["read".into(), "write".into()]), None)
+        .attenuate_with_constraints(
+            secret,
+            Some(vec!["path".into(), "limit".into()]),
+            None,
+            Some(tighter),
+        )
         .expect("attenuation should succeed");
+
+    println!("   Args after attenuation: {:?}", attenuated.arg_keys);
     println!(
-        "   Allowed args after attenuation: {:?}",
-        attenuated.arg_keys
+        "   Constraints after attenuation: {:?}",
+        attenuated.constraints
     );
-    println!("   Audience preserved: {:?}", attenuated.audience);
     println!();
 
-    // Step 3: Client attempts various tool calls
-    println!("3. Verifying tool calls...\n");
+    // Step 3: Verify calls with argument values
+    println!("3. Verifying tool calls with argument values...\n");
 
-    // Allowed call: read operation
-    let result = attenuated.verify_call(
+    // Allowed: path in /data/public/, limit within range
+    let mut args = BTreeMap::new();
+    args.insert("path".to_string(), "/data/public/file.txt".to_string());
+    args.insert("limit".to_string(), "50".to_string());
+
+    let result = attenuated.verify_call_with_args(
         secret,
         current_time,
-        "file_manager",
-        &["read"],
+        "read_file",
+        &args,
         Some("client-abc"),
     );
-    println!("   read operation: {}", format_result(&result));
+    println!(
+        "   /data/public/file.txt, limit=50: {}",
+        format_result(&result)
+    );
 
-    // Allowed call: write operation
-    let result = attenuated.verify_call(
+    // Denied: path outside allowed prefix
+    let mut bad_path = BTreeMap::new();
+    bad_path.insert("path".to_string(), "/etc/passwd".to_string());
+    bad_path.insert("limit".to_string(), "10".to_string());
+
+    let result = attenuated.verify_call_with_args(
         secret,
         current_time,
-        "file_manager",
-        &["write"],
+        "read_file",
+        &bad_path,
         Some("client-abc"),
     );
-    println!("   write operation: {}", format_result(&result));
+    println!("   /etc/passwd, limit=10: {}", format_result(&result));
 
-    // Denied: delete was attenuated away
-    let result = attenuated.verify_call(
+    // Denied: limit exceeds constraint
+    let mut bad_limit = BTreeMap::new();
+    bad_limit.insert("path".to_string(), "/data/public/file.txt".to_string());
+    bad_limit.insert("limit".to_string(), "500".to_string());
+
+    let result = attenuated.verify_call_with_args(
         secret,
         current_time,
-        "file_manager",
-        &["delete"],
+        "read_file",
+        &bad_limit,
         Some("client-abc"),
     );
-    println!("   delete operation: {}", format_result(&result));
-
-    // Denied: wrong tool
-    let result = attenuated.verify_call(
-        secret,
-        current_time,
-        "database_manager",
-        &["read"],
-        Some("client-abc"),
+    println!(
+        "   /data/public/file.txt, limit=500: {}",
+        format_result(&result)
     );
-    println!("   database_manager: {}", format_result(&result));
 
     // Denied: wrong audience
-    let result = attenuated.verify_call(
+    let result = attenuated.verify_call_with_args(
         secret,
         current_time,
-        "file_manager",
-        &["read"],
+        "read_file",
+        &args,
         Some("client-xyz"),
     );
-    println!("   wrong audience: {}", format_result(&result));
+    println!("   valid args, wrong audience: {}", format_result(&result));
 
     println!();
     println!("=== Wire Format ===\n");
 
-    // Demonstrate wire encoding
+    // Demonstrate wire encoding (includes constraints)
     let wire = attenuated.to_wire();
     let json = serde_json::to_string(&attenuated).unwrap();
     println!("   Wire format: {} bytes", wire.len());
@@ -106,7 +143,10 @@ fn main() {
     );
 
     let decoded = Token::from_wire(&wire).expect("wire decode should succeed");
-    println!("   Roundtrip verified: {}", decoded == attenuated);
+    println!(
+        "   Constraints preserved after roundtrip: {}",
+        decoded.constraints == attenuated.constraints
+    );
 }
 
 fn format_result(result: &Result<(), toolgate::TokenError>) -> String {
