@@ -3,11 +3,11 @@
 //! This module provides a space-efficient binary encoding for tokens,
 //! suitable for transmission over constrained channels.
 //!
-//! ## Wire Format v2 (all integers big-endian)
+//! ## Wire Format v3 (all integers big-endian)
 //!
 //! | Field | Encoding |
 //! |-------|----------|
-//! | version | u8 (currently 2) |
+//! | version | u8 (currently 3) |
 //! | tool_name | u16 length + UTF-8 bytes |
 //! | arg_keys_count | u16 |
 //! | arg_keys | for each: u16 length + UTF-8 bytes |
@@ -16,13 +16,17 @@
 //! | mac | u8 length + bytes |
 //! | audience | u16 length + UTF-8 bytes (0 = none) |
 //! | kid | u16 length + UTF-8 bytes (0 = none) |
+//! | constraints_count | u16 (0 = none) |
+//! | constraints | for each: key + type + data (same encoding as canonical) |
 //!
-//! Wire format v1 is still supported for decoding (no kid field).
+//! Wire format v1 (no kid) and v2 (no constraints) are still supported for decoding.
 
+use crate::constraint::{Constraint, Constraints};
 use crate::Token;
+use std::collections::BTreeMap;
 
-/// Current wire format version (supports kid field)
-const WIRE_VERSION: u8 = 2;
+/// Current wire format version (supports constraints)
+const WIRE_VERSION: u8 = 3;
 
 /// Minimum supported wire format version
 const WIRE_VERSION_MIN: u8 = 1;
@@ -49,6 +53,120 @@ impl std::fmt::Display for WireError {
 }
 
 impl std::error::Error for WireError {}
+
+/// Encode a single constraint to wire format.
+fn encode_constraint_to_wire(buf: &mut Vec<u8>, key: &str, constraint: &Constraint) {
+    // Key: length-prefixed
+    let key_bytes = key.as_bytes();
+    buf.extend_from_slice(&(key_bytes.len() as u16).to_be_bytes());
+    buf.extend_from_slice(key_bytes);
+
+    match constraint {
+        Constraint::Exact(value) => {
+            buf.push(0); // type = Exact
+            let value_bytes = value.as_bytes();
+            buf.extend_from_slice(&(value_bytes.len() as u16).to_be_bytes());
+            buf.extend_from_slice(value_bytes);
+        }
+        Constraint::OneOf(values) => {
+            buf.push(1); // type = OneOf
+            buf.extend_from_slice(&(values.len() as u16).to_be_bytes());
+            // Sort values for deterministic encoding
+            let mut sorted: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
+            sorted.sort();
+            for value in sorted {
+                let value_bytes = value.as_bytes();
+                buf.extend_from_slice(&(value_bytes.len() as u16).to_be_bytes());
+                buf.extend_from_slice(value_bytes);
+            }
+        }
+        Constraint::Prefix(prefix) => {
+            buf.push(2); // type = Prefix
+            let prefix_bytes = prefix.as_bytes();
+            buf.extend_from_slice(&(prefix_bytes.len() as u16).to_be_bytes());
+            buf.extend_from_slice(prefix_bytes);
+        }
+        Constraint::MaxLen(max) => {
+            buf.push(3); // type = MaxLen
+            buf.extend_from_slice(&(*max as u64).to_be_bytes());
+        }
+        Constraint::IntRange { min, max } => {
+            buf.push(4); // type = IntRange
+            buf.extend_from_slice(&min.to_be_bytes());
+            buf.extend_from_slice(&max.to_be_bytes());
+        }
+    }
+}
+
+/// Decode a single constraint from wire format.
+fn decode_constraint_from_wire(
+    data: &[u8],
+    pos: &mut usize,
+) -> Result<(String, Constraint), WireError> {
+    let read_bytes = |pos: &mut usize, len: usize| -> Result<&[u8], WireError> {
+        if *pos + len > data.len() {
+            return Err(WireError::UnexpectedEof);
+        }
+        let slice = &data[*pos..*pos + len];
+        *pos += len;
+        Ok(slice)
+    };
+
+    // Key
+    let key_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
+    let key_bytes = read_bytes(pos, key_len)?;
+    let key = String::from_utf8(key_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
+
+    // Type
+    let constraint_type = *read_bytes(pos, 1)?.first().unwrap();
+
+    let constraint = match constraint_type {
+        0 => {
+            // Exact
+            let value_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
+            let value_bytes = read_bytes(pos, value_len)?;
+            let value =
+                String::from_utf8(value_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
+            Constraint::Exact(value)
+        }
+        1 => {
+            // OneOf
+            let count = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
+            let mut values = Vec::with_capacity(count);
+            for _ in 0..count {
+                let value_len =
+                    u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
+                let value_bytes = read_bytes(pos, value_len)?;
+                let value =
+                    String::from_utf8(value_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
+                values.push(value);
+            }
+            Constraint::OneOf(values)
+        }
+        2 => {
+            // Prefix
+            let prefix_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
+            let prefix_bytes = read_bytes(pos, prefix_len)?;
+            let prefix =
+                String::from_utf8(prefix_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
+            Constraint::Prefix(prefix)
+        }
+        3 => {
+            // MaxLen
+            let max = u64::from_be_bytes(read_bytes(pos, 8)?.try_into().unwrap()) as usize;
+            Constraint::MaxLen(max)
+        }
+        4 => {
+            // IntRange
+            let min = i64::from_be_bytes(read_bytes(pos, 8)?.try_into().unwrap());
+            let max = i64::from_be_bytes(read_bytes(pos, 8)?.try_into().unwrap());
+            Constraint::IntRange { min, max }
+        }
+        _ => return Err(WireError::UnexpectedEof), // Invalid constraint type
+    };
+
+    Ok((key, constraint))
+}
 
 impl Token {
     /// Encode this token to compact binary wire format.
@@ -102,6 +220,20 @@ impl Token {
                 buf.extend_from_slice(kid_bytes);
             }
             None => {
+                buf.extend_from_slice(&0u16.to_be_bytes());
+            }
+        }
+
+        // Constraints (optional, v3+)
+        match &self.constraints {
+            Some(c) if !c.is_empty() => {
+                buf.extend_from_slice(&(c.len() as u16).to_be_bytes());
+                // BTreeMap iterates in sorted order
+                for (key, constraint) in c.iter() {
+                    encode_constraint_to_wire(&mut buf, key, constraint);
+                }
+            }
+            _ => {
                 buf.extend_from_slice(&0u16.to_be_bytes());
             }
         }
@@ -180,6 +312,23 @@ impl Token {
             None
         };
 
+        // Constraints (v3+ only)
+        let constraints = if version >= 3 {
+            let count = u16::from_be_bytes(read_bytes(&mut pos, 2)?.try_into().unwrap()) as usize;
+            if count > 0 {
+                let mut constraints: Constraints = BTreeMap::new();
+                for _ in 0..count {
+                    let (key, constraint) = decode_constraint_from_wire(data, &mut pos)?;
+                    constraints.insert(key, constraint);
+                }
+                Some(constraints)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(Token {
             tool_name,
             arg_keys,
@@ -188,7 +337,7 @@ impl Token {
             mac,
             audience,
             kid,
-            constraints: None, // Wire format v2 does not include constraints
+            constraints,
         })
     }
 }
@@ -296,7 +445,7 @@ mod tests {
         let wire = token.to_wire();
 
         assert_eq!(wire[0], WIRE_VERSION);
-        assert_eq!(wire[0], 2); // Current version is 2
+        assert_eq!(wire[0], 3); // Current version is 3
     }
 
     #[test]
@@ -340,5 +489,149 @@ mod tests {
             wire.len() < json.len(),
             "wire format should be smaller than JSON"
         );
+    }
+
+    #[test]
+    fn wire_roundtrip_with_constraints() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+        constraints.insert(
+            "limit".to_string(),
+            Constraint::IntRange { min: 1, max: 100 },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn wire_roundtrip_constraint_exact() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("mode".to_string(), Constraint::Exact("read".to_string()));
+
+        let token = Token::mint_full(
+            SECRET,
+            "file_op",
+            vec!["mode".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.constraints, Some(constraints));
+    }
+
+    #[test]
+    fn wire_roundtrip_constraint_oneof() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "mode".to_string(),
+            Constraint::OneOf(vec!["read".to_string(), "write".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "file_op",
+            vec!["mode".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        // OneOf values are sorted in wire encoding
+        let decoded_constraint = decoded.constraints.as_ref().unwrap().get("mode").unwrap();
+        match decoded_constraint {
+            Constraint::OneOf(values) => {
+                assert!(values.contains(&"read".to_string()));
+                assert!(values.contains(&"write".to_string()));
+            }
+            _ => panic!("expected OneOf constraint"),
+        }
+    }
+
+    #[test]
+    fn wire_roundtrip_constraint_maxlen() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::MaxLen(256));
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.constraints, Some(constraints));
+    }
+
+    #[test]
+    fn wire_roundtrip_no_constraints() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert!(decoded.constraints.is_none());
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn wire_v2_token_decodes_without_constraints() {
+        // Manually construct a v2 wire format token
+        let mut data = vec![2u8]; // Version 2
+        data.extend_from_slice(&[0, 4]); // tool name length
+        data.extend_from_slice(b"test");
+        data.extend_from_slice(&[0, 0]); // 0 arg keys
+        data.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0x07, 0xD0]); // expiry = 2000
+        data.push(16); // nonce length
+        data.extend_from_slice(&[0u8; 16]); // nonce
+        data.push(32); // mac length
+        data.extend_from_slice(&[0u8; 32]); // mac
+        data.extend_from_slice(&[0, 0]); // no audience
+        data.extend_from_slice(&[0, 0]); // no kid
+
+        let result = Token::from_wire(&data);
+        assert!(result.is_ok());
+        let token = result.unwrap();
+        assert!(token.constraints.is_none());
     }
 }
