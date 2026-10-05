@@ -7,11 +7,12 @@ A small, fast Rust library for issuing macaroon-style capability tokens for tool
 toolgate issues capability tokens that bind:
 - **Tool name**: which tool the token authorizes
 - **Argument keys**: an allowlist of permitted argument names
+- **Argument constraints** (optional): restrict argument values (prefix, exact, one-of, max length, int range)
 - **Expiry**: unix timestamp when the token becomes invalid
 - **Audience** (optional): restrict token to a specific client/service
 - **Nonce**: random bytes for uniqueness
 
-Tokens are signed with HMAC-SHA256 over a canonical byte encoding. They can be **attenuated** (capabilities reduced) but never widened—you can drop argument keys or shorten expiry, but never add keys or extend expiry. Audience binding is preserved during attenuation.
+Tokens are signed with HMAC-SHA256 over a canonical byte encoding. They can be **attenuated** (capabilities reduced) but never widened—you can drop argument keys, shorten expiry, or tighten constraints, but never add keys, extend expiry, or loosen constraints. Audience binding is preserved during attenuation.
 
 ## Installation
 
@@ -19,7 +20,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-toolgate = "0.3"
+toolgate = "0.4"
 ```
 
 Or install the CLI:
@@ -75,6 +76,83 @@ let restricted = token.attenuate(
     Some(1699500000),          // shorter expiry
 )?;
 ```
+
+## Argument Value Constraints
+
+Tokens can restrict not just which argument keys are allowed, but also what values those arguments may have:
+
+```rust
+use toolgate::{Token, Constraint};
+use std::collections::BTreeMap;
+
+let secret = b"your-256-bit-secret-key-here!!";
+
+// Create constraints
+let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+constraints.insert("mode".to_string(), Constraint::OneOf(vec!["read".into(), "list".into()]));
+constraints.insert("limit".to_string(), Constraint::IntRange { min: 1, max: 100 });
+constraints.insert("query".to_string(), Constraint::MaxLen(256));
+
+// Mint token with constraints
+let token = Token::mint_full(
+    secret,
+    "file_op",
+    vec!["path".into(), "mode".into(), "limit".into(), "query".into()],
+    2000000000,
+    None,  // audience
+    None,  // kid
+    Some(constraints),
+);
+
+// Verify with actual argument values
+let mut args = BTreeMap::new();
+args.insert("path".to_string(), "/tmp/test.txt".to_string());
+args.insert("mode".to_string(), "read".to_string());
+args.insert("limit".to_string(), "50".to_string());
+
+token.verify_call_with_args(
+    secret,
+    1999999999,
+    "file_op",
+    &args,
+    None,
+)?; // Ok - all constraints satisfied
+```
+
+### Constraint Types
+
+| Type | Description | Example |
+|------|-------------|---------|
+| `Exact(String)` | Value must match exactly | `Exact("read".into())` |
+| `OneOf(Vec<String>)` | Value must be one of the allowed values | `OneOf(vec!["read".into(), "write".into()])` |
+| `Prefix(String)` | Value must start with the prefix | `Prefix("/tmp/".into())` |
+| `MaxLen(usize)` | Value must have at most N bytes | `MaxLen(256)` |
+| `IntRange { min, max }` | Value must parse as integer in range | `IntRange { min: 1, max: 100 }` |
+
+### Attenuating Constraints
+
+Constraints can only be tightened during attenuation, never loosened:
+
+```rust
+// Tighten prefix: /tmp/ → /tmp/subdir/
+let mut tighter: BTreeMap<String, Constraint> = BTreeMap::new();
+tighter.insert("path".to_string(), Constraint::Prefix("/tmp/subdir/".to_string()));
+
+let attenuated = token.attenuate_with_constraints(
+    secret,
+    None,  // keep same arg keys
+    None,  // keep same expiry
+    Some(tighter),
+)?;
+```
+
+Valid attenuation rules:
+- **Prefix**: new prefix must extend the old one (`/tmp/` → `/tmp/sub/`)
+- **OneOf**: new set must be a subset of the old set
+- **MaxLen**: new max must be ≤ old max
+- **IntRange**: new range must be within old range
+- **Exact**: can replace any constraint if the exact value satisfies it
 
 ## Key Rotation
 
@@ -132,11 +210,15 @@ echo '{
   "tool_name": "read_file",
   "arg_keys": ["path", "limit"],
   "expiry": 2000000000,
-  "audience": "client-123"
+  "audience": "client-123",
+  "constraints": {
+    "path": {"type": "prefix", "value": "/tmp/"},
+    "limit": {"type": "int_range", "value": {"min": 1, "max": 100}}
+  }
 }' | tg mint
 ```
 
-The `audience` field is optional. Omit it for an unbound token.
+The `audience` and `constraints` fields are optional. Omit them for an unbound token without constraints.
 
 ### Attenuate
 
@@ -145,9 +227,14 @@ echo '{
   "secret": "my-secret",
   "token": { ... },
   "arg_keys": ["path"],
-  "expiry": 1900000000
+  "expiry": 1900000000,
+  "constraints": {
+    "path": {"type": "prefix", "value": "/tmp/subdir/"}
+  }
 }' | tg attenuate
 ```
+
+The `constraints` field can add new constraints or tighten existing ones (never loosen).
 
 ### Check
 
@@ -167,6 +254,7 @@ Omit `current_time` to use the system clock. The `audience` field is optional.
 Verify a token authorizes a specific tool call:
 
 ```bash
+# Check with just arg keys (no value validation)
 echo '{
   "secret": "my-secret",
   "token": { ... },
@@ -174,15 +262,24 @@ echo '{
   "arg_keys": ["path"],
   "audience": "client-123"
 }' | tg check-call
+
+# Check with actual argument values (validates constraints)
+echo '{
+  "secret": "my-secret",
+  "token": { ... },
+  "tool_name": "read_file",
+  "args": {"path": "/tmp/test.txt", "limit": "50"},
+  "audience": "client-123"
+}' | tg check-call
 ```
 
 Returns `{"authorized": true}` or `{"authorized": false, "error": "...", "error_kind": "..."}`.
 
-Error kinds: `invalid_mac`, `expired`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`.
+Error kinds: `invalid_mac`, `expired`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `constraint_violation`.
 
 Secrets can be hex-encoded with `"secret": "hex:deadbeef..."`.
 
-## Canonical Byte Encoding (v3)
+## Canonical Byte Encoding (v4)
 
 For cross-implementation compatibility, tokens are signed over this exact byte layout (all integers big-endian):
 
@@ -195,8 +292,17 @@ For cross-implementation compatibility, tokens are signed over this exact byte l
 | nonce | u16 length + raw bytes |
 | audience | u16 length + UTF-8 bytes (0 = unbound) |
 | kid | u16 length + UTF-8 bytes (0 = no key id) |
+| constraints_count | u16 (only if > 0) |
+| constraints | for each (sorted by key): key + type (u8) + type-specific data |
 
-**Example**: `encode("read", ["a", "b"], 1000, [0xAB, 0xCD], None, None)` produces:
+Constraint type encoding:
+- `0` Exact: u16 length + UTF-8 value
+- `1` OneOf: u16 count + (for each, sorted: u16 length + UTF-8 value)
+- `2` Prefix: u16 length + UTF-8 prefix
+- `3` MaxLen: u64 max
+- `4` IntRange: i64 min + i64 max
+
+**Example without constraints** (identical to v3):
 
 ```
 00 04 r e a d           # tool_name: len=4, "read"
@@ -208,6 +314,8 @@ For cross-implementation compatibility, tokens are signed over this exact byte l
 00 00                   # audience: len=0 (unbound)
 00 00                   # kid: len=0 (none)
 ```
+
+Tokens without constraints encode identically to v3, ensuring backward compatibility.
 
 The HMAC-SHA256 is computed over these concatenated bytes.
 
@@ -231,6 +339,7 @@ Wire format is typically smaller than JSON and suitable for constrained channels
 
 ## Version History
 
+- **0.4.0**: Add argument value constraints (`Constraint` type), `verify_call_with_args` API, canonical encoding v4, wire format v3
 - **0.3.0**: Add key identifiers (`kid`) and `Keyring` type for key rotation
 - **0.2.0**: Add audience binding, verify_call API, compact wire codec, CLI check-call command
 - **0.1.0**: Initial release with mint, attenuate, verify
