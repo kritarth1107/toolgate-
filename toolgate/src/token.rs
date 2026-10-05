@@ -41,6 +41,7 @@ pub enum TokenError {
     UnknownKeyId { kid: String },
     NoActiveKey,
     MissingKeyId,
+    ConstraintViolation { key: String },
 }
 
 impl std::fmt::Display for TokenError {
@@ -61,6 +62,9 @@ impl std::fmt::Display for TokenError {
             }
             TokenError::NoActiveKey => write!(f, "no active key in keyring"),
             TokenError::MissingKeyId => write!(f, "token has no key id"),
+            TokenError::ConstraintViolation { key } => {
+                write!(f, "argument '{}' violates constraint", key)
+            }
         }
     }
 }
@@ -223,6 +227,9 @@ impl Token {
     /// 4. Tool name must match exactly
     /// 5. All requested argument keys must be in the token's allowlist
     ///
+    /// This does NOT check argument values against constraints.
+    /// Use `verify_call_with_args` to also validate argument values.
+    ///
     /// Returns `Ok(())` if the call is authorized, or a specific error.
     pub fn verify_call(
         &self,
@@ -249,6 +256,51 @@ impl Token {
                 return Err(TokenError::ArgKeyNotAllowed {
                     key: (*key).to_string(),
                 });
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Verify that this token authorizes a specific tool call with argument values.
+    ///
+    /// This performs full verification including constraint checking:
+    /// 1. MAC validity
+    /// 2. Expiry check
+    /// 3. Audience match (if `expected_audience` is provided)
+    /// 4. Tool name must match exactly
+    /// 5. All requested argument keys must be in the token's allowlist
+    /// 6. All argument values must satisfy their constraints (if any)
+    ///
+    /// Returns `Ok(())` if the call is authorized, or a specific error.
+    pub fn verify_call_with_args(
+        &self,
+        secret: &[u8],
+        current_time: u64,
+        tool_name: &str,
+        args: &BTreeMap<String, String>,
+        expected_audience: Option<&str>,
+    ) -> Result<(), TokenError> {
+        // Get the arg keys from the args map
+        let arg_keys: Vec<&str> = args.keys().map(|s| s.as_str()).collect();
+
+        // First do the basic verification
+        self.verify_call(
+            secret,
+            current_time,
+            tool_name,
+            &arg_keys,
+            expected_audience,
+        )?;
+
+        // Then check constraints on values
+        if let Some(ref constraints) = self.constraints {
+            for (key, value) in args.iter() {
+                if let Some(constraint) = constraints.get(key) {
+                    if !constraint.check(value) {
+                        return Err(TokenError::ConstraintViolation { key: key.clone() });
+                    }
+                }
             }
         }
 
@@ -1259,5 +1311,314 @@ mod tests {
         let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
         let json = serde_json::to_string(&token).unwrap();
         assert!(!json.contains("constraints"));
+    }
+
+    // ===== verify_call_with_args tests =====
+
+    #[test]
+    fn verify_call_with_args_no_constraints() {
+        let token = Token::mint(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into()],
+            2000000000,
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("path".to_string(), "/any/path".to_string());
+        args.insert("limit".to_string(), "999999".to_string());
+
+        // No constraints, any values should work
+        assert!(token
+            .verify_call_with_args(SECRET, 1999999999, "read_file", &args, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_call_with_args_prefix_satisfied() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("path".to_string(), "/tmp/myfile.txt".to_string());
+
+        assert!(token
+            .verify_call_with_args(SECRET, 1999999999, "read_file", &args, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_call_with_args_prefix_violated() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("path".to_string(), "/etc/passwd".to_string());
+
+        let result = token.verify_call_with_args(SECRET, 1999999999, "read_file", &args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { key }) if key == "path"
+        ));
+    }
+
+    #[test]
+    fn verify_call_with_args_oneof_satisfied() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert(
+            "mode".to_string(),
+            Constraint::OneOf(vec!["read".to_string(), "list".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "file_op",
+            vec!["mode".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("mode".to_string(), "read".to_string());
+
+        assert!(token
+            .verify_call_with_args(SECRET, 1999999999, "file_op", &args, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_call_with_args_oneof_violated() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert(
+            "mode".to_string(),
+            Constraint::OneOf(vec!["read".to_string(), "list".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "file_op",
+            vec!["mode".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("mode".to_string(), "write".to_string());
+
+        let result = token.verify_call_with_args(SECRET, 1999999999, "file_op", &args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { key }) if key == "mode"
+        ));
+    }
+
+    #[test]
+    fn verify_call_with_args_intrange_satisfied() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert(
+            "limit".to_string(),
+            Constraint::IntRange { min: 1, max: 100 },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "fetch",
+            vec!["limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("limit".to_string(), "50".to_string());
+
+        assert!(token
+            .verify_call_with_args(SECRET, 1999999999, "fetch", &args, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_call_with_args_intrange_violated() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert(
+            "limit".to_string(),
+            Constraint::IntRange { min: 1, max: 100 },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "fetch",
+            vec!["limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("limit".to_string(), "200".to_string());
+
+        let result = token.verify_call_with_args(SECRET, 1999999999, "fetch", &args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { key }) if key == "limit"
+        ));
+    }
+
+    #[test]
+    fn verify_call_with_args_maxlen_satisfied() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::MaxLen(10));
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("query".to_string(), "hello".to_string());
+
+        assert!(token
+            .verify_call_with_args(SECRET, 1999999999, "search", &args, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_call_with_args_maxlen_violated() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::MaxLen(5));
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("query".to_string(), "toolong".to_string());
+
+        let result = token.verify_call_with_args(SECRET, 1999999999, "search", &args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { key }) if key == "query"
+        ));
+    }
+
+    #[test]
+    fn verify_call_with_args_unconstrained_key_allowed() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "format".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("path".to_string(), "/tmp/test.txt".to_string());
+        args.insert("format".to_string(), "anything".to_string()); // No constraint on format
+
+        assert!(token
+            .verify_call_with_args(SECRET, 1999999999, "read_file", &args, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_call_with_args_multiple_constraints() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+        constraints.insert(
+            "limit".to_string(),
+            Constraint::IntRange { min: 1, max: 100 },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        // Both constraints satisfied
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("path".to_string(), "/tmp/test.txt".to_string());
+        args.insert("limit".to_string(), "50".to_string());
+
+        assert!(token
+            .verify_call_with_args(SECRET, 1999999999, "read_file", &args, None)
+            .is_ok());
+
+        // First constraint violated
+        let mut args2 = std::collections::BTreeMap::new();
+        args2.insert("path".to_string(), "/etc/test.txt".to_string());
+        args2.insert("limit".to_string(), "50".to_string());
+
+        let result = token.verify_call_with_args(SECRET, 1999999999, "read_file", &args2, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { key }) if key == "path"
+        ));
     }
 }
