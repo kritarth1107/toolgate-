@@ -9,7 +9,8 @@ use std::collections::BTreeMap;
 ///
 /// When a token has a constraint attached to an argument key, any call using
 /// that key must provide a value that satisfies the constraint.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum Constraint {
     /// Value must match exactly.
     Exact(String),
