@@ -468,4 +468,102 @@ mod tests {
         assert_eq!(constraint_section[0..2], [0x00, 0x02]); // 2 constraints
         assert_eq!(constraint_section[2..5], [0x00, 0x01, b'a']); // first key is "a"
     }
+
+    // ===== Backward compatibility tests =====
+
+    #[test]
+    fn v4_no_constraints_identical_to_v3() {
+        // Ensure tokens without constraints produce identical encoding to v3
+        let v3 = encode_canonical_v3(
+            "read_file",
+            &["path".into(), "limit".into()],
+            1700000000,
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            Some("client-123"),
+            Some("key-2024"),
+        );
+
+        let v4_none = encode_canonical_v4(
+            "read_file",
+            &["path".into(), "limit".into()],
+            1700000000,
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            Some("client-123"),
+            Some("key-2024"),
+            None,
+        );
+
+        use std::collections::BTreeMap;
+        let empty: Constraints = BTreeMap::new();
+        let v4_empty = encode_canonical_v4(
+            "read_file",
+            &["path".into(), "limit".into()],
+            1700000000,
+            &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            Some("client-123"),
+            Some("key-2024"),
+            Some(&empty),
+        );
+
+        assert_eq!(v3, v4_none, "v4 with None should equal v3");
+        assert_eq!(v3, v4_empty, "v4 with empty constraints should equal v3");
+    }
+
+    #[test]
+    fn v3_no_kid_identical_to_v2() {
+        let v2 = encode_canonical_v2(
+            "tool",
+            &["a".into(), "b".into()],
+            1000,
+            &[0xAB, 0xCD],
+            Some("audience"),
+        );
+
+        let v3 = encode_canonical_v3(
+            "tool",
+            &["a".into(), "b".into()],
+            1000,
+            &[0xAB, 0xCD],
+            Some("audience"),
+            None,
+        );
+
+        assert_eq!(v2, v3, "v3 without kid should equal v2");
+    }
+
+    #[test]
+    fn v2_no_audience_identical_to_v1() {
+        let v1 = encode_canonical("tool", &["x".into()], 500, &[0x01, 0x02]);
+
+        let v2 = encode_canonical_v2("tool", &["x".into()], 500, &[0x01, 0x02], None);
+
+        assert_eq!(v1, v2, "v2 without audience should equal v1");
+    }
+
+    #[test]
+    fn known_v3_encoding_is_stable() {
+        // This test ensures the v3 encoding remains stable for cross-implementation compatibility
+        // If this test fails after a change, existing v3 tokens will break
+        let bytes = encode_canonical_v3(
+            "read",
+            &["path".into()],
+            1700000000,
+            &[0xDE, 0xAD, 0xBE, 0xEF],
+            Some("client"),
+            Some("key1"),
+        );
+
+        // 1700000000 = 0x6553F100 big-endian
+        let expected: Vec<u8> = vec![
+            0x00, 0x04, b'r', b'e', b'a', b'd', // tool_name
+            0x00, 0x01, // 1 arg key
+            0x00, 0x04, b'p', b'a', b't', b'h', // "path"
+            0x00, 0x00, 0x00, 0x00, 0x65, 0x53, 0xF1, 0x00, // expiry 1700000000
+            0x00, 0x04, 0xDE, 0xAD, 0xBE, 0xEF, // nonce
+            0x00, 0x06, b'c', b'l', b'i', b'e', b'n', b't', // audience
+            0x00, 0x04, b'k', b'e', b'y', b'1', // kid
+        ];
+
+        assert_eq!(bytes, expected);
+    }
 }
