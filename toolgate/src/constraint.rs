@@ -255,4 +255,80 @@ mod tests {
         assert!(inner.is_subset_of(&outer));
         assert!(!outer.is_subset_of(&inner));
     }
+
+    // ===== JSON serde tests =====
+
+    #[test]
+    fn json_exact() {
+        let c = Constraint::Exact("hello".to_string());
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"exact\""));
+        assert!(json.contains("\"value\":\"hello\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+    }
+
+    #[test]
+    fn json_oneof() {
+        let c = Constraint::OneOf(vec!["a".to_string(), "b".to_string()]);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"one_of\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+    }
+
+    #[test]
+    fn json_prefix() {
+        let c = Constraint::Prefix("/tmp/".to_string());
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"prefix\""));
+        assert!(json.contains("\"value\":\"/tmp/\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+    }
+
+    #[test]
+    fn json_maxlen() {
+        let c = Constraint::MaxLen(256);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"max_len\""));
+        assert!(json.contains("\"value\":256"));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+    }
+
+    #[test]
+    fn json_intrange() {
+        let c = Constraint::IntRange { min: -10, max: 100 };
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"int_range\""));
+        assert!(json.contains("\"min\":-10"));
+        assert!(json.contains("\"max\":100"));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+    }
+
+    #[test]
+    fn json_constraints_map() {
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+        constraints.insert(
+            "mode".to_string(),
+            Constraint::OneOf(vec!["r".to_string(), "w".to_string()]),
+        );
+        constraints.insert(
+            "limit".to_string(),
+            Constraint::IntRange { min: 1, max: 100 },
+        );
+
+        let json = serde_json::to_string(&constraints).unwrap();
+        let parsed: Constraints = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed, constraints);
+    }
 }
