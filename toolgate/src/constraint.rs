@@ -10,17 +10,20 @@ use std::collections::BTreeMap;
 /// When a token has a constraint attached to an argument key, any call using
 /// that key must provide a value that satisfies the constraint.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum Constraint {
     /// Value must match exactly.
     Exact(String),
     /// Value must be one of the specified values.
+    #[serde(rename = "one_of")]
     OneOf(Vec<String>),
     /// Value must start with the given prefix.
     Prefix(String),
     /// Value must have at most this many bytes (UTF-8 length).
+    #[serde(rename = "max_len")]
     MaxLen(usize),
     /// Value must be a parseable integer in the given range (inclusive).
+    #[serde(rename = "int_range")]
     IntRange { min: i64, max: i64 },
 }
 
