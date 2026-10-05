@@ -1,10 +1,13 @@
 //! Token creation, attenuation, and verification.
 
+use std::collections::BTreeMap;
+
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
-use crate::encoding::encode_canonical_v3;
+use crate::constraint::Constraints;
+use crate::encoding::encode_canonical_v4;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -22,6 +25,8 @@ pub struct Token {
     pub audience: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub constraints: Option<Constraints>,
 }
 
 /// Errors that can occur during token operations.
@@ -73,7 +78,7 @@ impl Token {
         arg_keys: Vec<String>,
         expiry: u64,
     ) -> Self {
-        Self::mint_with_kid(secret, tool_name, arg_keys, expiry, None, None)
+        Self::mint_full(secret, tool_name, arg_keys, expiry, None, None, None)
     }
 
     /// Mint a new token with an optional audience binding.
@@ -88,7 +93,7 @@ impl Token {
         expiry: u64,
         audience: Option<String>,
     ) -> Self {
-        Self::mint_with_kid(secret, tool_name, arg_keys, expiry, audience, None)
+        Self::mint_full(secret, tool_name, arg_keys, expiry, audience, None, None)
     }
 
     /// Mint a new token with optional audience binding and key identifier.
@@ -103,16 +108,36 @@ impl Token {
         audience: Option<String>,
         kid: Option<String>,
     ) -> Self {
+        Self::mint_full(secret, tool_name, arg_keys, expiry, audience, kid, None)
+    }
+
+    /// Mint a new token with optional audience, key identifier, and constraints.
+    ///
+    /// Constraints restrict the allowed values for specific argument keys.
+    /// Keys with constraints must also be present in `arg_keys`.
+    pub fn mint_full(
+        secret: &[u8],
+        tool_name: impl Into<String>,
+        arg_keys: Vec<String>,
+        expiry: u64,
+        audience: Option<String>,
+        kid: Option<String>,
+        constraints: Option<Constraints>,
+    ) -> Self {
         let tool_name = tool_name.into();
         let nonce: [u8; 16] = rand::random();
 
-        let canonical = encode_canonical_v3(
+        // Normalize empty constraints to None
+        let constraints = constraints.filter(|c| !c.is_empty());
+
+        let canonical = encode_canonical_v4(
             &tool_name,
             &arg_keys,
             expiry,
             &nonce,
             audience.as_deref(),
             kid.as_deref(),
+            constraints.as_ref(),
         );
         let mut hmac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
         hmac.update(&canonical);
@@ -126,6 +151,7 @@ impl Token {
             mac,
             audience,
             kid,
+            constraints,
         }
     }
 
@@ -167,20 +193,21 @@ impl Token {
         }
 
         // Recompute MAC
-        let canonical = encode_canonical_v3(
+        let canonical = encode_canonical_v4(
             &self.tool_name,
             &self.arg_keys,
             self.expiry,
             &self.nonce,
             self.audience.as_deref(),
             self.kid.as_deref(),
+            self.constraints.as_ref(),
         );
         let mut hmac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
         hmac.update(&canonical);
-        let expected = hmac.finalize().into_bytes();
+        let expected_mac = hmac.finalize().into_bytes();
 
         // Constant-time comparison
-        if expected.ct_eq(&self.mac).into() {
+        if expected_mac.ct_eq(&self.mac).into() {
             Ok(())
         } else {
             Err(TokenError::InvalidMac)
@@ -229,12 +256,26 @@ impl Token {
     }
 
     /// Attenuate the token by removing argument keys or shortening expiry.
-    /// Cannot add keys or extend expiry. Audience and kid are preserved unchanged.
+    /// Cannot add keys or extend expiry. Audience, kid, and constraints are preserved unchanged.
+    ///
+    /// To attenuate with constraints, use `attenuate_with_constraints`.
     pub fn attenuate(
         &self,
         secret: &[u8],
         new_arg_keys: Option<Vec<String>>,
         new_expiry: Option<u64>,
+    ) -> Result<Token, TokenError> {
+        self.attenuate_with_constraints(secret, new_arg_keys, new_expiry, None)
+    }
+
+    /// Attenuate the token by removing argument keys, shortening expiry, or adding/tightening constraints.
+    /// Cannot add keys, extend expiry, or loosen constraints. Audience and kid are preserved unchanged.
+    pub fn attenuate_with_constraints(
+        &self,
+        secret: &[u8],
+        new_arg_keys: Option<Vec<String>>,
+        new_expiry: Option<u64>,
+        new_constraints: Option<Constraints>,
     ) -> Result<Token, TokenError> {
         // Validate attenuation doesn't widen
         let final_arg_keys = match new_arg_keys {
@@ -260,16 +301,21 @@ impl Token {
             None => self.expiry,
         };
 
+        // Merge constraints: new constraints must be subset of old constraints
+        let final_constraints =
+            Self::merge_constraints(self.constraints.as_ref(), new_constraints.as_ref())?;
+
         // Generate new nonce and MAC for the attenuated token
         // Audience and kid are preserved unchanged
         let nonce: [u8; 16] = rand::random();
-        let canonical = encode_canonical_v3(
+        let canonical = encode_canonical_v4(
             &self.tool_name,
             &final_arg_keys,
             final_expiry,
             &nonce,
             self.audience.as_deref(),
             self.kid.as_deref(),
+            final_constraints.as_ref(),
         );
         let mut hmac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
         hmac.update(&canonical);
@@ -283,7 +329,52 @@ impl Token {
             mac,
             audience: self.audience.clone(),
             kid: self.kid.clone(),
+            constraints: final_constraints,
         })
+    }
+
+    /// Merge constraints, ensuring attenuation only tightens.
+    fn merge_constraints(
+        old: Option<&Constraints>,
+        new: Option<&Constraints>,
+    ) -> Result<Option<Constraints>, TokenError> {
+        use crate::constraint::Constraint;
+
+        match (old, new) {
+            // No old constraints, any new constraints are allowed (including None)
+            (None, None) => Ok(None),
+            (None, Some(new)) => Ok(Some(new.clone())),
+
+            // Old constraints preserved if no new ones specified
+            (Some(old), None) => Ok(Some(old.clone())),
+
+            // Must merge and validate
+            (Some(old), Some(new)) => {
+                let mut merged: BTreeMap<String, Constraint> = old.clone();
+
+                for (key, new_constraint) in new.iter() {
+                    match old.get(key) {
+                        // Key had no constraint, adding one is allowed
+                        None => {
+                            merged.insert(key.clone(), new_constraint.clone());
+                        }
+                        // Key had constraint, new one must be subset (tighter)
+                        Some(old_constraint) => {
+                            if !new_constraint.is_subset_of(old_constraint) {
+                                return Err(TokenError::AttenuationWidens);
+                            }
+                            merged.insert(key.clone(), new_constraint.clone());
+                        }
+                    }
+                }
+
+                if merged.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(merged))
+                }
+            }
+        }
     }
 }
 

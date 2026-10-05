@@ -188,6 +188,7 @@ impl Token {
             mac,
             audience,
             kid,
+            constraints: None, // Wire format v2 does not include constraints
         })
     }
 }
