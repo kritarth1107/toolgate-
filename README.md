@@ -19,7 +19,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-toolgate = "0.2"
+toolgate = "0.3"
 ```
 
 Or install the CLI:
@@ -75,6 +75,50 @@ let restricted = token.attenuate(
     Some(1699500000),          // shorter expiry
 )?;
 ```
+
+## Key Rotation
+
+The `Keyring` type manages multiple signing keys for seamless key rotation:
+
+```rust
+use toolgate::Keyring;
+
+let mut keyring = Keyring::new();
+
+// Add keys - first key becomes active automatically
+keyring.add("key-2024", b"old-secret-key-32-bytes-here!!".to_vec());
+keyring.add("key-2025", b"new-secret-key-32-bytes-here!!".to_vec());
+
+// Set the newer key as active for minting
+keyring.set_active("key-2025").unwrap();
+
+// Mint with the active key - token includes kid field
+let token = keyring.mint("read_file", vec!["path".into()], 2000000000).unwrap();
+assert_eq!(token.kid, Some("key-2025".to_string()));
+
+// Verify through keyring (looks up key by kid)
+keyring.verify(&token, 1999999999).unwrap();
+
+// Old tokens still verify until their key is retired
+let old_token = Token::mint_with_kid(
+    b"old-secret-key-32-bytes-here!!",
+    "read_file",
+    vec!["path".into()],
+    2000000000,
+    None,
+    Some("key-2024".to_string()),
+);
+keyring.verify(&old_token, 1999999999).unwrap();
+
+// Retire old key when ready - old tokens will fail with UnknownKeyId
+keyring.retire("key-2024");
+```
+
+Key points:
+- Tokens carry an optional `kid` (key identifier) covered by the MAC
+- `Keyring::verify` looks up the signing key by `kid`
+- Attenuation preserves the original `kid`
+- Tokens without `kid` cannot be verified through a keyring (use `Token::verify` directly)
 
 ## CLI Usage
 
@@ -138,7 +182,7 @@ Error kinds: `invalid_mac`, `expired`, `audience_mismatch`, `tool_mismatch`, `ar
 
 Secrets can be hex-encoded with `"secret": "hex:deadbeef..."`.
 
-## Canonical Byte Encoding (v2)
+## Canonical Byte Encoding (v3)
 
 For cross-implementation compatibility, tokens are signed over this exact byte layout (all integers big-endian):
 
@@ -150,8 +194,9 @@ For cross-implementation compatibility, tokens are signed over this exact byte l
 | expiry | u64 (unix seconds) |
 | nonce | u16 length + raw bytes |
 | audience | u16 length + UTF-8 bytes (0 = unbound) |
+| kid | u16 length + UTF-8 bytes (0 = no key id) |
 
-**Example**: `encode("read", ["a", "b"], 1000, [0xAB, 0xCD], None)` produces:
+**Example**: `encode("read", ["a", "b"], 1000, [0xAB, 0xCD], None, None)` produces:
 
 ```
 00 04 r e a d           # tool_name: len=4, "read"
@@ -161,6 +206,7 @@ For cross-implementation compatibility, tokens are signed over this exact byte l
 00 00 00 00 00 00 03 e8 # expiry = 1000
 00 02 ab cd             # nonce: len=2, bytes
 00 00                   # audience: len=0 (unbound)
+00 00                   # kid: len=0 (none)
 ```
 
 The HMAC-SHA256 is computed over these concatenated bytes.
@@ -185,6 +231,7 @@ Wire format is typically smaller than JSON and suitable for constrained channels
 
 ## Version History
 
+- **0.3.0**: Add key identifiers (`kid`) and `Keyring` type for key rotation
 - **0.2.0**: Add audience binding, verify_call API, compact wire codec, CLI check-call command
 - **0.1.0**: Initial release with mint, attenuate, verify
 
