@@ -40,10 +40,30 @@
 //!     None,
 //! ).is_ok());
 //! ```
+//!
+//! # Key Rotation with Keyring
+//!
+//! ```
+//! use toolgate::Keyring;
+//!
+//! let mut keyring = Keyring::new();
+//! keyring.add("key-2024", b"secret-key-2024-bytes-here!!!!!".to_vec());
+//! keyring.add("key-2025", b"secret-key-2025-bytes-here!!!!!".to_vec());
+//! keyring.set_active("key-2025").unwrap();
+//!
+//! // Mint with the active key
+//! let token = keyring.mint("read_file", vec!["path".into()], 2000000000).unwrap();
+//! assert_eq!(token.kid, Some("key-2025".to_string()));
+//!
+//! // Verify through keyring (looks up key by kid)
+//! assert!(keyring.verify(&token, 1999999999).is_ok());
+//! ```
 
 pub mod encoding;
+pub mod keyring;
 pub mod token;
 pub mod wire;
 
+pub use keyring::Keyring;
 pub use token::{Token, TokenError};
 pub use wire::WireError;

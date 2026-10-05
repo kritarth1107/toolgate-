@@ -11,7 +11,11 @@
 //! - All v1 fields
 //! - audience: u16 length + UTF-8 bytes (length 0 means unbound/None)
 //!
-//! The v2 format appends audience after nonce. Tokens without audience
+//! Format v3 (backward-compatible extension):
+//! - All v2 fields
+//! - kid: u16 length + UTF-8 bytes (length 0 means no key id)
+//!
+//! The v3 format appends kid after audience. Tokens without kid
 //! encode with length 0, ensuring backward-compatible MAC verification.
 
 /// Encode a token's fields into canonical bytes for signing/verification (v1 format).
@@ -21,7 +25,7 @@ pub fn encode_canonical(
     expiry: u64,
     nonce: &[u8],
 ) -> Vec<u8> {
-    encode_canonical_v2(tool_name, arg_keys, expiry, nonce, None)
+    encode_canonical_v3(tool_name, arg_keys, expiry, nonce, None, None)
 }
 
 /// Encode a token's fields into canonical bytes for signing/verification (v2 format with audience).
@@ -31,6 +35,18 @@ pub fn encode_canonical_v2(
     expiry: u64,
     nonce: &[u8],
     audience: Option<&str>,
+) -> Vec<u8> {
+    encode_canonical_v3(tool_name, arg_keys, expiry, nonce, audience, None)
+}
+
+/// Encode a token's fields into canonical bytes for signing/verification (v3 format with kid).
+pub fn encode_canonical_v3(
+    tool_name: &str,
+    arg_keys: &[String],
+    expiry: u64,
+    nonce: &[u8],
+    audience: Option<&str>,
+    kid: Option<&str>,
 ) -> Vec<u8> {
     let mut buf = Vec::new();
 
@@ -69,6 +85,18 @@ pub fn encode_canonical_v2(
         }
     }
 
+    // Kid: length-prefixed (0 means no key id)
+    match kid {
+        Some(k) => {
+            let kid_bytes = k.as_bytes();
+            buf.extend_from_slice(&(kid_bytes.len() as u16).to_be_bytes());
+            buf.extend_from_slice(kid_bytes);
+        }
+        None => {
+            buf.extend_from_slice(&0u16.to_be_bytes());
+        }
+    }
+
     buf
 }
 
@@ -97,17 +125,18 @@ mod tests {
     #[test]
     fn encoding_is_stable() {
         // Known inputs produce known output - this ensures cross-implementation compatibility
-        // v2 format includes audience (length 0 for unbound)
+        // v3 format includes audience and kid (length 0 for unbound/none)
         let bytes = encode_canonical("read", &["a".into(), "b".into()], 1000, &[0xAB, 0xCD]);
 
         let expected: Vec<u8> = vec![
-            0x00, 0x04, b'r', b'e', b'a', b'd', // tool_name
+            0x00, 0x04, b'r', b'e', b'a', b'd', // tool_name: len=4, "read"
             0x00, 0x02, // arg_keys count
             0x00, 0x01, b'a', // key "a"
             0x00, 0x01, b'b', // key "b"
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xE8, // expiry 1000
-            0x00, 0x02, 0xAB, 0xCD, // nonce
+            0x00, 0x02, 0xAB, 0xCD, // nonce: len=2, bytes
             0x00, 0x00, // audience length 0 (unbound)
+            0x00, 0x00, // kid length 0 (none)
         ];
 
         assert_eq!(bytes, expected);
@@ -123,6 +152,7 @@ mod tests {
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // expiry 0
             0x00, 0x00, // empty nonce
             0x00, 0x00, // audience length 0
+            0x00, 0x00, // kid length 0
         ];
 
         assert_eq!(bytes, expected);
@@ -140,6 +170,41 @@ mod tests {
             0x00, 0x01, 0xAB, // nonce
             0x00, 0x0A, // audience length 10
             b'c', b'l', b'i', b'e', b'n', b't', b'-', b'1', b'2', b'3', // "client-123"
+            0x00, 0x00, // kid length 0 (none)
+        ];
+
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn encoding_with_kid() {
+        let bytes = encode_canonical_v3("read", &["a".into()], 1000, &[0xAB], None, Some("key-1"));
+
+        let expected: Vec<u8> = vec![
+            0x00, 0x04, b'r', b'e', b'a', b'd', // tool_name
+            0x00, 0x01, // arg_keys count
+            0x00, 0x01, b'a', // key "a"
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xE8, // expiry 1000
+            0x00, 0x01, 0xAB, // nonce
+            0x00, 0x00, // audience length 0 (unbound)
+            0x00, 0x05, // kid length 5
+            b'k', b'e', b'y', b'-', b'1', // "key-1"
+        ];
+
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn encoding_with_audience_and_kid() {
+        let bytes = encode_canonical_v3("r", &[], 0, &[], Some("aud"), Some("k1"));
+
+        let expected: Vec<u8> = vec![
+            0x00, 0x01, b'r', // tool_name
+            0x00, 0x00, // zero arg_keys
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // expiry 0
+            0x00, 0x00, // empty nonce
+            0x00, 0x03, b'a', b'u', b'd', // audience "aud"
+            0x00, 0x02, b'k', b'1', // kid "k1"
         ];
 
         assert_eq!(bytes, expected);
@@ -150,5 +215,12 @@ mod tests {
         let with_none = encode_canonical_v2("tool", &[], 0, &[], None);
         let without_audience = encode_canonical("tool", &[], 0, &[]);
         assert_eq!(with_none, without_audience);
+    }
+
+    #[test]
+    fn encoding_v2_equals_v3_without_kid() {
+        let v2 = encode_canonical_v2("tool", &["a".into()], 1000, &[1, 2], Some("aud"));
+        let v3 = encode_canonical_v3("tool", &["a".into()], 1000, &[1, 2], Some("aud"), None);
+        assert_eq!(v2, v3);
     }
 }

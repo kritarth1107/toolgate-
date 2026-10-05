@@ -4,7 +4,7 @@ use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
-use crate::encoding::encode_canonical_v2;
+use crate::encoding::encode_canonical_v3;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -20,6 +20,8 @@ pub struct Token {
     pub mac: Vec<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audience: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kid: Option<String>,
 }
 
 /// Errors that can occur during token operations.
@@ -31,6 +33,9 @@ pub enum TokenError {
     AudienceMismatch,
     ToolMismatch { expected: String, got: String },
     ArgKeyNotAllowed { key: String },
+    UnknownKeyId { kid: String },
+    NoActiveKey,
+    MissingKeyId,
 }
 
 impl std::fmt::Display for TokenError {
@@ -46,6 +51,11 @@ impl std::fmt::Display for TokenError {
             TokenError::ArgKeyNotAllowed { key } => {
                 write!(f, "argument key '{}' not in token allowlist", key)
             }
+            TokenError::UnknownKeyId { kid } => {
+                write!(f, "unknown key id: '{}'", kid)
+            }
+            TokenError::NoActiveKey => write!(f, "no active key in keyring"),
+            TokenError::MissingKeyId => write!(f, "token has no key id"),
         }
     }
 }
@@ -55,14 +65,15 @@ impl std::error::Error for TokenError {}
 impl Token {
     /// Mint a new token with the given parameters.
     ///
-    /// Use `mint_with_audience` to create a token bound to a specific audience.
+    /// Use `mint_with_audience` to create a token bound to a specific audience,
+    /// or `mint_with_kid` to include a key identifier for keyring-based verification.
     pub fn mint(
         secret: &[u8],
         tool_name: impl Into<String>,
         arg_keys: Vec<String>,
         expiry: u64,
     ) -> Self {
-        Self::mint_with_audience(secret, tool_name, arg_keys, expiry, None)
+        Self::mint_with_kid(secret, tool_name, arg_keys, expiry, None, None)
     }
 
     /// Mint a new token with an optional audience binding.
@@ -77,11 +88,32 @@ impl Token {
         expiry: u64,
         audience: Option<String>,
     ) -> Self {
+        Self::mint_with_kid(secret, tool_name, arg_keys, expiry, audience, None)
+    }
+
+    /// Mint a new token with optional audience binding and key identifier.
+    ///
+    /// The `kid` (key identifier) is included in the MAC computation and allows
+    /// verifiers to look up the correct signing key from a keyring.
+    pub fn mint_with_kid(
+        secret: &[u8],
+        tool_name: impl Into<String>,
+        arg_keys: Vec<String>,
+        expiry: u64,
+        audience: Option<String>,
+        kid: Option<String>,
+    ) -> Self {
         let tool_name = tool_name.into();
         let nonce: [u8; 16] = rand::random();
 
-        let canonical =
-            encode_canonical_v2(&tool_name, &arg_keys, expiry, &nonce, audience.as_deref());
+        let canonical = encode_canonical_v3(
+            &tool_name,
+            &arg_keys,
+            expiry,
+            &nonce,
+            audience.as_deref(),
+            kid.as_deref(),
+        );
         let mut hmac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
         hmac.update(&canonical);
         let mac = hmac.finalize().into_bytes().to_vec();
@@ -93,6 +125,7 @@ impl Token {
             nonce: nonce.to_vec(),
             mac,
             audience,
+            kid,
         }
     }
 
@@ -134,12 +167,13 @@ impl Token {
         }
 
         // Recompute MAC
-        let canonical = encode_canonical_v2(
+        let canonical = encode_canonical_v3(
             &self.tool_name,
             &self.arg_keys,
             self.expiry,
             &self.nonce,
             self.audience.as_deref(),
+            self.kid.as_deref(),
         );
         let mut hmac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
         hmac.update(&canonical);
@@ -195,7 +229,7 @@ impl Token {
     }
 
     /// Attenuate the token by removing argument keys or shortening expiry.
-    /// Cannot add keys or extend expiry. Audience is preserved unchanged.
+    /// Cannot add keys or extend expiry. Audience and kid are preserved unchanged.
     pub fn attenuate(
         &self,
         secret: &[u8],
@@ -227,14 +261,15 @@ impl Token {
         };
 
         // Generate new nonce and MAC for the attenuated token
-        // Audience is preserved unchanged
+        // Audience and kid are preserved unchanged
         let nonce: [u8; 16] = rand::random();
-        let canonical = encode_canonical_v2(
+        let canonical = encode_canonical_v3(
             &self.tool_name,
             &final_arg_keys,
             final_expiry,
             &nonce,
             self.audience.as_deref(),
+            self.kid.as_deref(),
         );
         let mut hmac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
         hmac.update(&canonical);
@@ -247,6 +282,7 @@ impl Token {
             nonce: nonce.to_vec(),
             mac,
             audience: self.audience.clone(),
+            kid: self.kid.clone(),
         })
     }
 }
@@ -291,6 +327,7 @@ mod tests {
         assert_eq!(token.nonce.len(), 16);
         assert_eq!(token.mac.len(), 32);
         assert_eq!(token.audience, None);
+        assert_eq!(token.kid, None);
 
         // Verify with time before expiry
         assert!(token.verify(SECRET, 1999999999).is_ok());
@@ -606,5 +643,88 @@ mod tests {
 
         let result = token.verify_call(SECRET, 1999999999, "ping", &["extra"], None);
         assert!(matches!(result, Err(TokenError::ArgKeyNotAllowed { .. })));
+    }
+
+    // ===== Key ID tests =====
+
+    #[test]
+    fn mint_with_kid() {
+        let token = Token::mint_with_kid(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            Some("key-2024".to_string()),
+        );
+
+        assert_eq!(token.kid, Some("key-2024".to_string()));
+        assert!(token.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn kid_included_in_mac() {
+        let token1 = Token::mint_with_kid(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            Some("key-1".to_string()),
+        );
+
+        // Verify that changing kid breaks verification (kid is covered by MAC)
+        let mut tampered = token1.clone();
+        tampered.kid = Some("key-2".to_string());
+        assert_eq!(
+            tampered.verify(SECRET, 1999999999),
+            Err(TokenError::InvalidMac)
+        );
+    }
+
+    #[test]
+    fn kid_preserved_after_attenuation() {
+        let token = Token::mint_with_kid(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into()],
+            2000000000,
+            Some("client-abc".to_string()),
+            Some("key-2024".to_string()),
+        );
+
+        let attenuated = token
+            .attenuate(SECRET, Some(vec!["path".into()]), None)
+            .unwrap();
+
+        assert_eq!(attenuated.kid, Some("key-2024".to_string()));
+        assert_eq!(attenuated.audience, Some("client-abc".to_string()));
+        assert!(attenuated.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn kid_json_roundtrip() {
+        let token = Token::mint_with_kid(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            Some("key-2024".to_string()),
+        );
+
+        let json = serde_json::to_string(&token).unwrap();
+        assert!(json.contains("key-2024"));
+
+        let parsed: Token = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.kid, Some("key-2024".to_string()));
+        assert!(parsed.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn no_kid_omitted_from_json() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+        let json = serde_json::to_string(&token).unwrap();
+        assert!(!json.contains("kid"));
     }
 }

@@ -223,6 +223,9 @@ fn error_to_string(e: &TokenError) -> String {
         TokenError::AudienceMismatch => "audience_mismatch".to_string(),
         TokenError::ToolMismatch { .. } => "tool_mismatch".to_string(),
         TokenError::ArgKeyNotAllowed { .. } => "arg_key_not_allowed".to_string(),
+        TokenError::UnknownKeyId { .. } => "unknown_key_id".to_string(),
+        TokenError::NoActiveKey => "no_active_key".to_string(),
+        TokenError::MissingKeyId => "missing_key_id".to_string(),
     }
 }
 
@@ -234,5 +237,8 @@ fn error_to_kind(e: &TokenError) -> String {
         TokenError::AudienceMismatch => "audience_mismatch".to_string(),
         TokenError::ToolMismatch { .. } => "tool_mismatch".to_string(),
         TokenError::ArgKeyNotAllowed { .. } => "arg_key_not_allowed".to_string(),
+        TokenError::UnknownKeyId { .. } => "unknown_key_id".to_string(),
+        TokenError::NoActiveKey => "no_active_key".to_string(),
+        TokenError::MissingKeyId => "missing_key_id".to_string(),
     }
 }

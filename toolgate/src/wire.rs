@@ -3,11 +3,11 @@
 //! This module provides a space-efficient binary encoding for tokens,
 //! suitable for transmission over constrained channels.
 //!
-//! ## Wire Format (all integers big-endian)
+//! ## Wire Format v2 (all integers big-endian)
 //!
 //! | Field | Encoding |
 //! |-------|----------|
-//! | version | u8 (currently 1) |
+//! | version | u8 (currently 2) |
 //! | tool_name | u16 length + UTF-8 bytes |
 //! | arg_keys_count | u16 |
 //! | arg_keys | for each: u16 length + UTF-8 bytes |
@@ -15,11 +15,17 @@
 //! | nonce | u8 length + bytes |
 //! | mac | u8 length + bytes |
 //! | audience | u16 length + UTF-8 bytes (0 = none) |
+//! | kid | u16 length + UTF-8 bytes (0 = none) |
+//!
+//! Wire format v1 is still supported for decoding (no kid field).
 
 use crate::Token;
 
-/// Wire format version
-const WIRE_VERSION: u8 = 1;
+/// Current wire format version (supports kid field)
+const WIRE_VERSION: u8 = 2;
+
+/// Minimum supported wire format version
+const WIRE_VERSION_MIN: u8 = 1;
 
 /// Errors that can occur during wire encoding/decoding.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +33,7 @@ pub enum WireError {
     UnsupportedVersion(u8),
     UnexpectedEof,
     InvalidUtf8,
+    #[allow(dead_code)]
     BufferTooSmall,
 }
 
@@ -87,10 +94,24 @@ impl Token {
             }
         }
 
+        // Kid (optional, v2+)
+        match &self.kid {
+            Some(kid) => {
+                let kid_bytes = kid.as_bytes();
+                buf.extend_from_slice(&(kid_bytes.len() as u16).to_be_bytes());
+                buf.extend_from_slice(kid_bytes);
+            }
+            None => {
+                buf.extend_from_slice(&0u16.to_be_bytes());
+            }
+        }
+
         buf
     }
 
     /// Decode a token from compact binary wire format.
+    ///
+    /// Supports both v1 (no kid) and v2 (with kid) formats.
     pub fn from_wire(data: &[u8]) -> Result<Token, WireError> {
         let mut pos = 0;
 
@@ -106,7 +127,7 @@ impl Token {
 
         // Version
         let version = *read_bytes(&mut pos, 1)?.first().unwrap();
-        if version != WIRE_VERSION {
+        if !(WIRE_VERSION_MIN..=WIRE_VERSION).contains(&version) {
             return Err(WireError::UnsupportedVersion(version));
         }
 
@@ -146,6 +167,19 @@ impl Token {
             None
         };
 
+        // Kid (v2+ only)
+        let kid = if version >= 2 {
+            let kid_len = u16::from_be_bytes(read_bytes(&mut pos, 2)?.try_into().unwrap()) as usize;
+            if kid_len > 0 {
+                let kid_bytes = read_bytes(&mut pos, kid_len)?;
+                Some(String::from_utf8(kid_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(Token {
             tool_name,
             arg_keys,
@@ -153,6 +187,7 @@ impl Token {
             nonce,
             mac,
             audience,
+            kid,
         })
     }
 }
@@ -181,6 +216,7 @@ mod tests {
         assert_eq!(decoded.nonce, token.nonce);
         assert_eq!(decoded.mac, token.mac);
         assert_eq!(decoded.audience, token.audience);
+        assert_eq!(decoded.kid, token.kid);
         assert!(decoded.verify(SECRET, 1999999999).is_ok());
     }
 
@@ -204,6 +240,45 @@ mod tests {
     }
 
     #[test]
+    fn wire_roundtrip_with_kid() {
+        let token = Token::mint_with_kid(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            Some("key-2024".to_string()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.kid, Some("key-2024".to_string()));
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn wire_roundtrip_with_audience_and_kid() {
+        let token = Token::mint_with_kid(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            Some("client-abc".to_string()),
+            Some("key-2024".to_string()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.audience, Some("client-abc".to_string()));
+        assert_eq!(decoded.kid, Some("key-2024".to_string()));
+        assert!(decoded
+            .verify_with_audience(SECRET, 1999999999, Some("client-abc"))
+            .is_ok());
+    }
+
+    #[test]
     fn wire_roundtrip_empty_keys() {
         let token = Token::mint(SECRET, "ping", vec![], 2000000000);
 
@@ -220,6 +295,7 @@ mod tests {
         let wire = token.to_wire();
 
         assert_eq!(wire[0], WIRE_VERSION);
+        assert_eq!(wire[0], 2); // Current version is 2
     }
 
     #[test]
@@ -230,6 +306,16 @@ mod tests {
 
         let result = Token::from_wire(&data);
         assert_eq!(result, Err(WireError::UnsupportedVersion(99)));
+    }
+
+    #[test]
+    fn wire_version_0_unsupported() {
+        let mut data = vec![0u8]; // Version 0 is below minimum
+        data.extend_from_slice(&[0, 4]);
+        data.extend_from_slice(b"test");
+
+        let result = Token::from_wire(&data);
+        assert_eq!(result, Err(WireError::UnsupportedVersion(0)));
     }
 
     #[test]
