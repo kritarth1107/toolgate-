@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-10-05
+
+### Added
+- **Argument value constraints**: Tokens can now restrict argument values, not just keys
+  - `Constraint::Exact(String)`: value must match exactly
+  - `Constraint::OneOf(Vec<String>)`: value must be one of allowed values
+  - `Constraint::Prefix(String)`: value must start with prefix
+  - `Constraint::MaxLen(usize)`: value must have at most N bytes
+  - `Constraint::IntRange { min, max }`: value must parse as integer in range
+- **`Token::mint_full()`**: Mint tokens with all parameters including constraints
+- **`Token::attenuate_with_constraints()`**: Attenuate with constraint tightening
+- **`Token::verify_call_with_args()`**: Verify calls with actual argument values
+- **`Keyring::verify_call_with_args()`**: Same via keyring for key rotation
+- **`ConstraintViolation` error variant**: Returned when argument value fails constraint
+- **CLI constraints support**: `tg mint`, `tg attenuate` accept `constraints` field; `tg check-call` accepts `args` field for value validation
+
+### Changed
+- **Canonical encoding bumped to v4**: Adds constraints after kid field. Tokens without constraints encode identically to v3 for backward compatibility.
+- **Wire format bumped to v3**: Adds constraints. Decoding supports v1, v2, and v3.
+
+### Notes
+- Constraints use deterministic encoding: keys sorted, OneOf values sorted
+- Attenuation can only tighten constraints (longer prefix, subset of values, smaller max, narrower range)
+- Empty constraints map is normalized to None
+
 ## [0.3.0] - 2026-10-05
 
 ### Added
