@@ -59,11 +59,13 @@
 //! assert!(keyring.verify(&token, 1999999999).is_ok());
 //! ```
 
+pub mod constraint;
 pub mod encoding;
 pub mod keyring;
 pub mod token;
 pub mod wire;
 
+pub use constraint::{Constraint, Constraints};
 pub use keyring::Keyring;
 pub use token::{Token, TokenError};
 pub use wire::WireError;
