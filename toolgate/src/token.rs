@@ -46,6 +46,12 @@ pub enum TokenError {
     NoActiveKey,
     MissingKeyId,
     ConstraintViolation { key: String },
+    /// Token has been revoked (jti found in revocation list).
+    Revoked { jti: String },
+    /// Token replay detected (use count exceeded).
+    ReplayDetected { jti: String },
+    /// Token has no jti but revocation/replay check was requested.
+    MissingJti,
 }
 
 impl std::fmt::Display for TokenError {
@@ -69,6 +75,13 @@ impl std::fmt::Display for TokenError {
             TokenError::ConstraintViolation { key } => {
                 write!(f, "argument '{}' violates constraint", key)
             }
+            TokenError::Revoked { jti } => {
+                write!(f, "token has been revoked (jti: {})", jti)
+            }
+            TokenError::ReplayDetected { jti } => {
+                write!(f, "token replay detected (jti: {})", jti)
+            }
+            TokenError::MissingJti => write!(f, "token has no jti for revocation/replay check"),
         }
     }
 }

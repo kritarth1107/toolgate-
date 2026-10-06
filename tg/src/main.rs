@@ -252,6 +252,9 @@ fn error_to_string(e: &TokenError) -> String {
         TokenError::NoActiveKey => "no_active_key".to_string(),
         TokenError::MissingKeyId => "missing_key_id".to_string(),
         TokenError::ConstraintViolation { .. } => "constraint_violation".to_string(),
+        TokenError::Revoked { .. } => "revoked".to_string(),
+        TokenError::ReplayDetected { .. } => "replay_detected".to_string(),
+        TokenError::MissingJti => "missing_jti".to_string(),
     }
 }
 
@@ -267,5 +270,8 @@ fn error_to_kind(e: &TokenError) -> String {
         TokenError::NoActiveKey => "no_active_key".to_string(),
         TokenError::MissingKeyId => "missing_key_id".to_string(),
         TokenError::ConstraintViolation { .. } => "constraint_violation".to_string(),
+        TokenError::Revoked { .. } => "revoked".to_string(),
+        TokenError::ReplayDetected { .. } => "replay_detected".to_string(),
+        TokenError::MissingJti => "missing_jti".to_string(),
     }
 }

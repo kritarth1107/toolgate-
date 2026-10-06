@@ -62,10 +62,12 @@
 pub mod constraint;
 pub mod encoding;
 pub mod keyring;
+pub mod revocation;
 pub mod token;
 pub mod wire;
 
 pub use constraint::{Constraint, Constraints};
 pub use keyring::Keyring;
+pub use revocation::RevocationList;
 pub use token::{Token, TokenError};
 pub use wire::WireError;
