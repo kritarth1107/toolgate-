@@ -3,11 +3,11 @@
 //! This module provides a space-efficient binary encoding for tokens,
 //! suitable for transmission over constrained channels.
 //!
-//! ## Wire Format v3 (all integers big-endian)
+//! ## Wire Format v4 (all integers big-endian)
 //!
 //! | Field | Encoding |
 //! |-------|----------|
-//! | version | u8 (currently 3) |
+//! | version | u8 (currently 4) |
 //! | tool_name | u16 length + UTF-8 bytes |
 //! | arg_keys_count | u16 |
 //! | arg_keys | for each: u16 length + UTF-8 bytes |
@@ -18,15 +18,16 @@
 //! | kid | u16 length + UTF-8 bytes (0 = none) |
 //! | constraints_count | u16 (0 = none) |
 //! | constraints | for each: key + type + data (same encoding as canonical) |
+//! | jti | u16 length + UTF-8 bytes (0 = none) |
 //!
-//! Wire format v1 (no kid) and v2 (no constraints) are still supported for decoding.
+//! Wire format v1 (no kid), v2 (no constraints), and v3 (no jti) are still supported for decoding.
 
 use crate::constraint::{Constraint, Constraints};
 use crate::Token;
 use std::collections::BTreeMap;
 
-/// Current wire format version (supports constraints)
-const WIRE_VERSION: u8 = 3;
+/// Current wire format version (supports jti)
+const WIRE_VERSION: u8 = 4;
 
 /// Minimum supported wire format version
 const WIRE_VERSION_MIN: u8 = 1;
@@ -238,6 +239,18 @@ impl Token {
             }
         }
 
+        // Jti (optional, v4+)
+        match &self.jti {
+            Some(jti) => {
+                let jti_bytes = jti.as_bytes();
+                buf.extend_from_slice(&(jti_bytes.len() as u16).to_be_bytes());
+                buf.extend_from_slice(jti_bytes);
+            }
+            None => {
+                buf.extend_from_slice(&0u16.to_be_bytes());
+            }
+        }
+
         buf
     }
 
@@ -329,6 +342,19 @@ impl Token {
             None
         };
 
+        // Jti (v4+ only)
+        let jti = if version >= 4 {
+            let jti_len = u16::from_be_bytes(read_bytes(&mut pos, 2)?.try_into().unwrap()) as usize;
+            if jti_len > 0 {
+                let jti_bytes = read_bytes(&mut pos, jti_len)?;
+                Some(String::from_utf8(jti_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         Ok(Token {
             tool_name,
             arg_keys,
@@ -338,6 +364,7 @@ impl Token {
             audience,
             kid,
             constraints,
+            jti,
         })
     }
 }
@@ -445,7 +472,7 @@ mod tests {
         let wire = token.to_wire();
 
         assert_eq!(wire[0], WIRE_VERSION);
-        assert_eq!(wire[0], 3); // Current version is 3
+        assert_eq!(wire[0], 4); // Current version is 4
     }
 
     #[test]

@@ -7,7 +7,7 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
 use crate::constraint::Constraints;
-use crate::encoding::encode_canonical_v4;
+use crate::encoding::encode_canonical_v5;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -27,6 +27,10 @@ pub struct Token {
     pub kid: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub constraints: Option<Constraints>,
+    /// Token identifier for revocation and replay detection (16 random bytes, hex-encoded).
+    /// When present, covered by the MAC. Attenuated tokens inherit their parent's jti.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jti: Option<String>,
 }
 
 /// Errors that can occur during token operations.
@@ -128,13 +132,48 @@ impl Token {
         kid: Option<String>,
         constraints: Option<Constraints>,
     ) -> Self {
+        Self::mint_with_jti(
+            secret,
+            tool_name,
+            arg_keys,
+            expiry,
+            audience,
+            kid,
+            constraints,
+            false,
+        )
+    }
+
+    /// Mint a new token with all parameters including optional token identifier.
+    ///
+    /// When `generate_jti` is true, a unique 16-byte token identifier is generated
+    /// and included in the MAC. This enables revocation and replay detection.
+    /// When false, no jti is generated (backward compatible with v0.4.0).
+    pub fn mint_with_jti(
+        secret: &[u8],
+        tool_name: impl Into<String>,
+        arg_keys: Vec<String>,
+        expiry: u64,
+        audience: Option<String>,
+        kid: Option<String>,
+        constraints: Option<Constraints>,
+        generate_jti: bool,
+    ) -> Self {
         let tool_name = tool_name.into();
         let nonce: [u8; 16] = rand::random();
 
         // Normalize empty constraints to None
         let constraints = constraints.filter(|c| !c.is_empty());
 
-        let canonical = encode_canonical_v4(
+        // Generate jti if requested
+        let jti = if generate_jti {
+            let jti_bytes: [u8; 16] = rand::random();
+            Some(hex::encode(jti_bytes))
+        } else {
+            None
+        };
+
+        let canonical = encode_canonical_v5(
             &tool_name,
             &arg_keys,
             expiry,
@@ -142,6 +181,7 @@ impl Token {
             audience.as_deref(),
             kid.as_deref(),
             constraints.as_ref(),
+            jti.as_deref(),
         );
         let mut hmac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
         hmac.update(&canonical);
@@ -156,6 +196,7 @@ impl Token {
             audience,
             kid,
             constraints,
+            jti,
         }
     }
 
@@ -197,7 +238,7 @@ impl Token {
         }
 
         // Recompute MAC
-        let canonical = encode_canonical_v4(
+        let canonical = encode_canonical_v5(
             &self.tool_name,
             &self.arg_keys,
             self.expiry,
@@ -205,6 +246,7 @@ impl Token {
             self.audience.as_deref(),
             self.kid.as_deref(),
             self.constraints.as_ref(),
+            self.jti.as_deref(),
         );
         let mut hmac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
         hmac.update(&canonical);
@@ -308,7 +350,7 @@ impl Token {
     }
 
     /// Attenuate the token by removing argument keys or shortening expiry.
-    /// Cannot add keys or extend expiry. Audience, kid, and constraints are preserved unchanged.
+    /// Cannot add keys or extend expiry. Audience, kid, jti, and constraints are preserved unchanged.
     ///
     /// To attenuate with constraints, use `attenuate_with_constraints`.
     pub fn attenuate(
@@ -321,7 +363,7 @@ impl Token {
     }
 
     /// Attenuate the token by removing argument keys, shortening expiry, or adding/tightening constraints.
-    /// Cannot add keys, extend expiry, or loosen constraints. Audience and kid are preserved unchanged.
+    /// Cannot add keys, extend expiry, or loosen constraints. Audience, kid, and jti are preserved unchanged.
     pub fn attenuate_with_constraints(
         &self,
         secret: &[u8],
@@ -358,9 +400,9 @@ impl Token {
             Self::merge_constraints(self.constraints.as_ref(), new_constraints.as_ref())?;
 
         // Generate new nonce and MAC for the attenuated token
-        // Audience and kid are preserved unchanged
+        // Audience, kid, and jti are preserved unchanged
         let nonce: [u8; 16] = rand::random();
-        let canonical = encode_canonical_v4(
+        let canonical = encode_canonical_v5(
             &self.tool_name,
             &final_arg_keys,
             final_expiry,
@@ -368,6 +410,7 @@ impl Token {
             self.audience.as_deref(),
             self.kid.as_deref(),
             final_constraints.as_ref(),
+            self.jti.as_deref(),
         );
         let mut hmac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
         hmac.update(&canonical);
@@ -382,6 +425,7 @@ impl Token {
             audience: self.audience.clone(),
             kid: self.kid.clone(),
             constraints: final_constraints,
+            jti: self.jti.clone(),
         })
     }
 

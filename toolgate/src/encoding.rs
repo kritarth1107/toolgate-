@@ -23,6 +23,10 @@
 //!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange)
 //!   - constraint_data: type-specific encoding
 //!
+//! Format v5 (backward-compatible extension):
+//! - All v4 fields
+//! - jti: u16 length + UTF-8 bytes (length 0 means no token identifier)
+//!
 //! Constraint data encoding:
 //! - Exact: u16 length + UTF-8 bytes
 //! - OneOf: u16 count + (for each value, sorted: u16 length + UTF-8 bytes)
@@ -30,8 +34,9 @@
 //! - MaxLen: u64
 //! - IntRange: i64 min + i64 max
 //!
-//! The v4 format appends constraints after kid. Tokens without constraints
-//! encode with count 0, ensuring backward-compatible MAC verification with v3.
+//! The v5 format appends jti after constraints. Tokens without jti
+//! encode identically to v4. Tokens without constraints and without jti
+//! encode identically to v3, ensuring backward compatibility.
 
 use crate::constraint::{Constraint, Constraints};
 
@@ -42,7 +47,7 @@ pub fn encode_canonical(
     expiry: u64,
     nonce: &[u8],
 ) -> Vec<u8> {
-    encode_canonical_v4(tool_name, arg_keys, expiry, nonce, None, None, None)
+    encode_canonical_v5(tool_name, arg_keys, expiry, nonce, None, None, None, None)
 }
 
 /// Encode a token's fields into canonical bytes for signing/verification (v2 format with audience).
@@ -53,7 +58,7 @@ pub fn encode_canonical_v2(
     nonce: &[u8],
     audience: Option<&str>,
 ) -> Vec<u8> {
-    encode_canonical_v4(tool_name, arg_keys, expiry, nonce, audience, None, None)
+    encode_canonical_v5(tool_name, arg_keys, expiry, nonce, audience, None, None, None)
 }
 
 /// Encode a token's fields into canonical bytes for signing/verification (v3 format with kid).
@@ -65,7 +70,7 @@ pub fn encode_canonical_v3(
     audience: Option<&str>,
     kid: Option<&str>,
 ) -> Vec<u8> {
-    encode_canonical_v4(tool_name, arg_keys, expiry, nonce, audience, kid, None)
+    encode_canonical_v5(tool_name, arg_keys, expiry, nonce, audience, kid, None, None)
 }
 
 /// Encode a token's fields into canonical bytes for signing/verification (v4 format with constraints).
@@ -77,6 +82,20 @@ pub fn encode_canonical_v4(
     audience: Option<&str>,
     kid: Option<&str>,
     constraints: Option<&Constraints>,
+) -> Vec<u8> {
+    encode_canonical_v5(tool_name, arg_keys, expiry, nonce, audience, kid, constraints, None)
+}
+
+/// Encode a token's fields into canonical bytes for signing/verification (v5 format with jti).
+pub fn encode_canonical_v5(
+    tool_name: &str,
+    arg_keys: &[String],
+    expiry: u64,
+    nonce: &[u8],
+    audience: Option<&str>,
+    kid: Option<&str>,
+    constraints: Option<&Constraints>,
+    jti: Option<&str>,
 ) -> Vec<u8> {
     let mut buf = Vec::new();
 
@@ -143,6 +162,14 @@ pub fn encode_canonical_v4(
                 encode_constraint(&mut buf, constraint);
             }
         }
+    }
+
+    // Jti: only encoded if present (v5 extension)
+    // Tokens without jti produce identical encoding to v4 for backward compatibility
+    if let Some(j) = jti {
+        let jti_bytes = j.as_bytes();
+        buf.extend_from_slice(&(jti_bytes.len() as u16).to_be_bytes());
+        buf.extend_from_slice(jti_bytes);
     }
 
     buf
