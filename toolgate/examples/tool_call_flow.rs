@@ -1,11 +1,14 @@
 //! Example demonstrating the complete token flow:
 //! mint → attenuate → verify_call (with value constraints)
-//! And: revocation and replay prevention
+//! And: revocation, replay prevention, nbf, leeway, and max attenuation depth
 //!
 //! Run with: cargo run --example tool_call_flow
 
 use std::collections::BTreeMap;
-use toolgate::{Constraint, MemoryUseStore, RevocationList, Token};
+use std::time::Duration;
+use toolgate::{
+    Constraint, FixedClock, MemoryUseStore, RevocationList, Token, TokenError, VerifyTime,
+};
 
 fn main() {
     let secret = b"example-secret-key-32-bytes-!!";
@@ -205,6 +208,69 @@ fn main() {
         "   JTI preserved after roundtrip: {}",
         decoded.jti == attenuated.jti
     );
+
+    println!();
+    println!("=== Clock, Not-Before, Leeway, and Depth ===\n");
+
+    println!("6. Not-before (nbf) and injected FixedClock...");
+    let timed = Token::mint_complete(
+        secret,
+        "scheduled_op",
+        vec!["action".into()],
+        expiry,
+        None,
+        None,
+        None,
+        false,
+        Some(current_time + 60),
+        Some(1),
+    );
+    println!("   nbf: {:?}", timed.nbf);
+    println!("   max_depth: {:?}", timed.max_depth);
+
+    let too_early = FixedClock::at(current_time);
+    println!(
+        "   Before nbf: {}",
+        format_result(&timed.verify_with_clock(secret, &too_early, Duration::ZERO))
+    );
+
+    let on_time = FixedClock::at(current_time + 60);
+    println!(
+        "   At nbf: {}",
+        format_result(&timed.verify_with_clock(secret, &on_time, Duration::ZERO))
+    );
+
+    println!();
+    println!("7. Clock-skew leeway...");
+    let expired = Token::mint(secret, "skew_op", vec![], current_time);
+    let late = VerifyTime::unix_with_leeway(current_time + 20, Duration::from_secs(30));
+    println!(
+        "   20s past expiry, 30s leeway: {}",
+        format_result(&expired.verify_at(secret, &late, None))
+    );
+    let too_late = VerifyTime::unix_with_leeway(current_time + 40, Duration::from_secs(30));
+    println!(
+        "   40s past expiry, 30s leeway: {}",
+        format_result(&expired.verify_at(secret, &too_late, None))
+    );
+
+    println!();
+    println!("8. Max attenuation depth...");
+    let first = timed
+        .attenuate(secret, None, Some(expiry - 1))
+        .expect("first attenuation within max_depth=1");
+    println!("   After 1 attenuate: depth={}", first.depth);
+    let second = first.attenuate(secret, None, Some(expiry - 2));
+    match second {
+        Ok(_) => println!("   Second attenuate: unexpectedly succeeded"),
+        Err(TokenError::MaxDepthExceeded { depth, max }) => {
+            println!(
+                "   Second attenuate: rejected (depth {} > max {})",
+                depth, max
+            );
+        }
+        Err(e) => println!("   Second attenuate: unexpected error ({})", e),
+    }
 }
 
 fn format_result(result: &Result<(), toolgate::TokenError>) -> String {
