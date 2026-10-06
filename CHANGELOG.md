@@ -5,6 +5,40 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-10-06
+
+### Added
+- **Swappable clocks**: Verification no longer hard-depends on `SystemTime`
+  - `Clock` trait: `now_unix()` source used for expiry and not-before checks
+  - `SystemClock`: wall-clock implementation
+  - `FixedClock`: frozen unix timestamp for tests and explicit times
+  - `InstantClock`: starts at a unix origin and advances with `Instant`
+  - `VerifyTime<C>`: bundles a clock with clock-skew leeway
+  - `Token::verify_with_clock()` / `verify_with_leeway()` / `verify_at()`
+  - `Token::verify_call_at()` / `verify_call_with_args_at()`
+  - `Keyring::verify_with_clock()` / `verify_with_leeway()` / `verify_at()`
+- **Expiry leeway**: Configurable `Duration` grace applied to expiry and `nbf`
+- **Not-before (`nbf`)**: Optional unix timestamp covered by the MAC
+  - `Token::mint_complete()`: mint with `nbf` and `max_depth`
+  - Verification returns `TokenError::NotYetValid` when `now + leeway < nbf`
+- **Attenuation depth**: Optional maximum delegation depth
+  - Each `attenuate` increments `depth` (covered by the MAC)
+  - `max_depth` is set at mint time and preserved
+  - Exceeding the limit returns `TokenError::MaxDepthExceeded`
+- **New error variants**: `NotYetValid`, `MaxDepthExceeded`
+- **CLI updates**:
+  - `tg mint`: `nbf` and `max_depth` fields
+  - `tg check` / `tg check-call`: `leeway` field (seconds)
+
+### Changed
+- **Canonical encoding bumped to v6**: Adds nbf/depth/max_depth after jti. Tokens without those fields encode identically to v5.
+- **Wire format bumped to v5**: Adds nbf/depth/max_depth. Tokens without those fields still encode as v4 (identical to v0.5). Decoding supports v1–v5.
+
+### Notes
+- Existing `verify(secret, current_time)` wraps the timestamp in `FixedClock` with zero leeway
+- `depth` starts at 0; tokens with no `max_depth` may be attenuated without limit
+- No new crate dependencies
+
 ## [0.5.0] - 2026-10-06
 
 ### Added

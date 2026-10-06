@@ -9,11 +9,15 @@ toolgate issues capability tokens that bind:
 - **Argument keys**: an allowlist of permitted argument names
 - **Argument constraints** (optional): restrict argument values (prefix, exact, one-of, max length, int range)
 - **Expiry**: unix timestamp when the token becomes invalid
+- **Not-before (`nbf`)** (optional): unix timestamp before which the token is rejected
 - **Audience** (optional): restrict token to a specific client/service
 - **Token ID (jti)** (optional): unique identifier for revocation and replay detection
+- **Max attenuation depth** (optional): how many times the token may be narrowed
 - **Nonce**: random bytes for uniqueness
 
-Tokens are signed with HMAC-SHA256 over a canonical byte encoding. They can be **attenuated** (capabilities reduced) but never widened—you can drop argument keys, shorten expiry, or tighten constraints, but never add keys, extend expiry, or loosen constraints. Audience binding, key ID, and token ID are preserved during attenuation.
+Tokens are signed with HMAC-SHA256 over a canonical byte encoding. They can be **attenuated** (capabilities reduced) but never widened—you can drop argument keys, shorten expiry, or tighten constraints, but never add keys, extend expiry, or loosen constraints. Audience binding, key ID, token ID, not-before, and max depth are preserved during attenuation. Each attenuation increments a `depth` counter; if `max_depth` is set, further narrowing is rejected.
+
+Expiry and not-before checks take a swappable [`Clock`](#clocks-and-leeway) plus optional clock-skew leeway, so library paths do not call `SystemTime` directly.
 
 ## Installation
 
@@ -21,7 +25,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-toolgate = "0.5"
+toolgate = "0.6"
 ```
 
 Or install the CLI:
@@ -77,6 +81,70 @@ let restricted = token.attenuate(
     Some(1699500000),          // shorter expiry
 )?;
 ```
+
+## Clocks and Leeway
+
+Verification uses a `Clock` instead of calling `SystemTime` in library paths. Pass an explicit unix timestamp (wrapped as `FixedClock`) or inject a test clock:
+
+```rust
+use std::time::Duration;
+use toolgate::{FixedClock, Token, VerifyTime};
+
+let secret = b"your-256-bit-secret-key-here!!";
+let token = Token::mint(secret, "read_file", vec!["path".into()], 1700000000);
+
+// Existing API: current_time is a FixedClock with zero leeway
+token.verify(secret, 1699999999)?;
+
+// Inject a clock (useful in tests)
+let clock = FixedClock::at(1699999999);
+token.verify_with_clock(secret, &clock, Duration::ZERO)?;
+
+// Allow 30s of clock skew on expiry (and nbf, if set)
+token.verify_with_leeway(secret, 1700000020, Duration::from_secs(30))?;
+
+// Bundle clock + leeway
+let time = VerifyTime::unix_with_leeway(1700000020, Duration::from_secs(30));
+token.verify_at(secret, &time, None)?;
+```
+
+Leeway is applied symmetrically:
+- Expired if `now > expiry + leeway`
+- Not yet valid if `now + leeway < nbf`
+
+## Not-Before and Max Attenuation Depth
+
+```rust
+use toolgate::Token;
+
+let secret = b"your-256-bit-secret-key-here!!";
+
+let token = Token::mint_complete(
+    secret,
+    "read_file",
+    vec!["path".into(), "limit".into()],
+    1700100000,          // expiry
+    None,                // audience
+    None,                // kid
+    None,                // constraints
+    false,               // generate_jti
+    Some(1700000000),    // nbf
+    Some(2),             // max_depth: at most two attenuations
+);
+
+// Too early
+assert!(token.verify(secret, 1699999999).is_err());
+// On or after nbf
+assert!(token.verify(secret, 1700000000).is_ok());
+
+let once = token.attenuate(secret, Some(vec!["path".into()]), None)?;
+assert_eq!(once.depth, 1);
+let twice = once.attenuate(secret, None, Some(1700050000))?;
+assert_eq!(twice.depth, 2);
+assert!(twice.attenuate(secret, None, None).is_err()); // MaxDepthExceeded
+```
+
+`nbf`, `depth`, and `max_depth` are covered by the MAC. Tokens minted without them encode identically to v0.5.
 
 ## Argument Value Constraints
 
@@ -293,11 +361,13 @@ echo '{
     "path": {"type": "prefix", "value": "/tmp/"},
     "limit": {"type": "int_range", "value": {"min": 1, "max": 100}}
   },
-  "generate_jti": true
+  "generate_jti": true,
+  "nbf": 1699990000,
+  "max_depth": 2
 }' | tg mint
 ```
 
-The `audience`, `constraints`, and `generate_jti` fields are optional. Set `generate_jti: true` to generate a unique token identifier for revocation/replay tracking.
+The `audience`, `constraints`, `generate_jti`, `nbf`, and `max_depth` fields are optional. Set `generate_jti: true` to generate a unique token identifier for revocation/replay tracking.
 
 ### Attenuate
 
@@ -322,11 +392,12 @@ echo '{
   "secret": "my-secret",
   "token": { ... },
   "current_time": 1699999999,
-  "audience": "client-123"
+  "audience": "client-123",
+  "leeway": 30
 }' | tg check
 ```
 
-Omit `current_time` to use the system clock. The `audience` field is optional.
+Omit `current_time` to use the system clock. The `audience` and `leeway` (seconds of clock-skew grace) fields are optional.
 
 ### Check-Call
 
@@ -351,23 +422,24 @@ echo '{
   "audience": "client-123"
 }' | tg check-call
 
-# Check with revocation list
+# Check with revocation list and clock-skew leeway
 echo '{
   "secret": "my-secret",
   "token": { ... },
   "tool_name": "read_file",
   "args": {"path": "/tmp/test.txt"},
-  "revoked": ["abc123...", "def456..."]
+  "revoked": ["abc123...", "def456..."],
+  "leeway": 30
 }' | tg check-call
 ```
 
 Returns `{"authorized": true}` or `{"authorized": false, "error": "...", "error_kind": "..."}`.
 
-Error kinds: `invalid_mac`, `expired`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `constraint_violation`, `revoked`, `missing_jti`.
+Error kinds: `invalid_mac`, `expired`, `not_yet_valid`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `constraint_violation`, `revoked`, `missing_jti`, `max_depth_exceeded`.
 
 Secrets can be hex-encoded with `"secret": "hex:deadbeef..."`.
 
-## Canonical Byte Encoding (v5)
+## Canonical Byte Encoding (v6)
 
 For cross-implementation compatibility, tokens are signed over this exact byte layout (all integers big-endian):
 
@@ -383,6 +455,10 @@ For cross-implementation compatibility, tokens are signed over this exact byte l
 | constraints_count | u16 (only if > 0) |
 | constraints | for each (sorted by key): key + type (u8) + type-specific data |
 | jti | u16 length + UTF-8 bytes (only if present) |
+| flags | u8 (only if nbf, depth>0, or max_depth is set; bit0=nbf, bit1=depth, bit2=max_depth) |
+| nbf | u64 (only if bit0 is set) |
+| depth | u32 (only if bit1 is set) |
+| max_depth | u32 (only if bit2 is set) |
 
 Constraint type encoding:
 - `0` Exact: u16 length + UTF-8 value
@@ -391,7 +467,7 @@ Constraint type encoding:
 - `3` MaxLen: u64 max
 - `4` IntRange: i64 min + i64 max
 
-**Example without constraints or jti** (identical to v4/v3):
+**Example without constraints, jti, nbf, or depth** (identical to v5/v4/v3):
 
 ```
 00 04 r e a d           # tool_name: len=4, "read"
@@ -404,7 +480,7 @@ Constraint type encoding:
 00 00                   # kid: len=0 (none)
 ```
 
-Tokens without jti encode identically to v4. Tokens without constraints and without jti encode identically to v3, ensuring backward compatibility.
+Tokens without nbf/depth/max_depth encode identically to v5. Tokens without jti encode identically to v4. Tokens without constraints and without jti encode identically to v3, ensuring backward compatibility.
 
 The HMAC-SHA256 is computed over these concatenated bytes.
 
@@ -428,6 +504,7 @@ Wire format is typically smaller than JSON and suitable for constrained channels
 
 ## Version History
 
+- **0.6.0**: Add swappable `Clock`, expiry/nbf leeway, optional `nbf`, attenuation `depth`/`max_depth`, canonical encoding v6, wire format v5
 - **0.5.0**: Add token identifiers (`jti`), revocation lists, and replay prevention (`UseStore` trait), canonical encoding v5, wire format v4
 - **0.4.0**: Add argument value constraints (`Constraint` type), `verify_call_with_args` API, canonical encoding v4, wire format v3
 - **0.3.0**: Add key identifiers (`kid`) and `Keyring` type for key rotation

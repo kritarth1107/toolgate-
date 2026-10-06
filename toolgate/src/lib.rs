@@ -1,8 +1,11 @@
 //! toolgate: Macaroon-style capability tokens for tool calls.
 //!
 //! A token binds a tool name, an allowlist of argument keys, an expiry
-//! (unix seconds), an optional audience, and a random nonce. Tokens can
-//! be attenuated (drop argument keys or shorten expiry) but never widened.
+//! (unix seconds), an optional not-before, an optional audience, and a
+//! random nonce. Tokens can be attenuated (drop argument keys or shorten
+//! expiry) but never widened. Optional `max_depth` limits how many times
+//! a token may be narrowed. Expiry and nbf checks take a swappable
+//! [`Clock`] plus optional clock-skew leeway.
 //!
 //! # Example
 //!
@@ -19,7 +22,7 @@
 //!     2000000000, // expiry unix seconds
 //! );
 //!
-//! // Verify the token
+//! // Verify the token (current_time is a FixedClock with zero leeway)
 //! assert!(token.verify(secret, 1999999999).is_ok());
 //!
 //! // Attenuate: restrict to only "path" argument
