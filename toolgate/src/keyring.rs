@@ -4,7 +4,10 @@
 //! without immediately invalidating existing tokens.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
+use crate::clock::{Clock, VerifyTime};
+use crate::constraint::Constraints;
 use crate::revocation::RevocationList;
 use crate::token::Token;
 use crate::use_store::UseStore;
@@ -157,6 +160,36 @@ impl Keyring {
         ))
     }
 
+    /// Mint a token with optional jti, not-before, and max attenuation depth.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mint_complete(
+        &self,
+        tool_name: impl Into<String>,
+        arg_keys: Vec<String>,
+        expiry: u64,
+        audience: Option<String>,
+        constraints: Option<Constraints>,
+        generate_jti: bool,
+        nbf: Option<u64>,
+        max_depth: Option<u32>,
+    ) -> Result<Token, TokenError> {
+        let kid = self.active_kid.as_ref().ok_or(TokenError::NoActiveKey)?;
+        let secret = self.keys.get(kid).ok_or(TokenError::NoActiveKey)?;
+
+        Ok(Token::mint_complete(
+            secret,
+            tool_name,
+            arg_keys,
+            expiry,
+            audience,
+            Some(kid.clone()),
+            constraints,
+            generate_jti,
+            nbf,
+            max_depth,
+        ))
+    }
+
     /// Verify a token using the keyring.
     ///
     /// Looks up the signing key by the token's `kid` field.
@@ -175,6 +208,39 @@ impl Keyring {
     ) -> Result<(), TokenError> {
         let secret = self.get_secret_for_token(token)?;
         token.verify_with_audience(secret, current_time, expected_audience)
+    }
+
+    /// Verify a token using an explicit unix timestamp and clock-skew leeway.
+    pub fn verify_with_leeway(
+        &self,
+        token: &Token,
+        current_time: u64,
+        leeway: Duration,
+    ) -> Result<(), TokenError> {
+        let secret = self.get_secret_for_token(token)?;
+        token.verify_with_leeway(secret, current_time, leeway)
+    }
+
+    /// Verify a token using a swappable [`Clock`] and leeway.
+    pub fn verify_with_clock<C: Clock>(
+        &self,
+        token: &Token,
+        clock: &C,
+        leeway: Duration,
+    ) -> Result<(), TokenError> {
+        let secret = self.get_secret_for_token(token)?;
+        token.verify_with_clock(secret, clock, leeway)
+    }
+
+    /// Verify a token using a bundled clock and leeway.
+    pub fn verify_at<C: Clock>(
+        &self,
+        token: &Token,
+        time: &VerifyTime<C>,
+        expected_audience: Option<&str>,
+    ) -> Result<(), TokenError> {
+        let secret = self.get_secret_for_token(token)?;
+        token.verify_at(secret, time, expected_audience)
     }
 
     /// Verify a token with revocation list checking using the keyring.
@@ -548,5 +614,65 @@ mod tests {
             result,
             Err(TokenError::ConstraintViolation { key }) if key == "path"
         ));
+    }
+
+    #[test]
+    fn keyring_mint_complete_nbf_and_depth() {
+        let mut keyring = Keyring::new();
+        keyring.add("key-1", SECRET_1.to_vec());
+
+        let token = keyring
+            .mint_complete(
+                "read_file",
+                vec!["path".into()],
+                2000000000,
+                None,
+                None,
+                false,
+                Some(1_900_000_000),
+                Some(1),
+            )
+            .unwrap();
+
+        assert_eq!(token.kid, Some("key-1".to_string()));
+        assert_eq!(token.nbf, Some(1_900_000_000));
+        assert_eq!(token.max_depth, Some(1));
+        assert!(keyring.verify(&token, 1_950_000_000).is_ok());
+        assert_eq!(
+            keyring.verify(&token, 1_899_999_999),
+            Err(TokenError::NotYetValid)
+        );
+
+        let attenuated = keyring.attenuate(&token, None, Some(1950000000)).unwrap();
+        assert_eq!(attenuated.depth, 1);
+        let result = keyring.attenuate(&attenuated, None, Some(1900000000));
+        assert_eq!(
+            result,
+            Err(TokenError::MaxDepthExceeded { depth: 2, max: 1 })
+        );
+    }
+
+    #[test]
+    fn keyring_verify_with_clock_and_leeway() {
+        use crate::clock::FixedClock;
+
+        let mut keyring = Keyring::new();
+        keyring.add("key-1", SECRET_1.to_vec());
+
+        let token = keyring
+            .mint("read_file", vec!["path".into()], 1000)
+            .unwrap();
+
+        let clock = FixedClock::at(1010);
+        assert_eq!(
+            keyring.verify_with_clock(&token, &clock, Duration::ZERO),
+            Err(TokenError::Expired)
+        );
+        assert!(keyring
+            .verify_with_leeway(&token, 1010, Duration::from_secs(30))
+            .is_ok());
+
+        let time = VerifyTime::unix_with_leeway(1010, Duration::from_secs(15));
+        assert!(keyring.verify_at(&token, &time, None).is_ok());
     }
 }
