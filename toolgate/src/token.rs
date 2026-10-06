@@ -637,7 +637,9 @@ impl Token {
     }
 
     /// Attenuate the token by removing argument keys or shortening expiry.
-    /// Cannot add keys or extend expiry. Audience, kid, jti, and constraints are preserved unchanged.
+    /// Cannot add keys or extend expiry. Audience, kid, jti, nbf, and max_depth are preserved.
+    /// Each attenuation increments `depth`; if `max_depth` is set and would be
+    /// exceeded, returns [`TokenError::MaxDepthExceeded`].
     ///
     /// To attenuate with constraints, use `attenuate_with_constraints`.
     pub fn attenuate(
@@ -650,7 +652,8 @@ impl Token {
     }
 
     /// Attenuate the token by removing argument keys, shortening expiry, or adding/tightening constraints.
-    /// Cannot add keys, extend expiry, or loosen constraints. Audience, kid, and jti are preserved unchanged.
+    /// Cannot add keys, extend expiry, or loosen constraints. Audience, kid, jti, nbf, and max_depth are preserved.
+    /// Each attenuation increments `depth` and is rejected when `max_depth` would be exceeded.
     pub fn attenuate_with_constraints(
         &self,
         secret: &[u8],
@@ -686,6 +689,16 @@ impl Token {
         let final_constraints =
             Self::merge_constraints(self.constraints.as_ref(), new_constraints.as_ref())?;
 
+        let new_depth = self.depth.saturating_add(1);
+        if let Some(max) = self.max_depth {
+            if new_depth > max {
+                return Err(TokenError::MaxDepthExceeded {
+                    depth: new_depth,
+                    max,
+                });
+            }
+        }
+
         // Generate new nonce and MAC for the attenuated token
         // Audience, kid, jti, nbf, and max_depth are preserved unchanged.
         let nonce: [u8; 16] = rand::random();
@@ -699,7 +712,7 @@ impl Token {
             final_constraints.as_ref(),
             self.jti.as_deref(),
             self.nbf,
-            self.depth,
+            new_depth,
             self.max_depth,
         );
         let mut hmac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
@@ -717,7 +730,7 @@ impl Token {
             constraints: final_constraints,
             jti: self.jti.clone(),
             nbf: self.nbf,
-            depth: self.depth,
+            depth: new_depth,
             max_depth: self.max_depth,
         })
     }
@@ -2273,6 +2286,111 @@ mod tests {
         let token = Token::mint(SECRET, "read_file", vec!["path".into()], 1000);
         let time = VerifyTime::unix_with_leeway(1010, Duration::from_secs(15));
         assert!(token.verify_at(SECRET, &time, None).is_ok());
+    }
+
+    #[test]
+    fn attenuate_increments_depth() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+        assert_eq!(token.depth, 0);
+
+        let once = token.attenuate(SECRET, None, Some(1900000000)).unwrap();
+        assert_eq!(once.depth, 1);
+        assert!(once.verify(SECRET, 1899999999).is_ok());
+
+        let twice = once.attenuate(SECRET, None, Some(1800000000)).unwrap();
+        assert_eq!(twice.depth, 2);
+        assert!(twice.verify(SECRET, 1799999999).is_ok());
+    }
+
+    #[test]
+    fn attenuate_rejects_when_max_depth_exceeded() {
+        let token = Token::mint_complete(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            false,
+            None,
+            Some(2),
+        );
+
+        let once = token
+            .attenuate(SECRET, Some(vec!["path".into()]), None)
+            .unwrap();
+        assert_eq!(once.depth, 1);
+
+        let twice = once.attenuate(SECRET, None, Some(1900000000)).unwrap();
+        assert_eq!(twice.depth, 2);
+
+        let result = twice.attenuate(SECRET, None, Some(1800000000));
+        assert_eq!(
+            result,
+            Err(TokenError::MaxDepthExceeded { depth: 3, max: 2 })
+        );
+    }
+
+    #[test]
+    fn max_depth_zero_cannot_attenuate() {
+        let token = Token::mint_complete(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            false,
+            None,
+            Some(0),
+        );
+
+        let result = token.attenuate(SECRET, None, Some(1900000000));
+        assert_eq!(
+            result,
+            Err(TokenError::MaxDepthExceeded { depth: 1, max: 0 })
+        );
+    }
+
+    #[test]
+    fn attenuate_preserves_nbf_and_max_depth() {
+        let token = Token::mint_complete(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            false,
+            Some(1_900_000_000),
+            Some(5),
+        );
+
+        let attenuated = token
+            .attenuate(SECRET, Some(vec!["path".into()]), None)
+            .unwrap();
+
+        assert_eq!(attenuated.nbf, Some(1_900_000_000));
+        assert_eq!(attenuated.max_depth, Some(5));
+        assert_eq!(attenuated.depth, 1);
+        assert!(attenuated.verify(SECRET, 1_950_000_000).is_ok());
+    }
+
+    #[test]
+    fn depth_included_in_mac() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+        let attenuated = token.attenuate(SECRET, None, Some(1900000000)).unwrap();
+        assert_eq!(attenuated.depth, 1);
+
+        let mut tampered = attenuated.clone();
+        tampered.depth = 2;
+        assert_eq!(
+            tampered.verify(SECRET, 1899999999),
+            Err(TokenError::InvalidMac)
+        );
     }
 
     // ===== Revocation tests =====
