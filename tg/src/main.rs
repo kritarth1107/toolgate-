@@ -2,8 +2,8 @@ use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{self, Read};
-use std::time::{SystemTime, UNIX_EPOCH};
-use toolgate::{Constraints, RevocationList, Token, TokenError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use toolgate::{Constraints, RevocationList, Token, TokenError, VerifyTime};
 
 #[derive(Parser)]
 #[command(name = "tg")]
@@ -38,6 +38,10 @@ struct MintInput {
     constraints: Option<Constraints>,
     #[serde(default)]
     generate_jti: bool,
+    #[serde(default)]
+    nbf: Option<u64>,
+    #[serde(default)]
+    max_depth: Option<u32>,
 }
 
 #[derive(Serialize)]
@@ -70,6 +74,9 @@ struct CheckInput {
     current_time: Option<u64>,
     #[serde(default)]
     audience: Option<String>,
+    /// Clock-skew leeway in seconds applied to expiry and nbf.
+    #[serde(default)]
+    leeway: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -87,6 +94,9 @@ struct CheckCallInput {
     audience: Option<String>,
     #[serde(default)]
     revoked: Option<Vec<String>>,
+    /// Clock-skew leeway in seconds applied to expiry and nbf.
+    #[serde(default)]
+    leeway: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -146,7 +156,7 @@ fn handle_mint() -> Result<(), Box<dyn std::error::Error>> {
     let input: MintInput = serde_json::from_str(&read_stdin()?)?;
     let secret = decode_secret(&input.secret);
 
-    let token = Token::mint_with_jti(
+    let token = Token::mint_complete(
         &secret,
         input.tool_name,
         input.arg_keys,
@@ -155,6 +165,8 @@ fn handle_mint() -> Result<(), Box<dyn std::error::Error>> {
         None,
         input.constraints,
         input.generate_jti,
+        input.nbf,
+        input.max_depth,
     );
 
     let output = MintOutput { token };
@@ -182,21 +194,22 @@ fn handle_check() -> Result<(), Box<dyn std::error::Error>> {
     let input: CheckInput = serde_json::from_str(&read_stdin()?)?;
     let secret = decode_secret(&input.secret);
     let current_time = input.current_time.unwrap_or_else(current_unix_time);
+    let leeway = Duration::from_secs(input.leeway.unwrap_or(0));
+    let time = VerifyTime::unix_with_leeway(current_time, leeway);
 
-    let output =
-        match input
-            .token
-            .verify_with_audience(&secret, current_time, input.audience.as_deref())
-        {
-            Ok(()) => CheckOutput {
-                valid: true,
-                error: None,
-            },
-            Err(e) => CheckOutput {
-                valid: false,
-                error: Some(error_to_string(&e)),
-            },
-        };
+    let output = match input
+        .token
+        .verify_at(&secret, &time, input.audience.as_deref())
+    {
+        Ok(()) => CheckOutput {
+            valid: true,
+            error: None,
+        },
+        Err(e) => CheckOutput {
+            valid: false,
+            error: Some(error_to_string(&e)),
+        },
+    };
 
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
@@ -206,27 +219,29 @@ fn handle_check_call() -> Result<(), Box<dyn std::error::Error>> {
     let input: CheckCallInput = serde_json::from_str(&read_stdin()?)?;
     let secret = decode_secret(&input.secret);
     let current_time = input.current_time.unwrap_or_else(current_unix_time);
+    let leeway = Duration::from_secs(input.leeway.unwrap_or(0));
+    let time = VerifyTime::unix_with_leeway(current_time, leeway);
 
     // Build revocation list if provided
     let revocation_list = input
         .revoked
         .map(|jtis| jtis.into_iter().collect::<RevocationList>());
 
-    // If args provided, use verify_call_with_args for constraint checking
-    // Otherwise fall back to verify_call with just arg_keys
+    // If args provided, use verify_call_with_args_at for constraint checking
+    // Otherwise fall back to verify_call_at with just arg_keys
     let result = if let Some(ref args) = input.args {
-        input.token.verify_call_with_args(
+        input.token.verify_call_with_args_at(
             &secret,
-            current_time,
+            &time,
             &input.tool_name,
             args,
             input.audience.as_deref(),
         )
     } else {
         let arg_keys_refs: Vec<&str> = input.arg_keys.iter().map(|s| s.as_str()).collect();
-        input.token.verify_call(
+        input.token.verify_call_at(
             &secret,
-            current_time,
+            &time,
             &input.tool_name,
             &arg_keys_refs,
             input.audience.as_deref(),

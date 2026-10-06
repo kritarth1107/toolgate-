@@ -568,8 +568,26 @@ impl Token {
         requested_arg_keys: &[&str],
         expected_audience: Option<&str>,
     ) -> Result<(), TokenError> {
-        // First verify MAC, expiry, and audience
-        self.verify_with_audience(secret, current_time, expected_audience)?;
+        self.verify_call_at(
+            secret,
+            &VerifyTime::unix(current_time),
+            tool_name,
+            requested_arg_keys,
+            expected_audience,
+        )
+    }
+
+    /// Verify a tool call using a bundled clock and leeway.
+    pub fn verify_call_at<C: Clock>(
+        &self,
+        secret: &[u8],
+        time: &VerifyTime<C>,
+        tool_name: &str,
+        requested_arg_keys: &[&str],
+        expected_audience: Option<&str>,
+    ) -> Result<(), TokenError> {
+        // First verify MAC, expiry, nbf, and audience
+        self.verify_at(secret, time, expected_audience)?;
 
         // Check tool name matches
         if self.tool_name != tool_name {
@@ -610,17 +628,26 @@ impl Token {
         args: &BTreeMap<String, String>,
         expected_audience: Option<&str>,
     ) -> Result<(), TokenError> {
-        // Get the arg keys from the args map
-        let arg_keys: Vec<&str> = args.keys().map(|s| s.as_str()).collect();
-
-        // First do the basic verification
-        self.verify_call(
+        self.verify_call_with_args_at(
             secret,
-            current_time,
+            &VerifyTime::unix(current_time),
             tool_name,
-            &arg_keys,
+            args,
             expected_audience,
-        )?;
+        )
+    }
+
+    /// Verify a tool call with argument values using a bundled clock and leeway.
+    pub fn verify_call_with_args_at<C: Clock>(
+        &self,
+        secret: &[u8],
+        time: &VerifyTime<C>,
+        tool_name: &str,
+        args: &BTreeMap<String, String>,
+        expected_audience: Option<&str>,
+    ) -> Result<(), TokenError> {
+        let arg_keys: Vec<&str> = args.keys().map(|s| s.as_str()).collect();
+        self.verify_call_at(secret, time, tool_name, &arg_keys, expected_audience)?;
 
         // Then check constraints on values
         if let Some(ref constraints) = self.constraints {
