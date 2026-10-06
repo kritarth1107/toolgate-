@@ -10,9 +10,10 @@ toolgate issues capability tokens that bind:
 - **Argument constraints** (optional): restrict argument values (prefix, exact, one-of, max length, int range)
 - **Expiry**: unix timestamp when the token becomes invalid
 - **Audience** (optional): restrict token to a specific client/service
+- **Token ID (jti)** (optional): unique identifier for revocation and replay detection
 - **Nonce**: random bytes for uniqueness
 
-Tokens are signed with HMAC-SHA256 over a canonical byte encoding. They can be **attenuated** (capabilities reduced) but never widened—you can drop argument keys, shorten expiry, or tighten constraints, but never add keys, extend expiry, or loosen constraints. Audience binding is preserved during attenuation.
+Tokens are signed with HMAC-SHA256 over a canonical byte encoding. They can be **attenuated** (capabilities reduced) but never widened—you can drop argument keys, shorten expiry, or tighten constraints, but never add keys, extend expiry, or loosen constraints. Audience binding, key ID, and token ID are preserved during attenuation.
 
 ## Installation
 
@@ -20,7 +21,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-toolgate = "0.4"
+toolgate = "0.5"
 ```
 
 Or install the CLI:
@@ -198,6 +199,83 @@ Key points:
 - Attenuation preserves the original `kid`
 - Tokens without `kid` cannot be verified through a keyring (use `Token::verify` directly)
 
+## Revocation and Replay Prevention
+
+Tokens can carry a unique identifier (`jti`) for revocation tracking and replay prevention:
+
+```rust
+use toolgate::{Token, RevocationList, MemoryUseStore};
+
+let secret = b"your-256-bit-secret-key-here!!";
+
+// Mint a token with jti for tracking
+let token = Token::mint_with_jti(
+    secret,
+    "sensitive_op",
+    vec!["action".into()],
+    2000000000,
+    None,  // audience
+    None,  // kid
+    None,  // constraints
+    true,  // generate_jti
+);
+assert!(token.jti.is_some()); // 16 random bytes, hex-encoded
+
+// ===== Revocation =====
+let mut revocation_list = RevocationList::new();
+
+// Token is valid
+assert!(token.verify_with_revocation(secret, 1999999999, &revocation_list).is_ok());
+
+// Revoke the token
+revocation_list.revoke(token.jti.clone().unwrap());
+
+// Token is now rejected
+assert!(token.verify_with_revocation(secret, 1999999999, &revocation_list).is_err());
+
+// ===== Replay Prevention (single-use) =====
+let single_use_token = Token::mint_with_jti(
+    secret,
+    "one_time_op",
+    vec![],
+    2000000000,
+    None, None, None,
+    true,
+);
+
+let mut use_store = MemoryUseStore::new();
+
+// First use succeeds
+assert!(single_use_token.verify_single_use(secret, 1999999999, &mut use_store).is_ok());
+
+// Second use (replay) fails
+assert!(single_use_token.verify_single_use(secret, 1999999999, &mut use_store).is_err());
+
+// ===== Max-uses (e.g., allow 3 uses) =====
+let multi_use_token = Token::mint_with_jti(
+    secret,
+    "limited_op",
+    vec![],
+    2000000000,
+    None, None, None,
+    true,
+);
+
+let mut store = MemoryUseStore::new();
+for _ in 0..3 {
+    assert!(multi_use_token.verify_with_max_uses(secret, 1999999999, &mut store, 3, None).is_ok());
+}
+// Fourth use fails
+assert!(multi_use_token.verify_with_max_uses(secret, 1999999999, &mut store, 3, None).is_err());
+```
+
+Key points:
+- `jti` is a 16-byte random identifier (hex-encoded, 32 chars) covered by the MAC
+- Attenuated tokens inherit their parent's `jti`
+- `RevocationList` tracks explicitly revoked token IDs
+- `UseStore` trait enables pluggable use-count tracking (in-memory impl provided)
+- Tokens without `jti` cannot be checked against revocation lists or use stores
+
 ## CLI Usage
 
 The `tg` binary accepts JSON on stdin and outputs JSON.
@@ -214,11 +292,12 @@ echo '{
   "constraints": {
     "path": {"type": "prefix", "value": "/tmp/"},
     "limit": {"type": "int_range", "value": {"min": 1, "max": 100}}
-  }
+  },
+  "generate_jti": true
 }' | tg mint
 ```
 
-The `audience` and `constraints` fields are optional. Omit them for an unbound token without constraints.
+The `audience`, `constraints`, and `generate_jti` fields are optional. Set `generate_jti: true` to generate a unique token identifier for revocation/replay tracking.
 
 ### Attenuate
 
@@ -271,15 +350,24 @@ echo '{
   "args": {"path": "/tmp/test.txt", "limit": "50"},
   "audience": "client-123"
 }' | tg check-call
+
+# Check with revocation list
+echo '{
+  "secret": "my-secret",
+  "token": { ... },
+  "tool_name": "read_file",
+  "args": {"path": "/tmp/test.txt"},
+  "revoked": ["abc123...", "def456..."]
+}' | tg check-call
 ```
 
 Returns `{"authorized": true}` or `{"authorized": false, "error": "...", "error_kind": "..."}`.
 
-Error kinds: `invalid_mac`, `expired`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `constraint_violation`.
+Error kinds: `invalid_mac`, `expired`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `constraint_violation`, `revoked`, `missing_jti`.
 
 Secrets can be hex-encoded with `"secret": "hex:deadbeef..."`.
 
-## Canonical Byte Encoding (v4)
+## Canonical Byte Encoding (v5)
 
 For cross-implementation compatibility, tokens are signed over this exact byte layout (all integers big-endian):
 
@@ -294,6 +382,7 @@ For cross-implementation compatibility, tokens are signed over this exact byte l
 | kid | u16 length + UTF-8 bytes (0 = no key id) |
 | constraints_count | u16 (only if > 0) |
 | constraints | for each (sorted by key): key + type (u8) + type-specific data |
+| jti | u16 length + UTF-8 bytes (only if present) |
 
 Constraint type encoding:
 - `0` Exact: u16 length + UTF-8 value
@@ -302,7 +391,7 @@ Constraint type encoding:
 - `3` MaxLen: u64 max
 - `4` IntRange: i64 min + i64 max
 
-**Example without constraints** (identical to v3):
+**Example without constraints or jti** (identical to v4/v3):
 
 ```
 00 04 r e a d           # tool_name: len=4, "read"
@@ -315,7 +404,7 @@ Constraint type encoding:
 00 00                   # kid: len=0 (none)
 ```
 
-Tokens without constraints encode identically to v3, ensuring backward compatibility.
+Tokens without jti encode identically to v4. Tokens without constraints and without jti encode identically to v3, ensuring backward compatibility.
 
 The HMAC-SHA256 is computed over these concatenated bytes.
 
@@ -339,6 +428,7 @@ Wire format is typically smaller than JSON and suitable for constrained channels
 
 ## Version History
 
+- **0.5.0**: Add token identifiers (`jti`), revocation lists, and replay prevention (`UseStore` trait), canonical encoding v5, wire format v4
 - **0.4.0**: Add argument value constraints (`Constraint` type), `verify_call_with_args` API, canonical encoding v4, wire format v3
 - **0.3.0**: Add key identifiers (`kid`) and `Keyring` type for key rotation
 - **0.2.0**: Add audience binding, verify_call API, compact wire codec, CLI check-call command

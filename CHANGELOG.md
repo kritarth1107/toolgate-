@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-10-06
+
+### Added
+- **Token identifiers (`jti`)**: Optional unique identifier (16 random bytes, hex-encoded) covered by MAC
+  - `Token::mint_with_jti()`: Mint tokens with unique identifier for tracking
+  - Attenuated tokens inherit their parent's `jti`
+- **Revocation support**: Explicitly revoke tokens by identifier
+  - `RevocationList` type: revoke by jti, check membership, iterate
+  - `Token::verify_with_revocation()` / `verify_with_revocation_and_audience()`
+  - `Keyring::verify_with_revocation()` / `verify_with_revocation_and_audience()`
+- **Replay prevention**: Track and limit token uses
+  - `UseStore` trait: pluggable interface for use-count tracking
+  - `MemoryUseStore`: in-process HashMap-based implementation
+  - `Token::verify_single_use()` / `verify_with_max_uses()`
+  - `Token::verify_with_revocation_and_use_store()`: combined protection
+  - `Keyring::verify_single_use()` / `verify_with_max_uses()` / `verify_with_revocation_and_use_store()`
+- **New error variants**:
+  - `TokenError::Revoked`: token jti found in revocation list
+  - `TokenError::ReplayDetected`: token use count exceeded
+  - `TokenError::MissingJti`: operation requires jti but token has none
+- **CLI updates**:
+  - `tg mint`: Add `generate_jti` field to request unique identifier
+  - `tg check-call`: Add `revoked` field (list of jti strings) for revocation checking
+
+### Changed
+- **Canonical encoding bumped to v5**: Adds jti after constraints. Tokens without jti encode identically to v4 for backward compatibility.
+- **Wire format bumped to v4**: Adds jti. Decoding supports v1, v2, v3, and v4.
+
+### Notes
+- `jti` is 32 hex characters (16 bytes)
+- No new dependencies added; `UseStore` implementations are in-process only
+- `MemoryUseStore` is suitable for single-process verification scenarios
+
 ## [0.4.0] - 2026-10-05
 
 ### Added
