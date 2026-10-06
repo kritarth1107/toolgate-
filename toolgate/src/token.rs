@@ -8,6 +8,7 @@ use subtle::ConstantTimeEq;
 
 use crate::constraint::Constraints;
 use crate::encoding::encode_canonical_v5;
+use crate::revocation::RevocationList;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -271,6 +272,50 @@ impl Token {
         } else {
             Err(TokenError::InvalidMac)
         }
+    }
+
+    /// Verify the token's MAC, expiry, and check against a revocation list.
+    ///
+    /// The token must have a jti to be checked against the revocation list.
+    /// Returns `Err(TokenError::Revoked)` if the token's jti is in the revocation list.
+    /// Returns `Err(TokenError::MissingJti)` if the token has no jti.
+    pub fn verify_with_revocation(
+        &self,
+        secret: &[u8],
+        current_time: u64,
+        revocation_list: &RevocationList,
+    ) -> Result<(), TokenError> {
+        self.verify_with_revocation_and_audience(secret, current_time, revocation_list, None)
+    }
+
+    /// Verify the token's MAC, expiry, audience, and check against a revocation list.
+    ///
+    /// The token must have a jti to be checked against the revocation list.
+    /// Returns `Err(TokenError::Revoked)` if the token's jti is in the revocation list.
+    /// Returns `Err(TokenError::MissingJti)` if the token has no jti.
+    pub fn verify_with_revocation_and_audience(
+        &self,
+        secret: &[u8],
+        current_time: u64,
+        revocation_list: &RevocationList,
+        expected_audience: Option<&str>,
+    ) -> Result<(), TokenError> {
+        // First verify basic token properties
+        self.verify_with_audience(secret, current_time, expected_audience)?;
+
+        // Check revocation
+        match &self.jti {
+            Some(jti) => {
+                if revocation_list.is_revoked(jti) {
+                    return Err(TokenError::Revoked { jti: jti.clone() });
+                }
+            }
+            None => {
+                return Err(TokenError::MissingJti);
+            }
+        }
+
+        Ok(())
     }
 
     /// Verify that this token authorizes a specific tool call.
