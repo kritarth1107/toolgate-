@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use crate::revocation::RevocationList;
 use crate::token::Token;
 use crate::TokenError;
 
@@ -173,6 +174,37 @@ impl Keyring {
     ) -> Result<(), TokenError> {
         let secret = self.get_secret_for_token(token)?;
         token.verify_with_audience(secret, current_time, expected_audience)
+    }
+
+    /// Verify a token with revocation list checking using the keyring.
+    ///
+    /// The token must have a jti to be checked against the revocation list.
+    pub fn verify_with_revocation(
+        &self,
+        token: &Token,
+        current_time: u64,
+        revocation_list: &RevocationList,
+    ) -> Result<(), TokenError> {
+        self.verify_with_revocation_and_audience(token, current_time, revocation_list, None)
+    }
+
+    /// Verify a token with revocation list and audience checking using the keyring.
+    ///
+    /// The token must have a jti to be checked against the revocation list.
+    pub fn verify_with_revocation_and_audience(
+        &self,
+        token: &Token,
+        current_time: u64,
+        revocation_list: &RevocationList,
+        expected_audience: Option<&str>,
+    ) -> Result<(), TokenError> {
+        let secret = self.get_secret_for_token(token)?;
+        token.verify_with_revocation_and_audience(
+            secret,
+            current_time,
+            revocation_list,
+            expected_audience,
+        )
     }
 
     /// Verify that a token authorizes a specific tool call.
