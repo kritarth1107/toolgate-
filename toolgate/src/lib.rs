@@ -59,6 +59,7 @@
 //! assert!(keyring.verify(&token, 1999999999).is_ok());
 //! ```
 
+pub mod clock;
 pub mod constraint;
 pub mod encoding;
 pub mod keyring;
@@ -67,6 +68,7 @@ pub mod token;
 pub mod use_store;
 pub mod wire;
 
+pub use clock::{Clock, FixedClock, InstantClock, SystemClock, VerifyTime};
 pub use constraint::{Constraint, Constraints};
 pub use keyring::Keyring;
 pub use revocation::RevocationList;
