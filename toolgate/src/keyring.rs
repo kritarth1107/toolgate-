@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use crate::revocation::RevocationList;
 use crate::token::Token;
+use crate::use_store::UseStore;
 use crate::TokenError;
 
 /// A collection of signing keys with rotation support.
@@ -203,6 +204,57 @@ impl Keyring {
             secret,
             current_time,
             revocation_list,
+            expected_audience,
+        )
+    }
+
+    /// Verify a single-use token using the keyring.
+    ///
+    /// The token must have a jti to be tracked by the use store.
+    pub fn verify_single_use<S: UseStore>(
+        &self,
+        token: &Token,
+        current_time: u64,
+        use_store: &mut S,
+    ) -> Result<(), TokenError> {
+        let secret = self.get_secret_for_token(token)?;
+        token.verify_single_use(secret, current_time, use_store)
+    }
+
+    /// Verify a token with max-uses limit using the keyring.
+    ///
+    /// The token must have a jti to be tracked by the use store.
+    pub fn verify_with_max_uses<S: UseStore>(
+        &self,
+        token: &Token,
+        current_time: u64,
+        use_store: &mut S,
+        max_uses: u64,
+        expected_audience: Option<&str>,
+    ) -> Result<(), TokenError> {
+        let secret = self.get_secret_for_token(token)?;
+        token.verify_with_max_uses(secret, current_time, use_store, max_uses, expected_audience)
+    }
+
+    /// Verify a token with both revocation list and use store checking.
+    ///
+    /// Provides comprehensive replay prevention using the keyring.
+    pub fn verify_with_revocation_and_use_store<S: UseStore>(
+        &self,
+        token: &Token,
+        current_time: u64,
+        revocation_list: &RevocationList,
+        use_store: &mut S,
+        max_uses: u64,
+        expected_audience: Option<&str>,
+    ) -> Result<(), TokenError> {
+        let secret = self.get_secret_for_token(token)?;
+        token.verify_with_revocation_and_use_store(
+            secret,
+            current_time,
+            revocation_list,
+            use_store,
+            max_uses,
             expected_audience,
         )
     }

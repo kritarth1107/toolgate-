@@ -9,6 +9,7 @@ use subtle::ConstantTimeEq;
 use crate::constraint::Constraints;
 use crate::encoding::encode_canonical_v5;
 use crate::revocation::RevocationList;
+use crate::use_store::{UseResult, UseStore};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -308,6 +309,87 @@ impl Token {
             Some(jti) => {
                 if revocation_list.is_revoked(jti) {
                     return Err(TokenError::Revoked { jti: jti.clone() });
+                }
+            }
+            None => {
+                return Err(TokenError::MissingJti);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Verify the token and consume one use from the use store.
+    ///
+    /// This provides single-use token verification. The token must have a jti.
+    /// Returns `Err(TokenError::ReplayDetected)` if the token has already been used.
+    /// Returns `Err(TokenError::MissingJti)` if the token has no jti.
+    pub fn verify_single_use<S: UseStore>(
+        &self,
+        secret: &[u8],
+        current_time: u64,
+        use_store: &mut S,
+    ) -> Result<(), TokenError> {
+        self.verify_with_max_uses(secret, current_time, use_store, 1, None)
+    }
+
+    /// Verify the token and consume one use from the use store, up to max_uses.
+    ///
+    /// The token must have a jti. Returns `Err(TokenError::ReplayDetected)` if
+    /// the token has exceeded its maximum use count.
+    /// Returns `Err(TokenError::MissingJti)` if the token has no jti.
+    pub fn verify_with_max_uses<S: UseStore>(
+        &self,
+        secret: &[u8],
+        current_time: u64,
+        use_store: &mut S,
+        max_uses: u64,
+        expected_audience: Option<&str>,
+    ) -> Result<(), TokenError> {
+        // First verify basic token properties
+        self.verify_with_audience(secret, current_time, expected_audience)?;
+
+        // Check and consume use
+        match &self.jti {
+            Some(jti) => {
+                if use_store.try_use(jti, max_uses) == UseResult::Exceeded {
+                    return Err(TokenError::ReplayDetected { jti: jti.clone() });
+                }
+            }
+            None => {
+                return Err(TokenError::MissingJti);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Verify the token with both revocation list and use store checking.
+    ///
+    /// This provides comprehensive replay prevention: both explicit revocation
+    /// and use-count limiting. The token must have a jti.
+    pub fn verify_with_revocation_and_use_store<S: UseStore>(
+        &self,
+        secret: &[u8],
+        current_time: u64,
+        revocation_list: &RevocationList,
+        use_store: &mut S,
+        max_uses: u64,
+        expected_audience: Option<&str>,
+    ) -> Result<(), TokenError> {
+        // First verify basic token properties
+        self.verify_with_audience(secret, current_time, expected_audience)?;
+
+        match &self.jti {
+            Some(jti) => {
+                // Check revocation first
+                if revocation_list.is_revoked(jti) {
+                    return Err(TokenError::Revoked { jti: jti.clone() });
+                }
+
+                // Then check and consume use
+                if use_store.try_use(jti, max_uses) == UseResult::Exceeded {
+                    return Err(TokenError::ReplayDetected { jti: jti.clone() });
                 }
             }
             None => {
