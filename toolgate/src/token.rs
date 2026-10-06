@@ -1805,4 +1805,334 @@ mod tests {
             Err(TokenError::ConstraintViolation { key }) if key == "path"
         ));
     }
+
+    // ===== JTI tests =====
+
+    #[test]
+    fn mint_with_jti() {
+        let token = Token::mint_with_jti(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            true,
+        );
+
+        assert!(token.jti.is_some());
+        let jti = token.jti.as_ref().unwrap();
+        assert_eq!(jti.len(), 32); // 16 bytes hex-encoded
+        assert!(token.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn mint_without_jti() {
+        let token = Token::mint_with_jti(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            false,
+        );
+
+        assert!(token.jti.is_none());
+        assert!(token.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn jti_included_in_mac() {
+        let token = Token::mint_with_jti(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            true,
+        );
+
+        // Tamper with jti
+        let mut tampered = token.clone();
+        tampered.jti = Some("different_jti_value_here".to_string());
+        assert_eq!(
+            tampered.verify(SECRET, 1999999999),
+            Err(TokenError::InvalidMac)
+        );
+    }
+
+    #[test]
+    fn jti_preserved_after_attenuation() {
+        let token = Token::mint_with_jti(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            true,
+        );
+
+        let attenuated = token
+            .attenuate(SECRET, Some(vec!["path".into()]), None)
+            .unwrap();
+
+        assert_eq!(attenuated.jti, token.jti);
+        assert!(attenuated.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn jti_json_roundtrip() {
+        let token = Token::mint_with_jti(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            true,
+        );
+
+        let json = serde_json::to_string(&token).unwrap();
+        assert!(json.contains("jti"));
+
+        let parsed: Token = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.jti, token.jti);
+        assert!(parsed.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn no_jti_omitted_from_json() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+        let json = serde_json::to_string(&token).unwrap();
+        assert!(!json.contains("jti"));
+    }
+
+    // ===== Revocation tests =====
+
+    #[test]
+    fn verify_with_revocation_valid() {
+        use crate::revocation::RevocationList;
+
+        let token = Token::mint_with_jti(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            true,
+        );
+
+        let revocation_list = RevocationList::new();
+        assert!(token
+            .verify_with_revocation(SECRET, 1999999999, &revocation_list)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_with_revocation_revoked() {
+        use crate::revocation::RevocationList;
+
+        let token = Token::mint_with_jti(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            true,
+        );
+
+        let mut revocation_list = RevocationList::new();
+        revocation_list.revoke(token.jti.clone().unwrap());
+
+        let result = token.verify_with_revocation(SECRET, 1999999999, &revocation_list);
+        assert!(matches!(result, Err(TokenError::Revoked { jti }) if jti == token.jti.unwrap()));
+    }
+
+    #[test]
+    fn verify_with_revocation_missing_jti() {
+        use crate::revocation::RevocationList;
+
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+        assert!(token.jti.is_none());
+
+        let revocation_list = RevocationList::new();
+        let result = token.verify_with_revocation(SECRET, 1999999999, &revocation_list);
+        assert_eq!(result, Err(TokenError::MissingJti));
+    }
+
+    // ===== UseStore tests =====
+
+    #[test]
+    fn verify_single_use_accepted() {
+        use crate::use_store::MemoryUseStore;
+
+        let token = Token::mint_with_jti(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            true,
+        );
+
+        let mut store = MemoryUseStore::new();
+        assert!(token.verify_single_use(SECRET, 1999999999, &mut store).is_ok());
+    }
+
+    #[test]
+    fn verify_single_use_replay() {
+        use crate::use_store::MemoryUseStore;
+
+        let token = Token::mint_with_jti(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            true,
+        );
+
+        let mut store = MemoryUseStore::new();
+        assert!(token.verify_single_use(SECRET, 1999999999, &mut store).is_ok());
+
+        // Second use should fail
+        let result = token.verify_single_use(SECRET, 1999999999, &mut store);
+        assert!(matches!(result, Err(TokenError::ReplayDetected { jti }) if jti == token.jti.unwrap()));
+    }
+
+    #[test]
+    fn verify_max_uses() {
+        use crate::use_store::MemoryUseStore;
+
+        let token = Token::mint_with_jti(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            true,
+        );
+
+        let mut store = MemoryUseStore::new();
+
+        // Allow 3 uses
+        assert!(token
+            .verify_with_max_uses(SECRET, 1999999999, &mut store, 3, None)
+            .is_ok());
+        assert!(token
+            .verify_with_max_uses(SECRET, 1999999999, &mut store, 3, None)
+            .is_ok());
+        assert!(token
+            .verify_with_max_uses(SECRET, 1999999999, &mut store, 3, None)
+            .is_ok());
+
+        // Fourth use should fail
+        let result = token.verify_with_max_uses(SECRET, 1999999999, &mut store, 3, None);
+        assert!(matches!(result, Err(TokenError::ReplayDetected { .. })));
+    }
+
+    #[test]
+    fn verify_single_use_missing_jti() {
+        use crate::use_store::MemoryUseStore;
+
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+
+        let mut store = MemoryUseStore::new();
+        let result = token.verify_single_use(SECRET, 1999999999, &mut store);
+        assert_eq!(result, Err(TokenError::MissingJti));
+    }
+
+    #[test]
+    fn verify_with_revocation_and_use_store() {
+        use crate::revocation::RevocationList;
+        use crate::use_store::MemoryUseStore;
+
+        let token = Token::mint_with_jti(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            true,
+        );
+
+        let revocation_list = RevocationList::new();
+        let mut store = MemoryUseStore::new();
+
+        // First use succeeds
+        assert!(token
+            .verify_with_revocation_and_use_store(
+                SECRET,
+                1999999999,
+                &revocation_list,
+                &mut store,
+                1,
+                None
+            )
+            .is_ok());
+
+        // Second use fails (max_uses=1)
+        let result = token.verify_with_revocation_and_use_store(
+            SECRET,
+            1999999999,
+            &revocation_list,
+            &mut store,
+            1,
+            None,
+        );
+        assert!(matches!(result, Err(TokenError::ReplayDetected { .. })));
+    }
+
+    #[test]
+    fn verify_revocation_checked_before_use_store() {
+        use crate::revocation::RevocationList;
+        use crate::use_store::MemoryUseStore;
+
+        let token = Token::mint_with_jti(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            true,
+        );
+
+        let mut revocation_list = RevocationList::new();
+        revocation_list.revoke(token.jti.clone().unwrap());
+        let mut store = MemoryUseStore::new();
+
+        // Should fail with Revoked, not consume a use
+        let result = token.verify_with_revocation_and_use_store(
+            SECRET,
+            1999999999,
+            &revocation_list,
+            &mut store,
+            1,
+            None,
+        );
+        assert!(matches!(result, Err(TokenError::Revoked { .. })));
+        assert_eq!(store.get_count(token.jti.as_ref().unwrap()), 0);
+    }
 }
