@@ -1,11 +1,13 @@
 //! Token creation, attenuation, and verification.
 
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
+use crate::clock::{Clock, VerifyTime};
 use crate::constraint::Constraints;
 use crate::encoding::encode_canonical_v6;
 use crate::revocation::RevocationList;
@@ -297,11 +299,13 @@ impl Token {
     ///
     /// This does not check audience. Use `verify_with_audience` if you need
     /// to verify that the token is bound to a specific audience.
+    ///
+    /// `current_time` is treated as a [`FixedClock`] with zero leeway.
     pub fn verify(&self, secret: &[u8], current_time: u64) -> Result<(), TokenError> {
         self.verify_with_audience(secret, current_time, None)
     }
 
-    /// Verify the token's MAC, expiry, and optionally audience.
+    /// Verify the token's MAC, expiry, not-before, and optionally audience.
     ///
     /// If `expected_audience` is `Some(aud)`:
     /// - Token must have a matching audience, or
@@ -314,10 +318,56 @@ impl Token {
         current_time: u64,
         expected_audience: Option<&str>,
     ) -> Result<(), TokenError> {
-        // Check expiry first
-        if current_time > self.expiry {
-            return Err(TokenError::Expired);
-        }
+        self.verify_at(secret, &VerifyTime::unix(current_time), expected_audience)
+    }
+
+    /// Verify using an explicit unix timestamp and clock-skew leeway.
+    pub fn verify_with_leeway(
+        &self,
+        secret: &[u8],
+        current_time: u64,
+        leeway: Duration,
+    ) -> Result<(), TokenError> {
+        self.verify_at(
+            secret,
+            &VerifyTime::unix_with_leeway(current_time, leeway),
+            None,
+        )
+    }
+
+    /// Verify using a swappable [`Clock`] and clock-skew leeway.
+    pub fn verify_with_clock<C: Clock>(
+        &self,
+        secret: &[u8],
+        clock: &C,
+        leeway: Duration,
+    ) -> Result<(), TokenError> {
+        self.verify_with_clock_and_audience(secret, clock, leeway, None)
+    }
+
+    /// Verify using a swappable [`Clock`], leeway, and optional audience.
+    pub fn verify_with_clock_and_audience<C: Clock>(
+        &self,
+        secret: &[u8],
+        clock: &C,
+        leeway: Duration,
+        expected_audience: Option<&str>,
+    ) -> Result<(), TokenError> {
+        self.verify_at(
+            secret,
+            &VerifyTime::unix_with_leeway(clock.now_unix(), leeway),
+            expected_audience,
+        )
+    }
+
+    /// Verify using a bundled clock and leeway.
+    pub fn verify_at<C: Clock>(
+        &self,
+        secret: &[u8],
+        time: &VerifyTime<C>,
+        expected_audience: Option<&str>,
+    ) -> Result<(), TokenError> {
+        self.check_time_window(time.now_unix(), time.leeway)?;
 
         // Check audience if required
         if let Some(expected) = expected_audience {
@@ -353,6 +403,23 @@ impl Token {
         } else {
             Err(TokenError::InvalidMac)
         }
+    }
+
+    /// Check expiry and optional not-before against `now`, applying `leeway`.
+    ///
+    /// A token is expired if `now > expiry + leeway`.
+    /// A token is not yet valid if `now + leeway < nbf`.
+    fn check_time_window(&self, now: u64, leeway: Duration) -> Result<(), TokenError> {
+        let leeway_secs = leeway.as_secs();
+        if now > self.expiry.saturating_add(leeway_secs) {
+            return Err(TokenError::Expired);
+        }
+        if let Some(nbf) = self.nbf {
+            if now.saturating_add(leeway_secs) < nbf {
+                return Err(TokenError::NotYetValid);
+            }
+        }
+        Ok(())
     }
 
     /// Verify the token's MAC, expiry, and check against a revocation list.
@@ -2103,6 +2170,109 @@ mod tests {
         assert_eq!(parsed.max_depth, Some(1));
         assert_eq!(parsed.depth, 0);
         assert!(parsed.verify(SECRET, 1_950_000_000).is_ok());
+    }
+
+    #[test]
+    fn nbf_accepts_when_current_time_reached() {
+        let token = Token::mint_complete(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            false,
+            Some(1_900_000_000),
+            None,
+        );
+
+        assert!(token.verify(SECRET, 1_900_000_000).is_ok());
+        assert!(token.verify(SECRET, 1_950_000_000).is_ok());
+    }
+
+    #[test]
+    fn nbf_rejects_before_not_before() {
+        let token = Token::mint_complete(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            false,
+            Some(1_900_000_000),
+            None,
+        );
+
+        assert_eq!(
+            token.verify(SECRET, 1_899_999_999),
+            Err(TokenError::NotYetValid)
+        );
+    }
+
+    #[test]
+    fn verify_with_fixed_clock() {
+        use crate::clock::FixedClock;
+
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 1000);
+        let clock = FixedClock::at(999);
+        assert!(token
+            .verify_with_clock(SECRET, &clock, Duration::ZERO)
+            .is_ok());
+
+        let clock = FixedClock::at(1001);
+        assert_eq!(
+            token.verify_with_clock(SECRET, &clock, Duration::ZERO),
+            Err(TokenError::Expired)
+        );
+    }
+
+    #[test]
+    fn leeway_accepts_recently_expired_token() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 1000);
+
+        assert_eq!(token.verify(SECRET, 1010), Err(TokenError::Expired));
+        assert!(token
+            .verify_with_leeway(SECRET, 1010, Duration::from_secs(30))
+            .is_ok());
+        assert_eq!(
+            token.verify_with_leeway(SECRET, 1031, Duration::from_secs(30)),
+            Err(TokenError::Expired)
+        );
+    }
+
+    #[test]
+    fn leeway_accepts_token_slightly_before_nbf() {
+        let token = Token::mint_complete(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000,
+            None,
+            None,
+            None,
+            false,
+            Some(1000),
+            None,
+        );
+
+        assert_eq!(token.verify(SECRET, 990), Err(TokenError::NotYetValid));
+        assert!(token
+            .verify_with_leeway(SECRET, 990, Duration::from_secs(30))
+            .is_ok());
+        assert_eq!(
+            token.verify_with_leeway(SECRET, 969, Duration::from_secs(30)),
+            Err(TokenError::NotYetValid)
+        );
+    }
+
+    #[test]
+    fn verify_at_uses_bundled_clock_and_leeway() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 1000);
+        let time = VerifyTime::unix_with_leeway(1010, Duration::from_secs(15));
+        assert!(token.verify_at(SECRET, &time, None).is_ok());
     }
 
     // ===== Revocation tests =====
