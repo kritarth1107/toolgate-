@@ -1,10 +1,11 @@
 //! Example demonstrating the complete token flow:
 //! mint → attenuate → verify_call (with value constraints)
+//! And: revocation and replay prevention
 //!
 //! Run with: cargo run --example tool_call_flow
 
 use std::collections::BTreeMap;
-use toolgate::{Constraint, Token};
+use toolgate::{Constraint, MemoryUseStore, RevocationList, Token};
 
 fn main() {
     let secret = b"example-secret-key-32-bytes-!!";
@@ -13,8 +14,8 @@ fn main() {
 
     println!("=== Toolgate Token Flow Example ===\n");
 
-    // Step 1: Server mints a token with constraints
-    println!("1. Minting token for read_file tool with constraints...");
+    // Step 1: Server mints a token with constraints and jti for tracking
+    println!("1. Minting token for read_file tool with constraints and jti...");
 
     let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
     constraints.insert("path".to_string(), Constraint::Prefix("/data/".to_string()));
@@ -23,7 +24,7 @@ fn main() {
         Constraint::IntRange { min: 1, max: 1000 },
     );
 
-    let token = Token::mint_full(
+    let token = Token::mint_with_jti(
         secret,
         "read_file",
         vec!["path".into(), "limit".into(), "format".into()],
@@ -31,15 +32,17 @@ fn main() {
         Some("client-abc".to_string()),
         None,
         Some(constraints),
+        true, // generate jti for revocation/replay tracking
     );
 
     println!("   Tool: {}", token.tool_name);
     println!("   Allowed args: {:?}", token.arg_keys);
     println!("   Constraints: {:?}", token.constraints);
     println!("   Audience: {:?}", token.audience);
+    println!("   JTI: {:?}", token.jti);
     println!();
 
-    // Step 2: Token is attenuated to tighten constraints
+    // Step 2: Token is attenuated to tighten constraints (jti preserved)
     println!("2. Attenuating token (tightening path constraint to /data/public/)...");
 
     let mut tighter: BTreeMap<String, Constraint> = BTreeMap::new();
@@ -66,6 +69,7 @@ fn main() {
         "   Constraints after attenuation: {:?}",
         attenuated.constraints
     );
+    println!("   JTI preserved: {}", attenuated.jti == token.jti);
     println!();
 
     // Step 3: Verify calls with argument values
@@ -130,9 +134,59 @@ fn main() {
     println!("   valid args, wrong audience: {}", format_result(&result));
 
     println!();
+    println!("=== Revocation and Replay Prevention ===\n");
+
+    // Mint a single-use token
+    println!("4. Single-use token (replay prevention)...");
+    let single_use_token = Token::mint_with_jti(
+        secret,
+        "sensitive_op",
+        vec!["action".into()],
+        expiry,
+        None,
+        None,
+        None,
+        true,
+    );
+    println!("   JTI: {:?}", single_use_token.jti);
+
+    let mut use_store = MemoryUseStore::new();
+
+    let result = single_use_token.verify_single_use(secret, current_time, &mut use_store);
+    println!("   First use: {}", format_result(&result));
+
+    let result = single_use_token.verify_single_use(secret, current_time, &mut use_store);
+    println!("   Second use (replay): {}", format_result(&result));
+
+    println!();
+    println!("5. Token revocation...");
+
+    let revocable_token = Token::mint_with_jti(
+        secret,
+        "revocable_op",
+        vec![],
+        expiry,
+        None,
+        None,
+        None,
+        true,
+    );
+    println!("   JTI: {:?}", revocable_token.jti);
+
+    let mut revocation_list = RevocationList::new();
+
+    let result = revocable_token.verify_with_revocation(secret, current_time, &revocation_list);
+    println!("   Before revocation: {}", format_result(&result));
+
+    revocation_list.revoke(revocable_token.jti.clone().unwrap());
+
+    let result = revocable_token.verify_with_revocation(secret, current_time, &revocation_list);
+    println!("   After revocation: {}", format_result(&result));
+
+    println!();
     println!("=== Wire Format ===\n");
 
-    // Demonstrate wire encoding (includes constraints)
+    // Demonstrate wire encoding (includes constraints and jti)
     let wire = attenuated.to_wire();
     let json = serde_json::to_string(&attenuated).unwrap();
     println!("   Wire format: {} bytes", wire.len());
@@ -146,6 +200,10 @@ fn main() {
     println!(
         "   Constraints preserved after roundtrip: {}",
         decoded.constraints == attenuated.constraints
+    );
+    println!(
+        "   JTI preserved after roundtrip: {}",
+        decoded.jti == attenuated.jti
     );
 }
 
