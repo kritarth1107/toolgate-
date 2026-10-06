@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::time::{SystemTime, UNIX_EPOCH};
-use toolgate::{Constraints, Token, TokenError};
+use toolgate::{Constraints, RevocationList, Token, TokenError};
 
 #[derive(Parser)]
 #[command(name = "tg")]
@@ -36,6 +36,8 @@ struct MintInput {
     audience: Option<String>,
     #[serde(default)]
     constraints: Option<Constraints>,
+    #[serde(default)]
+    generate_jti: bool,
 }
 
 #[derive(Serialize)]
@@ -83,6 +85,8 @@ struct CheckCallInput {
     current_time: Option<u64>,
     #[serde(default)]
     audience: Option<String>,
+    #[serde(default)]
+    revoked: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -142,7 +146,7 @@ fn handle_mint() -> Result<(), Box<dyn std::error::Error>> {
     let input: MintInput = serde_json::from_str(&read_stdin()?)?;
     let secret = decode_secret(&input.secret);
 
-    let token = Token::mint_full(
+    let token = Token::mint_with_jti(
         &secret,
         input.tool_name,
         input.arg_keys,
@@ -150,6 +154,7 @@ fn handle_mint() -> Result<(), Box<dyn std::error::Error>> {
         input.audience,
         None,
         input.constraints,
+        input.generate_jti,
     );
 
     let output = MintOutput { token };
@@ -202,6 +207,11 @@ fn handle_check_call() -> Result<(), Box<dyn std::error::Error>> {
     let secret = decode_secret(&input.secret);
     let current_time = input.current_time.unwrap_or_else(current_unix_time);
 
+    // Build revocation list if provided
+    let revocation_list = input
+        .revoked
+        .map(|jtis| RevocationList::from_iter(jtis.into_iter()));
+
     // If args provided, use verify_call_with_args for constraint checking
     // Otherwise fall back to verify_call with just arg_keys
     let result = if let Some(ref args) = input.args {
@@ -221,6 +231,21 @@ fn handle_check_call() -> Result<(), Box<dyn std::error::Error>> {
             &arg_keys_refs,
             input.audience.as_deref(),
         )
+    };
+
+    // Check revocation if list provided and basic verification passed
+    let result = match (result, &revocation_list) {
+        (Ok(()), Some(list)) => {
+            // Check against revocation list
+            match &input.token.jti {
+                Some(jti) if list.is_revoked(jti) => {
+                    Err(TokenError::Revoked { jti: jti.clone() })
+                }
+                Some(_) => Ok(()),
+                None => Err(TokenError::MissingJti),
+            }
+        }
+        (result, _) => result,
     };
 
     let output = match result {
