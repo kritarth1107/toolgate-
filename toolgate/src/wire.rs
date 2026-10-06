@@ -661,4 +661,143 @@ mod tests {
         let token = result.unwrap();
         assert!(token.constraints.is_none());
     }
+
+    #[test]
+    fn wire_v3_token_decodes_without_jti() {
+        // Manually construct a v3 wire format token (with constraints, no jti)
+        let mut data = vec![3u8]; // Version 3
+        data.extend_from_slice(&[0, 4]); // tool name length
+        data.extend_from_slice(b"test");
+        data.extend_from_slice(&[0, 0]); // 0 arg keys
+        data.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0x07, 0xD0]); // expiry = 2000
+        data.push(16); // nonce length
+        data.extend_from_slice(&[0u8; 16]); // nonce
+        data.push(32); // mac length
+        data.extend_from_slice(&[0u8; 32]); // mac
+        data.extend_from_slice(&[0, 0]); // no audience
+        data.extend_from_slice(&[0, 0]); // no kid
+        data.extend_from_slice(&[0, 0]); // 0 constraints
+
+        let result = Token::from_wire(&data);
+        assert!(result.is_ok());
+        let token = result.unwrap();
+        assert!(token.constraints.is_none());
+        assert!(token.jti.is_none());
+    }
+
+    #[test]
+    fn wire_roundtrip_with_jti() {
+        let token = Token::mint_with_jti(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            true,
+        );
+        assert!(token.jti.is_some());
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.jti, token.jti);
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn wire_roundtrip_with_jti_and_constraints() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+
+        let token = Token::mint_with_jti(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            Some("client".to_string()),
+            Some("key1".to_string()),
+            Some(constraints.clone()),
+            true,
+        );
+        assert!(token.jti.is_some());
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.jti, token.jti);
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert_eq!(decoded.audience, Some("client".to_string()));
+        assert_eq!(decoded.kid, Some("key1".to_string()));
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn wire_roundtrip_without_jti() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+        assert!(token.jti.is_none());
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert!(decoded.jti.is_none());
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn wire_v4_backward_compatible_decoding() {
+        // Create tokens with various combinations and verify roundtrip
+        let cases = vec![
+            (true, false, false, false),  // only jti
+            (false, true, false, false),  // only constraints
+            (true, true, false, false),   // jti + constraints
+            (true, true, true, true),     // all fields
+            (false, false, false, false), // none
+        ];
+
+        for (has_jti, has_constraints, has_audience, has_kid) in cases {
+            use crate::constraint::Constraint;
+            use std::collections::BTreeMap;
+
+            let constraints = if has_constraints {
+                let mut c: BTreeMap<String, Constraint> = BTreeMap::new();
+                c.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+                Some(c)
+            } else {
+                None
+            };
+
+            let token = Token::mint_with_jti(
+                SECRET,
+                "test",
+                vec!["path".into()],
+                2000000000,
+                if has_audience {
+                    Some("aud".to_string())
+                } else {
+                    None
+                },
+                if has_kid {
+                    Some("kid".to_string())
+                } else {
+                    None
+                },
+                constraints.clone(),
+                has_jti,
+            );
+
+            let wire = token.to_wire();
+            let decoded = Token::from_wire(&wire).unwrap();
+
+            assert_eq!(decoded.jti.is_some(), has_jti);
+            assert_eq!(decoded.constraints.is_some(), has_constraints);
+            assert_eq!(decoded.audience.is_some(), has_audience);
+            assert_eq!(decoded.kid.is_some(), has_kid);
+            assert!(decoded.verify(SECRET, 1999999999).is_ok());
+        }
+    }
 }

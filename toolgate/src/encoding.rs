@@ -496,6 +496,54 @@ mod tests {
         assert_eq!(constraint_section[2..5], [0x00, 0x01, b'a']); // first key is "a"
     }
 
+    #[test]
+    fn encoding_with_jti() {
+        let bytes = encode_canonical_v5(
+            "read",
+            &["path".into()],
+            1000,
+            &[0xAB],
+            None,
+            None,
+            None,
+            Some("abc123"),
+        );
+
+        // Should end with jti
+        assert!(bytes.ends_with(&[
+            0x00, 0x06, // jti length 6
+            b'a', b'b', b'c', b'1', b'2', b'3', // "abc123"
+        ]));
+    }
+
+    #[test]
+    fn encoding_v5_no_jti_equals_v4() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+
+        let v4 = encode_canonical_v4(
+            "tool",
+            &["path".into()],
+            1000,
+            &[1, 2],
+            Some("aud"),
+            Some("k1"),
+            Some(&constraints),
+        );
+        let v5 = encode_canonical_v5(
+            "tool",
+            &["path".into()],
+            1000,
+            &[1, 2],
+            Some("aud"),
+            Some("k1"),
+            Some(&constraints),
+            None,
+        );
+        assert_eq!(v4, v5);
+    }
+
     // ===== Backward compatibility tests =====
 
     #[test]
@@ -565,6 +613,88 @@ mod tests {
         let v2 = encode_canonical_v2("tool", &["x".into()], 500, &[0x01, 0x02], None);
 
         assert_eq!(v1, v2, "v2 without audience should equal v1");
+    }
+
+    #[test]
+    fn v5_no_jti_identical_to_v4() {
+        use std::collections::BTreeMap;
+
+        // With constraints
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+
+        let v4 = encode_canonical_v4(
+            "read_file",
+            &["path".into()],
+            1700000000,
+            &[0xDE, 0xAD, 0xBE, 0xEF],
+            Some("client"),
+            Some("key1"),
+            Some(&constraints),
+        );
+
+        let v5_none = encode_canonical_v5(
+            "read_file",
+            &["path".into()],
+            1700000000,
+            &[0xDE, 0xAD, 0xBE, 0xEF],
+            Some("client"),
+            Some("key1"),
+            Some(&constraints),
+            None,
+        );
+
+        assert_eq!(v4, v5_none, "v5 with None jti should equal v4");
+    }
+
+    #[test]
+    fn v5_no_jti_no_constraints_identical_to_v3() {
+        let v3 = encode_canonical_v3(
+            "read_file",
+            &["path".into()],
+            1700000000,
+            &[0xDE, 0xAD, 0xBE, 0xEF],
+            Some("client"),
+            Some("key1"),
+        );
+
+        let v5 = encode_canonical_v5(
+            "read_file",
+            &["path".into()],
+            1700000000,
+            &[0xDE, 0xAD, 0xBE, 0xEF],
+            Some("client"),
+            Some("key1"),
+            None,
+            None,
+        );
+
+        assert_eq!(v3, v5, "v5 with no constraints and no jti should equal v3");
+    }
+
+    #[test]
+    fn known_v5_encoding_with_jti_is_stable() {
+        // This test ensures the v5 encoding with jti remains stable
+        let bytes = encode_canonical_v5(
+            "read",
+            &["path".into()],
+            1700000000,
+            &[0xDE, 0xAD, 0xBE, 0xEF],
+            Some("client"),
+            Some("key1"),
+            None,
+            Some("jti123"),
+        );
+
+        // Check that jti is appended at the end
+        let jti_section = &bytes[bytes.len() - 8..];
+        assert_eq!(
+            jti_section,
+            &[
+                0x00, 0x06, // jti length 6
+                b'j', b't', b'i', b'1', b'2', b'3'
+            ]
+        );
     }
 
     #[test]
