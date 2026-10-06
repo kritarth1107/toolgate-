@@ -3,11 +3,11 @@
 //! This module provides a space-efficient binary encoding for tokens,
 //! suitable for transmission over constrained channels.
 //!
-//! ## Wire Format v4 (all integers big-endian)
+//! ## Wire Format v5 (all integers big-endian)
 //!
 //! | Field | Encoding |
 //! |-------|----------|
-//! | version | u8 (currently 4) |
+//! | version | u8 (5 when nbf/depth/max_depth are set; otherwise 4) |
 //! | tool_name | u16 length + UTF-8 bytes |
 //! | arg_keys_count | u16 |
 //! | arg_keys | for each: u16 length + UTF-8 bytes |
@@ -19,15 +19,24 @@
 //! | constraints_count | u16 (0 = none) |
 //! | constraints | for each: key + type + data (same encoding as canonical) |
 //! | jti | u16 length + UTF-8 bytes (0 = none) |
+//! | nbf_flag | u8 (v5 only; 0 = none, 1 = present) |
+//! | nbf | u64 (v5 only, if nbf_flag = 1) |
+//! | depth | u32 (v5 only) |
+//! | max_depth_flag | u8 (v5 only; 0 = none, 1 = present) |
+//! | max_depth | u32 (v5 only, if max_depth_flag = 1) |
 //!
-//! Wire format v1 (no kid), v2 (no constraints), and v3 (no jti) are still supported for decoding.
+//! Tokens without nbf, with depth 0, and without max_depth encode as v4 so
+//! the bytes match v0.5. Wire formats v1–v4 are still supported for decoding.
 
 use crate::constraint::{Constraint, Constraints};
 use crate::Token;
 use std::collections::BTreeMap;
 
-/// Current wire format version (supports jti)
-const WIRE_VERSION: u8 = 4;
+/// Current wire format version (supports nbf and attenuation depth)
+const WIRE_VERSION: u8 = 5;
+
+/// Wire version used when nbf/depth/max_depth are unset (identical to v0.5).
+const WIRE_VERSION_V4: u8 = 4;
 
 /// Minimum supported wire format version
 const WIRE_VERSION_MIN: u8 = 1;
@@ -170,12 +179,24 @@ fn decode_constraint_from_wire(
 }
 
 impl Token {
+    fn has_v5_fields(&self) -> bool {
+        self.nbf.is_some() || self.depth > 0 || self.max_depth.is_some()
+    }
+
     /// Encode this token to compact binary wire format.
+    ///
+    /// Tokens without nbf/depth/max_depth are written as v4 so the bytes
+    /// match the v0.5 encoding of the same fields.
     pub fn to_wire(&self) -> Vec<u8> {
         let mut buf = Vec::new();
 
-        // Version
-        buf.push(WIRE_VERSION);
+        // Version: stay on v4 when the v5 fields are unset
+        let version = if self.has_v5_fields() {
+            WIRE_VERSION
+        } else {
+            WIRE_VERSION_V4
+        };
+        buf.push(version);
 
         // Tool name
         let name_bytes = self.tool_name.as_bytes();
@@ -248,6 +269,25 @@ impl Token {
             }
             None => {
                 buf.extend_from_slice(&0u16.to_be_bytes());
+            }
+        }
+
+        // nbf / depth / max_depth (v5 only)
+        if version >= WIRE_VERSION {
+            match self.nbf {
+                Some(nbf) => {
+                    buf.push(1);
+                    buf.extend_from_slice(&nbf.to_be_bytes());
+                }
+                None => buf.push(0),
+            }
+            buf.extend_from_slice(&self.depth.to_be_bytes());
+            match self.max_depth {
+                Some(max) => {
+                    buf.push(1);
+                    buf.extend_from_slice(&max.to_be_bytes());
+                }
+                None => buf.push(0),
             }
         }
 
@@ -355,6 +395,30 @@ impl Token {
             None
         };
 
+        // nbf / depth / max_depth (v5+ only)
+        let (nbf, depth, max_depth) = if version >= 5 {
+            let nbf_flag = *read_bytes(&mut pos, 1)?.first().unwrap();
+            let nbf = if nbf_flag == 1 {
+                Some(u64::from_be_bytes(
+                    read_bytes(&mut pos, 8)?.try_into().unwrap(),
+                ))
+            } else {
+                None
+            };
+            let depth = u32::from_be_bytes(read_bytes(&mut pos, 4)?.try_into().unwrap());
+            let max_flag = *read_bytes(&mut pos, 1)?.first().unwrap();
+            let max_depth = if max_flag == 1 {
+                Some(u32::from_be_bytes(
+                    read_bytes(&mut pos, 4)?.try_into().unwrap(),
+                ))
+            } else {
+                None
+            };
+            (nbf, depth, max_depth)
+        } else {
+            (None, 0, None)
+        };
+
         Ok(Token {
             tool_name,
             arg_keys,
@@ -365,9 +429,9 @@ impl Token {
             kid,
             constraints,
             jti,
-            nbf: None,
-            depth: 0,
-            max_depth: None,
+            nbf,
+            depth,
+            max_depth,
         })
     }
 }
@@ -474,8 +538,9 @@ mod tests {
         let token = Token::mint(SECRET, "test", vec![], 1000);
         let wire = token.to_wire();
 
-        assert_eq!(wire[0], WIRE_VERSION);
-        assert_eq!(wire[0], 4); // Current version is 4
+        // Tokens without nbf/depth/max_depth stay on v4 (identical to v0.5)
+        assert_eq!(wire[0], WIRE_VERSION_V4);
+        assert_eq!(wire[0], 4);
     }
 
     #[test]
@@ -802,5 +867,82 @@ mod tests {
             assert_eq!(decoded.kid.is_some(), has_kid);
             assert!(decoded.verify(SECRET, 1999999999).is_ok());
         }
+    }
+
+    #[test]
+    fn wire_roundtrip_with_nbf_and_depth() {
+        let token = Token::mint_complete(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            false,
+            Some(1_900_000_000),
+            Some(3),
+        );
+        let attenuated = token.attenuate(SECRET, None, Some(1950000000)).unwrap();
+        assert_eq!(attenuated.depth, 1);
+
+        let wire = attenuated.to_wire();
+        assert_eq!(wire[0], WIRE_VERSION);
+        assert_eq!(wire[0], 5);
+
+        let decoded = Token::from_wire(&wire).unwrap();
+        assert_eq!(decoded.nbf, Some(1_900_000_000));
+        assert_eq!(decoded.depth, 1);
+        assert_eq!(decoded.max_depth, Some(3));
+        assert!(decoded.verify(SECRET, 1_940_000_000).is_ok());
+    }
+
+    #[test]
+    fn wire_v4_v05_token_decodes_without_nbf_or_depth() {
+        // Manually construct a v4 (v0.5) wire token: jti present, no nbf/depth
+        let mut data = vec![4u8]; // Version 4
+        data.extend_from_slice(&[0, 4]); // tool name length
+        data.extend_from_slice(b"test");
+        data.extend_from_slice(&[0, 0]); // 0 arg keys
+        data.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0x07, 0xD0]); // expiry = 2000
+        data.push(16); // nonce length
+        data.extend_from_slice(&[0u8; 16]); // nonce
+        data.push(32); // mac length
+        data.extend_from_slice(&[0u8; 32]); // mac
+        data.extend_from_slice(&[0, 0]); // no audience
+        data.extend_from_slice(&[0, 0]); // no kid
+        data.extend_from_slice(&[0, 0]); // 0 constraints
+        data.extend_from_slice(&[0, 6]); // jti length 6
+        data.extend_from_slice(b"jti123");
+
+        let token = Token::from_wire(&data).unwrap();
+        assert_eq!(token.jti.as_deref(), Some("jti123"));
+        assert!(token.nbf.is_none());
+        assert_eq!(token.depth, 0);
+        assert!(token.max_depth.is_none());
+    }
+
+    #[test]
+    fn wire_v05_bytes_match_tokens_without_new_fields() {
+        // A freshly minted token without nbf/depth/max_depth must encode as
+        // the v0.5 v4 layout: version byte 4 and no trailing v5 fields.
+        let token = Token::mint_with_jti(
+            SECRET,
+            "read",
+            vec!["a".into()],
+            1000,
+            None,
+            None,
+            None,
+            false,
+        );
+        let wire = token.to_wire();
+        assert_eq!(wire[0], 4);
+
+        let decoded = Token::from_wire(&wire).unwrap();
+        assert!(decoded.nbf.is_none());
+        assert_eq!(decoded.depth, 0);
+        assert!(decoded.max_depth.is_none());
+        assert!(decoded.verify(SECRET, 999).is_ok());
     }
 }
