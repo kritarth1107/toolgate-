@@ -58,7 +58,9 @@ pub fn encode_canonical_v2(
     nonce: &[u8],
     audience: Option<&str>,
 ) -> Vec<u8> {
-    encode_canonical_v5(tool_name, arg_keys, expiry, nonce, audience, None, None, None)
+    encode_canonical_v5(
+        tool_name, arg_keys, expiry, nonce, audience, None, None, None,
+    )
 }
 
 /// Encode a token's fields into canonical bytes for signing/verification (v3 format with kid).
@@ -70,7 +72,9 @@ pub fn encode_canonical_v3(
     audience: Option<&str>,
     kid: Option<&str>,
 ) -> Vec<u8> {
-    encode_canonical_v5(tool_name, arg_keys, expiry, nonce, audience, kid, None, None)
+    encode_canonical_v5(
+        tool_name, arg_keys, expiry, nonce, audience, kid, None, None,
+    )
 }
 
 /// Encode a token's fields into canonical bytes for signing/verification (v4 format with constraints).
@@ -83,10 +87,20 @@ pub fn encode_canonical_v4(
     kid: Option<&str>,
     constraints: Option<&Constraints>,
 ) -> Vec<u8> {
-    encode_canonical_v5(tool_name, arg_keys, expiry, nonce, audience, kid, constraints, None)
+    encode_canonical_v5(
+        tool_name,
+        arg_keys,
+        expiry,
+        nonce,
+        audience,
+        kid,
+        constraints,
+        None,
+    )
 }
 
 /// Encode a token's fields into canonical bytes for signing/verification (v5 format with jti).
+#[allow(clippy::too_many_arguments)]
 pub fn encode_canonical_v5(
     tool_name: &str,
     arg_keys: &[String],

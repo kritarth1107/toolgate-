@@ -72,9 +72,18 @@ impl RevocationList {
     pub fn clear(&mut self) {
         self.revoked.clear();
     }
+}
 
-    /// Create a revocation list from an iterator of jti strings.
-    pub fn from_iter<I: IntoIterator<Item = String>>(iter: I) -> Self {
+impl<I: IntoIterator<Item = String>> From<I> for RevocationList {
+    fn from(iter: I) -> Self {
+        RevocationList {
+            revoked: iter.into_iter().collect(),
+        }
+    }
+}
+
+impl FromIterator<String> for RevocationList {
+    fn from_iter<I: IntoIterator<Item = String>>(iter: I) -> Self {
         RevocationList {
             revoked: iter.into_iter().collect(),
         }
@@ -116,8 +125,9 @@ mod tests {
 
     #[test]
     fn from_iter() {
-        let list =
-            RevocationList::from_iter(vec!["jti1".to_string(), "jti2".to_string()].into_iter());
+        let list: RevocationList = vec!["jti1".to_string(), "jti2".to_string()]
+            .into_iter()
+            .collect();
         assert!(list.is_revoked("jti1"));
         assert!(list.is_revoked("jti2"));
         assert_eq!(list.len(), 2);

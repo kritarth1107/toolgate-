@@ -210,7 +210,7 @@ fn handle_check_call() -> Result<(), Box<dyn std::error::Error>> {
     // Build revocation list if provided
     let revocation_list = input
         .revoked
-        .map(|jtis| RevocationList::from_iter(jtis.into_iter()));
+        .map(|jtis| jtis.into_iter().collect::<RevocationList>());
 
     // If args provided, use verify_call_with_args for constraint checking
     // Otherwise fall back to verify_call with just arg_keys
@@ -238,9 +238,7 @@ fn handle_check_call() -> Result<(), Box<dyn std::error::Error>> {
         (Ok(()), Some(list)) => {
             // Check against revocation list
             match &input.token.jti {
-                Some(jti) if list.is_revoked(jti) => {
-                    Err(TokenError::Revoked { jti: jti.clone() })
-                }
+                Some(jti) if list.is_revoked(jti) => Err(TokenError::Revoked { jti: jti.clone() }),
                 Some(_) => Ok(()),
                 None => Err(TokenError::MissingJti),
             }

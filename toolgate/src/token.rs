@@ -42,16 +42,29 @@ pub enum TokenError {
     Expired,
     AttenuationWidens,
     AudienceMismatch,
-    ToolMismatch { expected: String, got: String },
-    ArgKeyNotAllowed { key: String },
-    UnknownKeyId { kid: String },
+    ToolMismatch {
+        expected: String,
+        got: String,
+    },
+    ArgKeyNotAllowed {
+        key: String,
+    },
+    UnknownKeyId {
+        kid: String,
+    },
     NoActiveKey,
     MissingKeyId,
-    ConstraintViolation { key: String },
+    ConstraintViolation {
+        key: String,
+    },
     /// Token has been revoked (jti found in revocation list).
-    Revoked { jti: String },
+    Revoked {
+        jti: String,
+    },
     /// Token replay detected (use count exceeded).
-    ReplayDetected { jti: String },
+    ReplayDetected {
+        jti: String,
+    },
     /// Token has no jti but revocation/replay check was requested.
     MissingJti,
 }
@@ -164,6 +177,7 @@ impl Token {
     /// When `generate_jti` is true, a unique 16-byte token identifier is generated
     /// and included in the MAC. This enables revocation and replay detection.
     /// When false, no jti is generated (backward compatible with v0.4.0).
+    #[allow(clippy::too_many_arguments)]
     pub fn mint_with_jti(
         secret: &[u8],
         tool_name: impl Into<String>,
@@ -1990,7 +2004,9 @@ mod tests {
         );
 
         let mut store = MemoryUseStore::new();
-        assert!(token.verify_single_use(SECRET, 1999999999, &mut store).is_ok());
+        assert!(token
+            .verify_single_use(SECRET, 1999999999, &mut store)
+            .is_ok());
     }
 
     #[test]
@@ -2009,11 +2025,15 @@ mod tests {
         );
 
         let mut store = MemoryUseStore::new();
-        assert!(token.verify_single_use(SECRET, 1999999999, &mut store).is_ok());
+        assert!(token
+            .verify_single_use(SECRET, 1999999999, &mut store)
+            .is_ok());
 
         // Second use should fail
         let result = token.verify_single_use(SECRET, 1999999999, &mut store);
-        assert!(matches!(result, Err(TokenError::ReplayDetected { jti }) if jti == token.jti.unwrap()));
+        assert!(
+            matches!(result, Err(TokenError::ReplayDetected { jti }) if jti == token.jti.unwrap())
+        );
     }
 
     #[test]
