@@ -278,6 +278,8 @@ fn error_to_string(e: &TokenError) -> String {
         TokenError::Revoked { .. } => "revoked".to_string(),
         TokenError::ReplayDetected { .. } => "replay_detected".to_string(),
         TokenError::MissingJti => "missing_jti".to_string(),
+        TokenError::NotYetValid => "not_yet_valid".to_string(),
+        TokenError::MaxDepthExceeded { .. } => "max_depth_exceeded".to_string(),
     }
 }
 
@@ -296,5 +298,7 @@ fn error_to_kind(e: &TokenError) -> String {
         TokenError::Revoked { .. } => "revoked".to_string(),
         TokenError::ReplayDetected { .. } => "replay_detected".to_string(),
         TokenError::MissingJti => "missing_jti".to_string(),
+        TokenError::NotYetValid => "not_yet_valid".to_string(),
+        TokenError::MaxDepthExceeded { .. } => "max_depth_exceeded".to_string(),
     }
 }

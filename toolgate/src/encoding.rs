@@ -27,6 +27,15 @@
 //! - All v4 fields
 //! - jti: u16 length + UTF-8 bytes (length 0 means no token identifier)
 //!
+//! Format v6 (backward-compatible extension):
+//! - All v5 fields
+//! - Trailer is omitted when nbf is absent, depth is 0, and max_depth is absent
+//!   (tokens without the new fields encode identically to v5)
+//! - flags: u8 bitfield (bit 0 = nbf, bit 1 = depth>0, bit 2 = max_depth)
+//! - nbf: u64 (only if bit 0 is set)
+//! - depth: u32 (only if bit 1 is set)
+//! - max_depth: u32 (only if bit 2 is set)
+//!
 //! Constraint data encoding:
 //! - Exact: u16 length + UTF-8 bytes
 //! - OneOf: u16 count + (for each value, sorted: u16 length + UTF-8 bytes)
@@ -36,7 +45,9 @@
 //!
 //! The v5 format appends jti after constraints. Tokens without jti
 //! encode identically to v4. Tokens without constraints and without jti
-//! encode identically to v3, ensuring backward compatibility.
+//! encode identically to v3. The v6 format appends nbf/depth/max_depth
+//! only when at least one is set, so tokens without those fields encode
+//! identically to v5.
 
 use crate::constraint::{Constraint, Constraints};
 
@@ -47,7 +58,9 @@ pub fn encode_canonical(
     expiry: u64,
     nonce: &[u8],
 ) -> Vec<u8> {
-    encode_canonical_v5(tool_name, arg_keys, expiry, nonce, None, None, None, None)
+    encode_canonical_v6(
+        tool_name, arg_keys, expiry, nonce, None, None, None, None, None, 0, None,
+    )
 }
 
 /// Encode a token's fields into canonical bytes for signing/verification (v2 format with audience).
@@ -58,8 +71,8 @@ pub fn encode_canonical_v2(
     nonce: &[u8],
     audience: Option<&str>,
 ) -> Vec<u8> {
-    encode_canonical_v5(
-        tool_name, arg_keys, expiry, nonce, audience, None, None, None,
+    encode_canonical_v6(
+        tool_name, arg_keys, expiry, nonce, audience, None, None, None, None, 0, None,
     )
 }
 
@@ -72,8 +85,8 @@ pub fn encode_canonical_v3(
     audience: Option<&str>,
     kid: Option<&str>,
 ) -> Vec<u8> {
-    encode_canonical_v5(
-        tool_name, arg_keys, expiry, nonce, audience, kid, None, None,
+    encode_canonical_v6(
+        tool_name, arg_keys, expiry, nonce, audience, kid, None, None, None, 0, None,
     )
 }
 
@@ -87,7 +100,7 @@ pub fn encode_canonical_v4(
     kid: Option<&str>,
     constraints: Option<&Constraints>,
 ) -> Vec<u8> {
-    encode_canonical_v5(
+    encode_canonical_v6(
         tool_name,
         arg_keys,
         expiry,
@@ -95,6 +108,9 @@ pub fn encode_canonical_v4(
         audience,
         kid,
         constraints,
+        None,
+        None,
+        0,
         None,
     )
 }
@@ -110,6 +126,39 @@ pub fn encode_canonical_v5(
     kid: Option<&str>,
     constraints: Option<&Constraints>,
     jti: Option<&str>,
+) -> Vec<u8> {
+    encode_canonical_v6(
+        tool_name,
+        arg_keys,
+        expiry,
+        nonce,
+        audience,
+        kid,
+        constraints,
+        jti,
+        None,
+        0,
+        None,
+    )
+}
+
+/// Encode a token's fields into canonical bytes (v6 format with nbf and depth).
+///
+/// When `nbf` is `None`, `depth` is 0, and `max_depth` is `None`, the output
+/// is identical to [`encode_canonical_v5`].
+#[allow(clippy::too_many_arguments)]
+pub fn encode_canonical_v6(
+    tool_name: &str,
+    arg_keys: &[String],
+    expiry: u64,
+    nonce: &[u8],
+    audience: Option<&str>,
+    kid: Option<&str>,
+    constraints: Option<&Constraints>,
+    jti: Option<&str>,
+    nbf: Option<u64>,
+    depth: u32,
+    max_depth: Option<u32>,
 ) -> Vec<u8> {
     let mut buf = Vec::new();
 
@@ -184,6 +233,31 @@ pub fn encode_canonical_v5(
         let jti_bytes = j.as_bytes();
         buf.extend_from_slice(&(jti_bytes.len() as u16).to_be_bytes());
         buf.extend_from_slice(jti_bytes);
+    }
+
+    // nbf / depth / max_depth: only encoded if any is set (v6 extension)
+    // Tokens without these fields produce identical encoding to v5
+    if nbf.is_some() || depth > 0 || max_depth.is_some() {
+        let mut flags = 0u8;
+        if nbf.is_some() {
+            flags |= 0x01;
+        }
+        if depth > 0 {
+            flags |= 0x02;
+        }
+        if max_depth.is_some() {
+            flags |= 0x04;
+        }
+        buf.push(flags);
+        if let Some(n) = nbf {
+            buf.extend_from_slice(&n.to_be_bytes());
+        }
+        if depth > 0 {
+            buf.extend_from_slice(&depth.to_be_bytes());
+        }
+        if let Some(m) = max_depth {
+            buf.extend_from_slice(&m.to_be_bytes());
+        }
     }
 
     buf
@@ -736,5 +810,90 @@ mod tests {
         ];
 
         assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn encoding_v6_no_new_fields_equals_v5() {
+        let v5 = encode_canonical_v5(
+            "read_file",
+            &["path".into()],
+            1700000000,
+            &[0xDE, 0xAD, 0xBE, 0xEF],
+            Some("client"),
+            Some("key1"),
+            None,
+            Some("jti123"),
+        );
+        let v6 = encode_canonical_v6(
+            "read_file",
+            &["path".into()],
+            1700000000,
+            &[0xDE, 0xAD, 0xBE, 0xEF],
+            Some("client"),
+            Some("key1"),
+            None,
+            Some("jti123"),
+            None,
+            0,
+            None,
+        );
+        assert_eq!(v5, v6, "v6 with no nbf/depth/max_depth should equal v5");
+    }
+
+    #[test]
+    fn encoding_with_nbf() {
+        let bytes = encode_canonical_v6(
+            "read",
+            &["a".into()],
+            1000,
+            &[0xAB],
+            None,
+            None,
+            None,
+            None,
+            Some(900),
+            0,
+            None,
+        );
+
+        assert!(bytes.ends_with(&[
+            0x01, // flags: nbf only
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0x84, // nbf = 900
+        ]));
+    }
+
+    #[test]
+    fn encoding_with_depth_and_max_depth() {
+        let bytes = encode_canonical_v6("t", &[], 0, &[], None, None, None, None, None, 2, Some(3));
+
+        assert!(bytes.ends_with(&[
+            0x06, // flags: depth + max_depth
+            0x00, 0x00, 0x00, 0x02, // depth = 2
+            0x00, 0x00, 0x00, 0x03, // max_depth = 3
+        ]));
+    }
+
+    #[test]
+    fn encoding_v6_all_new_fields() {
+        let bytes = encode_canonical_v6(
+            "t",
+            &[],
+            0,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            Some(50),
+            1,
+            Some(4),
+        );
+
+        assert!(bytes.ends_with(&[
+            0x07, // flags: nbf + depth + max_depth
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x32, // nbf = 50
+            0x00, 0x00, 0x00, 0x01, // depth = 1
+            0x00, 0x00, 0x00, 0x04, // max_depth = 4
+        ]));
     }
 }

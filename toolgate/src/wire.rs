@@ -365,6 +365,9 @@ impl Token {
             kid,
             constraints,
             jti,
+            nbf: None,
+            depth: 0,
+            max_depth: None,
         })
     }
 }

@@ -7,7 +7,7 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
 use crate::constraint::Constraints;
-use crate::encoding::encode_canonical_v5;
+use crate::encoding::encode_canonical_v6;
 use crate::revocation::RevocationList;
 use crate::use_store::{UseResult, UseStore};
 
@@ -33,6 +33,19 @@ pub struct Token {
     /// When present, covered by the MAC. Attenuated tokens inherit their parent's jti.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jti: Option<String>,
+    /// Optional not-before unix timestamp. When present, covered by the MAC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nbf: Option<u64>,
+    /// How many times this token has been attenuated. Covered by the MAC when non-zero.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub depth: u32,
+    /// Optional maximum attenuation depth. When present, covered by the MAC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_depth: Option<u32>,
+}
+
+fn is_zero_u32(value: &u32) -> bool {
+    *value == 0
 }
 
 /// Errors that can occur during token operations.
@@ -67,6 +80,13 @@ pub enum TokenError {
     },
     /// Token has no jti but revocation/replay check was requested.
     MissingJti,
+    /// Token is not yet valid (`current_time + leeway < nbf`).
+    NotYetValid,
+    /// Attenuation would exceed the token's maximum delegation depth.
+    MaxDepthExceeded {
+        depth: u32,
+        max: u32,
+    },
 }
 
 impl std::fmt::Display for TokenError {
@@ -97,6 +117,10 @@ impl std::fmt::Display for TokenError {
                 write!(f, "token replay detected (jti: {})", jti)
             }
             TokenError::MissingJti => write!(f, "token has no jti for revocation/replay check"),
+            TokenError::NotYetValid => write!(f, "token not yet valid"),
+            TokenError::MaxDepthExceeded { depth, max } => {
+                write!(f, "attenuation depth {} exceeds maximum {}", depth, max)
+            }
         }
     }
 }
@@ -188,6 +212,38 @@ impl Token {
         constraints: Option<Constraints>,
         generate_jti: bool,
     ) -> Self {
+        Self::mint_complete(
+            secret,
+            tool_name,
+            arg_keys,
+            expiry,
+            audience,
+            kid,
+            constraints,
+            generate_jti,
+            None,
+            None,
+        )
+    }
+
+    /// Mint a token with optional not-before (`nbf`) and max attenuation depth.
+    ///
+    /// `nbf` is a unix timestamp; verification fails before that time (subject
+    /// to leeway). `max_depth` limits how many times the token may be attenuated.
+    /// Freshly minted tokens start at `depth` 0.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mint_complete(
+        secret: &[u8],
+        tool_name: impl Into<String>,
+        arg_keys: Vec<String>,
+        expiry: u64,
+        audience: Option<String>,
+        kid: Option<String>,
+        constraints: Option<Constraints>,
+        generate_jti: bool,
+        nbf: Option<u64>,
+        max_depth: Option<u32>,
+    ) -> Self {
         let tool_name = tool_name.into();
         let nonce: [u8; 16] = rand::random();
 
@@ -202,7 +258,8 @@ impl Token {
             None
         };
 
-        let canonical = encode_canonical_v5(
+        let depth = 0u32;
+        let canonical = encode_canonical_v6(
             &tool_name,
             &arg_keys,
             expiry,
@@ -211,6 +268,9 @@ impl Token {
             kid.as_deref(),
             constraints.as_ref(),
             jti.as_deref(),
+            nbf,
+            depth,
+            max_depth,
         );
         let mut hmac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
         hmac.update(&canonical);
@@ -226,6 +286,9 @@ impl Token {
             kid,
             constraints,
             jti,
+            nbf,
+            depth,
+            max_depth,
         }
     }
 
@@ -267,7 +330,7 @@ impl Token {
         }
 
         // Recompute MAC
-        let canonical = encode_canonical_v5(
+        let canonical = encode_canonical_v6(
             &self.tool_name,
             &self.arg_keys,
             self.expiry,
@@ -276,6 +339,9 @@ impl Token {
             self.kid.as_deref(),
             self.constraints.as_ref(),
             self.jti.as_deref(),
+            self.nbf,
+            self.depth,
+            self.max_depth,
         );
         let mut hmac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
         hmac.update(&canonical);
@@ -554,9 +620,9 @@ impl Token {
             Self::merge_constraints(self.constraints.as_ref(), new_constraints.as_ref())?;
 
         // Generate new nonce and MAC for the attenuated token
-        // Audience, kid, and jti are preserved unchanged
+        // Audience, kid, jti, nbf, and max_depth are preserved unchanged.
         let nonce: [u8; 16] = rand::random();
-        let canonical = encode_canonical_v5(
+        let canonical = encode_canonical_v6(
             &self.tool_name,
             &final_arg_keys,
             final_expiry,
@@ -565,6 +631,9 @@ impl Token {
             self.kid.as_deref(),
             final_constraints.as_ref(),
             self.jti.as_deref(),
+            self.nbf,
+            self.depth,
+            self.max_depth,
         );
         let mut hmac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
         hmac.update(&canonical);
@@ -580,6 +649,9 @@ impl Token {
             kid: self.kid.clone(),
             constraints: final_constraints,
             jti: self.jti.clone(),
+            nbf: self.nbf,
+            depth: self.depth,
+            max_depth: self.max_depth,
         })
     }
 
@@ -1927,6 +1999,110 @@ mod tests {
         let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
         let json = serde_json::to_string(&token).unwrap();
         assert!(!json.contains("jti"));
+    }
+
+    // ===== nbf / depth field tests =====
+
+    #[test]
+    fn mint_complete_sets_nbf_and_max_depth() {
+        let token = Token::mint_complete(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            false,
+            Some(1_900_000_000),
+            Some(3),
+        );
+
+        assert_eq!(token.nbf, Some(1_900_000_000));
+        assert_eq!(token.max_depth, Some(3));
+        assert_eq!(token.depth, 0);
+        assert!(token.verify(SECRET, 1_950_000_000).is_ok());
+    }
+
+    #[test]
+    fn nbf_included_in_mac() {
+        let token = Token::mint_complete(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            false,
+            Some(1_900_000_000),
+            None,
+        );
+
+        let mut tampered = token.clone();
+        tampered.nbf = Some(1_800_000_000);
+        assert_eq!(
+            tampered.verify(SECRET, 1_950_000_000),
+            Err(TokenError::InvalidMac)
+        );
+    }
+
+    #[test]
+    fn max_depth_included_in_mac() {
+        let token = Token::mint_complete(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            false,
+            None,
+            Some(2),
+        );
+
+        let mut tampered = token.clone();
+        tampered.max_depth = Some(9);
+        assert_eq!(
+            tampered.verify(SECRET, 1999999999),
+            Err(TokenError::InvalidMac)
+        );
+    }
+
+    #[test]
+    fn nbf_and_depth_omitted_from_json_when_unset() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+        let json = serde_json::to_string(&token).unwrap();
+        assert!(!json.contains("nbf"));
+        assert!(!json.contains("depth"));
+        assert!(!json.contains("max_depth"));
+    }
+
+    #[test]
+    fn nbf_json_roundtrip() {
+        let token = Token::mint_complete(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            false,
+            Some(1_900_000_000),
+            Some(1),
+        );
+
+        let json = serde_json::to_string(&token).unwrap();
+        assert!(json.contains("nbf"));
+        assert!(json.contains("max_depth"));
+
+        let parsed: Token = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.nbf, Some(1_900_000_000));
+        assert_eq!(parsed.max_depth, Some(1));
+        assert_eq!(parsed.depth, 0);
+        assert!(parsed.verify(SECRET, 1_950_000_000).is_ok());
     }
 
     // ===== Revocation tests =====
