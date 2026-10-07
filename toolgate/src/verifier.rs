@@ -179,3 +179,261 @@ impl<'a> Verifier<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clock::FixedClock;
+    use crate::constraint::Constraint;
+    use crate::use_store::MemoryUseStore;
+
+    const SECRET: &[u8] = b"test-secret-key-32-bytes-long!!";
+    const SECRET_2: &[u8] = b"other-secret-key-32-bytes-long!";
+
+    fn basic_token() -> Token {
+        Token::mint(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into()],
+            2000000000,
+        )
+    }
+
+    #[test]
+    fn verifier_matches_verify_happy_path() {
+        let token = basic_token();
+        let expected = token.verify(SECRET, 1999999999);
+        let got = Verifier::new(SECRET).at(1999999999).verify(&token);
+        assert_eq!(got, expected);
+        assert!(got.is_ok());
+    }
+
+    #[test]
+    fn verifier_matches_expired() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 1700000000);
+        let expected = token.verify(SECRET, 1700000001);
+        let got = Verifier::new(SECRET).at(1700000001).verify(&token);
+        assert_eq!(got, expected);
+        assert_eq!(got, Err(TokenError::Expired));
+    }
+
+    #[test]
+    fn verifier_matches_nbf() {
+        let token = Token::mint_complete(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            false,
+            Some(1_900_000_000),
+            None,
+        );
+        let too_early = token.verify(SECRET, 1_899_999_999);
+        let on_time = token.verify(SECRET, 1_900_000_000);
+        assert_eq!(
+            Verifier::new(SECRET).at(1_899_999_999).verify(&token),
+            too_early
+        );
+        assert_eq!(
+            Verifier::new(SECRET).at(1_900_000_000).verify(&token),
+            on_time
+        );
+        assert_eq!(too_early, Err(TokenError::NotYetValid));
+        assert!(on_time.is_ok());
+    }
+
+    #[test]
+    fn verifier_matches_audience() {
+        let token = Token::mint_with_audience(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            Some("client-abc".to_string()),
+        );
+        let ok = token.verify_with_audience(SECRET, 1999999999, Some("client-abc"));
+        let bad = token.verify_with_audience(SECRET, 1999999999, Some("client-xyz"));
+        assert_eq!(
+            Verifier::new(SECRET)
+                .at(1999999999)
+                .audience("client-abc")
+                .verify(&token),
+            ok
+        );
+        assert_eq!(
+            Verifier::new(SECRET)
+                .at(1999999999)
+                .audience("client-xyz")
+                .verify(&token),
+            bad
+        );
+        assert_eq!(bad, Err(TokenError::AudienceMismatch));
+    }
+
+    #[test]
+    fn verifier_matches_revoked() {
+        let token = Token::mint_with_jti(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            true,
+        );
+        let mut list = RevocationList::new();
+        assert_eq!(
+            Verifier::new(SECRET)
+                .at(1999999999)
+                .revocation(&list)
+                .verify(&token),
+            token.verify_with_revocation(SECRET, 1999999999, &list)
+        );
+        list.revoke(token.jti.clone().unwrap());
+        let expected = token.verify_with_revocation(SECRET, 1999999999, &list);
+        let got = Verifier::new(SECRET)
+            .at(1999999999)
+            .revocation(&list)
+            .verify(&token);
+        assert_eq!(got, expected);
+        assert!(matches!(got, Err(TokenError::Revoked { .. })));
+    }
+
+    #[test]
+    fn verifier_matches_constraints() {
+        let mut constraints = BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+        constraints.insert(
+            "limit".to_string(),
+            Constraint::IntRange { min: 1, max: 100 },
+        );
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut good = BTreeMap::new();
+        good.insert("path".to_string(), "/tmp/a.txt".to_string());
+        good.insert("limit".to_string(), "50".to_string());
+        let mut bad = BTreeMap::new();
+        bad.insert("path".to_string(), "/etc/passwd".to_string());
+        bad.insert("limit".to_string(), "50".to_string());
+
+        assert_eq!(
+            Verifier::new(SECRET)
+                .at(1999999999)
+                .verify_call_with_args(&token, "read_file", &good),
+            token.verify_call_with_args(SECRET, 1999999999, "read_file", &good, None)
+        );
+        assert_eq!(
+            Verifier::new(SECRET)
+                .at(1999999999)
+                .verify_call_with_args(&token, "read_file", &bad),
+            token.verify_call_with_args(SECRET, 1999999999, "read_file", &bad, None)
+        );
+    }
+
+    #[test]
+    fn verifier_matches_keyring() {
+        let mut keyring = Keyring::new();
+        keyring.add("key-1", SECRET.to_vec());
+        let token = keyring
+            .mint("read_file", vec!["path".into()], 2000000000)
+            .unwrap();
+
+        assert_eq!(
+            Verifier::new(SECRET_2)
+                .keyring(&keyring)
+                .at(1999999999)
+                .verify(&token),
+            keyring.verify(&token, 1999999999)
+        );
+
+        keyring.retire("key-1");
+        assert_eq!(
+            Verifier::new(SECRET_2)
+                .keyring(&keyring)
+                .at(1999999999)
+                .verify(&token),
+            keyring.verify(&token, 1999999999)
+        );
+    }
+
+    #[test]
+    fn verifier_clock_and_leeway_match_legacy() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 1000);
+        let clock = FixedClock::at(1010);
+        assert_eq!(
+            Verifier::new(SECRET)
+                .clock(&clock)
+                .leeway(Duration::from_secs(30))
+                .verify(&token),
+            token.verify_with_clock(SECRET, &clock, Duration::from_secs(30))
+        );
+        assert_eq!(
+            Verifier::new(SECRET)
+                .clock(&clock)
+                .leeway(Duration::ZERO)
+                .verify(&token),
+            token.verify_with_clock(SECRET, &clock, Duration::ZERO)
+        );
+    }
+
+    #[test]
+    fn verifier_verify_call_matches_legacy() {
+        let token = basic_token();
+        assert_eq!(
+            Verifier::new(SECRET)
+                .at(1999999999)
+                .verify_call(&token, "read_file", &["path"]),
+            token.verify_call(SECRET, 1999999999, "read_file", &["path"], None)
+        );
+        assert_eq!(
+            Verifier::new(SECRET)
+                .at(1999999999)
+                .verify_call(&token, "write_file", &["path"]),
+            token.verify_call(SECRET, 1999999999, "write_file", &["path"], None)
+        );
+        assert_eq!(
+            Verifier::new(SECRET).at(1999999999).verify_call(
+                &token,
+                "read_file",
+                &["path", "extra"]
+            ),
+            token.verify_call(SECRET, 1999999999, "read_file", &["path", "extra"], None)
+        );
+    }
+
+    #[test]
+    fn verifier_does_not_consume_use_store() {
+        // UseStore remains on the existing Token methods.
+        let token = Token::mint_with_jti(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            true,
+        );
+        let mut store = MemoryUseStore::new();
+        assert!(Verifier::new(SECRET).at(1999999999).verify(&token).is_ok());
+        assert!(token
+            .verify_single_use(SECRET, 1999999999, &mut store)
+            .is_ok());
+        assert!(matches!(
+            token.verify_single_use(SECRET, 1999999999, &mut store),
+            Err(TokenError::ReplayDetected { .. })
+        ));
+    }
+}
