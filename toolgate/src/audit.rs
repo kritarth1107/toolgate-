@@ -3,7 +3,7 @@
 //! A [`Decision`] captures what a verify/check concluded and why. Attach an
 //! [`AuditSink`] to a [`crate::Verifier`] to receive one record per check.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::Write;
 use std::sync::Mutex;
@@ -232,6 +232,80 @@ impl<W: Write> JsonlAuditSink<W> {
 impl<W: Write> fmt::Debug for JsonlAuditSink<W> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("JsonlAuditSink").finish_non_exhaustive()
+    }
+}
+
+/// Replacement written in place of a redacted argument value.
+pub const REDACTED: &str = "[REDACTED]";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RedactionPolicy {
+    AllValues,
+    Keys(BTreeSet<String>),
+    None,
+}
+
+/// Policy for stripping argument values from audit records.
+///
+/// The default keeps argument keys and replaces every value with [`REDACTED`]
+/// so secrets in tool args never reach a sink.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Redaction {
+    policy: RedactionPolicy,
+}
+
+impl Default for Redaction {
+    fn default() -> Self {
+        Self::all_values()
+    }
+}
+
+impl Redaction {
+    /// Redact every argument value. This is the default.
+    pub fn all_values() -> Self {
+        Redaction {
+            policy: RedactionPolicy::AllValues,
+        }
+    }
+
+    /// Redact only the listed argument keys; other values are kept as-is.
+    pub fn keys<I, S>(keys: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Redaction {
+            policy: RedactionPolicy::Keys(keys.into_iter().map(Into::into).collect()),
+        }
+    }
+
+    /// Keep every argument value. Intended for tests, not production logs.
+    pub fn none() -> Self {
+        Redaction {
+            policy: RedactionPolicy::None,
+        }
+    }
+
+    /// Return a copy of `args` with this policy applied.
+    pub fn apply(&self, args: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+        args.iter()
+            .map(|(key, value)| {
+                let next = if self.should_redact(key) {
+                    REDACTED.to_string()
+                } else {
+                    value.clone()
+                };
+                (key.clone(), next)
+            })
+            .collect()
+    }
+
+    fn should_redact(&self, key: &str) -> bool {
+        match &self.policy {
+            RedactionPolicy::AllValues => true,
+            RedactionPolicy::Keys(keys) => keys.contains(key),
+            RedactionPolicy::None => false,
+        }
     }
 }
 

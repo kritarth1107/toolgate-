@@ -76,7 +76,9 @@ pub mod use_store;
 pub mod verifier;
 pub mod wire;
 
-pub use audit::{AuditError, AuditSink, Decision, JsonlAuditSink, MemoryAuditSink, Outcome};
+pub use audit::{
+    AuditError, AuditSink, Decision, JsonlAuditSink, MemoryAuditSink, Outcome, Redaction, REDACTED,
+};
 pub use clock::{Clock, FixedClock, InstantClock, SystemClock, VerifyTime};
 pub use constraint::{Constraint, Constraints};
 pub use keyring::Keyring;
