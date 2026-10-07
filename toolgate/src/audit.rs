@@ -4,6 +4,9 @@
 //! [`AuditSink`] to a [`crate::Verifier`] to receive one record per check.
 
 use std::collections::BTreeMap;
+use std::fmt;
+use std::io::Write;
+use std::sync::Mutex;
 
 use crate::token::TokenError;
 
@@ -127,5 +130,120 @@ impl Decision {
             depth,
             arguments,
         )
+    }
+}
+
+/// Error from writing or serializing an audit record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuditError {
+    /// The sink's I/O writer failed.
+    Io(String),
+    /// The decision could not be serialized.
+    Serialize(String),
+    /// The sink's lock was poisoned.
+    Poisoned,
+}
+
+impl fmt::Display for AuditError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AuditError::Io(msg) => write!(f, "audit I/O error: {msg}"),
+            AuditError::Serialize(msg) => write!(f, "audit serialize error: {msg}"),
+            AuditError::Poisoned => write!(f, "audit sink lock poisoned"),
+        }
+    }
+}
+
+impl std::error::Error for AuditError {}
+
+/// Pluggable destination for [`Decision`] records.
+pub trait AuditSink {
+    /// Persist one decision. Verification does not fail if this returns an error.
+    fn record(&self, decision: &Decision) -> Result<(), AuditError>;
+}
+
+/// In-memory sink that collects decisions for tests and in-process inspection.
+#[derive(Debug, Default)]
+pub struct MemoryAuditSink {
+    records: Mutex<Vec<Decision>>,
+}
+
+impl MemoryAuditSink {
+    /// Create an empty sink.
+    pub fn new() -> Self {
+        MemoryAuditSink {
+            records: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Snapshot of recorded decisions, in emission order.
+    pub fn decisions(&self) -> Vec<Decision> {
+        self.records
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
+    }
+
+    /// Number of recorded decisions.
+    pub fn len(&self) -> usize {
+        self.records.lock().map(|guard| guard.len()).unwrap_or(0)
+    }
+
+    /// Whether no decisions have been recorded.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Drop every recorded decision.
+    pub fn clear(&self) {
+        if let Ok(mut guard) = self.records.lock() {
+            guard.clear();
+        }
+    }
+}
+
+impl AuditSink for MemoryAuditSink {
+    fn record(&self, decision: &Decision) -> Result<(), AuditError> {
+        let mut guard = self.records.lock().map_err(|_| AuditError::Poisoned)?;
+        guard.push(decision.clone());
+        Ok(())
+    }
+}
+
+/// JSON Lines sink that writes one serialized [`Decision`] per line.
+pub struct JsonlAuditSink<W: Write> {
+    writer: Mutex<W>,
+}
+
+impl<W: Write> JsonlAuditSink<W> {
+    /// Wrap any [`Write`] target.
+    pub fn new(writer: W) -> Self {
+        JsonlAuditSink {
+            writer: Mutex::new(writer),
+        }
+    }
+
+    /// Recover the inner writer.
+    pub fn into_inner(self) -> Result<W, AuditError> {
+        self.writer.into_inner().map_err(|_| AuditError::Poisoned)
+    }
+}
+
+impl<W: Write> fmt::Debug for JsonlAuditSink<W> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JsonlAuditSink").finish_non_exhaustive()
+    }
+}
+
+impl<W: Write> AuditSink for JsonlAuditSink<W> {
+    fn record(&self, decision: &Decision) -> Result<(), AuditError> {
+        let mut writer = self.writer.lock().map_err(|_| AuditError::Poisoned)?;
+        serde_json::to_writer(&mut *writer, decision)
+            .map_err(|e| AuditError::Serialize(e.to_string()))?;
+        writer
+            .write_all(b"\n")
+            .map_err(|e| AuditError::Io(e.to_string()))?;
+        writer.flush().map_err(|e| AuditError::Io(e.to_string()))?;
+        Ok(())
     }
 }
