@@ -11,6 +11,7 @@ use std::time::Duration;
 use crate::audit::{AuditSink, Decision, Redaction};
 use crate::clock::{Clock, SystemClock};
 use crate::keyring::Keyring;
+use crate::policy::Policy;
 use crate::revocation::RevocationList;
 use crate::token::{Token, TokenError};
 
@@ -162,6 +163,45 @@ impl<'a> Verifier<'a> {
             .verify_inner(token)
             .and_then(|_| token.check_call_keys(tool, &keys))
             .and_then(|_| token.check_arg_constraints(args));
+        self.record(token, Some(tool), Some(args), &result);
+        result
+    }
+
+    /// Verify a call and confirm `token` is still within `policy`.
+    ///
+    /// Records exactly one [`Decision`] when a sink is attached.
+    pub fn verify_call_against_policy(
+        &self,
+        token: &Token,
+        policy: &Policy,
+        tool: &str,
+        arg_keys: &[&str],
+    ) -> Result<(), TokenError> {
+        let result = self
+            .verify_inner(token)
+            .and_then(|_| token.check_call_keys(tool, arg_keys))
+            .and_then(|_| policy.authorize_token(token));
+        let args = keys_as_args(arg_keys);
+        self.record(token, Some(tool), Some(&args), &result);
+        result
+    }
+
+    /// Verify a call with argument values and confirm `token` is still within `policy`.
+    ///
+    /// Records exactly one [`Decision`] when a sink is attached.
+    pub fn verify_call_with_args_against_policy(
+        &self,
+        token: &Token,
+        policy: &Policy,
+        tool: &str,
+        args: &BTreeMap<String, String>,
+    ) -> Result<(), TokenError> {
+        let keys: Vec<&str> = args.keys().map(|s| s.as_str()).collect();
+        let result = self
+            .verify_inner(token)
+            .and_then(|_| token.check_call_keys(tool, &keys))
+            .and_then(|_| token.check_arg_constraints(args))
+            .and_then(|_| policy.authorize_token(token));
         self.record(token, Some(tool), Some(args), &result);
         result
     }

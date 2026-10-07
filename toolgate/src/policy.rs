@@ -5,9 +5,12 @@
 //! names a tool, the argument keys it may receive, and optional per-key
 //! [`Constraint`](crate::Constraint)s in the same serde form used on tokens.
 
+use std::collections::BTreeMap;
+
 use crate::constraint::Constraints;
 use crate::keyring::Keyring;
-use crate::token::Token;
+use crate::token::{Token, TokenError};
+use crate::verifier::Verifier;
 
 /// Supported policy document version.
 pub const POLICY_VERSION: &str = "1";
@@ -291,6 +294,106 @@ impl Policy {
                 resolved.max_depth,
             )
             .map_err(|_| PolicyError::NoActiveKey)
+    }
+
+    /// True when `token`'s capabilities are within this policy.
+    ///
+    /// Used after mint: a later, tighter policy denies older broader tokens
+    /// even if the token MAC is still valid.
+    pub fn authorize_token(&self, token: &Token) -> Result<(), TokenError> {
+        let grant = self.grant(&token.tool_name).ok_or_else(|| {
+            TokenError::PolicyDenied {
+                reason: format!("tool '{}' is not permitted by policy", token.tool_name),
+            }
+        })?;
+
+        for key in &token.arg_keys {
+            if !grant.arg_keys.iter().any(|k| k == key) {
+                return Err(TokenError::ArgKeyNotAllowed { key: key.clone() });
+            }
+        }
+
+        if let Some(policy_constraints) = &grant.constraints {
+            for (key, policy_constraint) in policy_constraints {
+                match token.constraints.as_ref().and_then(|c| c.get(key)) {
+                    None => {
+                        return Err(TokenError::PolicyDenied {
+                            reason: format!("token is missing required constraint on '{key}'"),
+                        });
+                    }
+                    Some(token_constraint) => {
+                        if !token_constraint.is_subset_of(policy_constraint) {
+                            return Err(TokenError::PolicyDenied {
+                                reason: format!(
+                                    "token constraint on '{key}' is broader than policy"
+                                ),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(expected) = self.audience_for(grant) {
+            match &token.audience {
+                Some(got) if got == &expected => {}
+                Some(got) => {
+                    return Err(TokenError::PolicyDenied {
+                        reason: format!("token audience '{got}' does not match policy '{expected}'"),
+                    });
+                }
+                None => {
+                    return Err(TokenError::PolicyDenied {
+                        reason: format!("token has no audience; policy requires '{expected}'"),
+                    });
+                }
+            }
+        }
+
+        if let Some(max) = self.max_depth_for(grant) {
+            match token.max_depth {
+                Some(token_max) if token_max <= max => {}
+                Some(token_max) => {
+                    return Err(TokenError::PolicyDenied {
+                        reason: format!(
+                            "token max_depth {token_max} exceeds policy max_depth {max}"
+                        ),
+                    });
+                }
+                None => {
+                    return Err(TokenError::PolicyDenied {
+                        reason: format!("token has no max_depth; policy requires {max}"),
+                    });
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Verify `token` and confirm the call is still permitted by this policy.
+    ///
+    /// Routes through [`Verifier`] so an attached [`crate::AuditSink`] records
+    /// exactly one [`crate::Decision`].
+    pub fn check_call(
+        &self,
+        verifier: &Verifier<'_>,
+        token: &Token,
+        tool: &str,
+        arg_keys: &[&str],
+    ) -> Result<(), TokenError> {
+        verifier.verify_call_against_policy(token, self, tool, arg_keys)
+    }
+
+    /// Like [`Policy::check_call`], including argument-value constraints.
+    pub fn check_call_with_args(
+        &self,
+        verifier: &Verifier<'_>,
+        token: &Token,
+        tool: &str,
+        args: &BTreeMap<String, String>,
+    ) -> Result<(), TokenError> {
+        verifier.verify_call_with_args_against_policy(token, self, tool, args)
     }
 }
 

@@ -93,6 +93,10 @@ pub enum TokenError {
     /// Request is not a usable `tools/call` payload (wrong method, missing
     /// name, or a nested value on a constrained argument).
     MalformedRequest,
+    /// The token or call is not permitted by the current policy.
+    PolicyDenied {
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for TokenError {
@@ -128,6 +132,7 @@ impl std::fmt::Display for TokenError {
                 write!(f, "attenuation depth {} exceeds maximum {}", depth, max)
             }
             TokenError::MalformedRequest => write!(f, "malformed request"),
+            TokenError::PolicyDenied { reason } => write!(f, "denied by policy: {reason}"),
         }
     }
 }
@@ -154,6 +159,7 @@ impl TokenError {
             TokenError::NotYetValid => "not_yet_valid",
             TokenError::MaxDepthExceeded { .. } => "max_depth_exceeded",
             TokenError::MalformedRequest => "malformed_request",
+            TokenError::PolicyDenied { .. } => "policy_denied",
         }
     }
 }
