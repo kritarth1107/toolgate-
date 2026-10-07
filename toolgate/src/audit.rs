@@ -321,3 +321,167 @@ impl<W: Write> AuditSink for JsonlAuditSink<W> {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_args() -> BTreeMap<String, String> {
+        let mut args = BTreeMap::new();
+        args.insert("path".to_string(), "/tmp/secret.txt".to_string());
+        args.insert("token".to_string(), "super-secret".to_string());
+        args
+    }
+
+    fn allow_decision() -> Decision {
+        Decision::allow(
+            Some("jti-1".to_string()),
+            Some("read_file".to_string()),
+            Some("client-abc".to_string()),
+            1_699_999_999,
+            1,
+            Redaction::default().apply(&sample_args()),
+        )
+    }
+
+    #[test]
+    fn token_error_kind_matches_cli_strings() {
+        assert_eq!(TokenError::Expired.kind(), "expired");
+        assert_eq!(TokenError::MalformedRequest.kind(), "malformed_request");
+        assert_eq!(
+            TokenError::ToolMismatch {
+                expected: "a".into(),
+                got: "b".into()
+            }
+            .kind(),
+            "tool_mismatch"
+        );
+        assert_eq!(
+            TokenError::ConstraintViolation { key: "path".into() }.kind(),
+            "constraint_violation"
+        );
+    }
+
+    #[test]
+    fn decision_from_ok_is_allow_without_error_fields() {
+        let decision = Decision::from_result(
+            &Ok(()),
+            Some("abc".into()),
+            Some("read_file".into()),
+            None,
+            42,
+            0,
+            BTreeMap::new(),
+        );
+        assert_eq!(decision.outcome, Outcome::Allow);
+        assert_eq!(decision.reason, None);
+        assert_eq!(decision.error_kind, None);
+        assert_eq!(decision.token_id.as_deref(), Some("abc"));
+        assert_eq!(decision.timestamp, 42);
+        assert_eq!(decision.depth, 0);
+    }
+
+    #[test]
+    fn decision_from_err_is_deny_with_kind_and_reason() {
+        let err = TokenError::Expired;
+        let decision = Decision::deny(
+            &err,
+            None,
+            Some("read_file".into()),
+            None,
+            7,
+            2,
+            BTreeMap::new(),
+        );
+        assert_eq!(decision.outcome, Outcome::Deny);
+        assert_eq!(decision.error_kind.as_deref(), Some("expired"));
+        assert_eq!(decision.reason.as_deref(), Some("token expired"));
+        assert_eq!(decision.depth, 2);
+    }
+
+    #[test]
+    fn decision_serializes_to_stable_json() {
+        let json = serde_json::to_value(allow_decision()).unwrap();
+        assert_eq!(json["outcome"], "allow");
+        assert_eq!(json["token_id"], "jti-1");
+        assert_eq!(json["tool_name"], "read_file");
+        assert_eq!(json["audience"], "client-abc");
+        assert_eq!(json["timestamp"], 1_699_999_999);
+        assert_eq!(json["depth"], 1);
+        assert_eq!(json["arguments"]["path"], REDACTED);
+        assert_eq!(json["arguments"]["token"], REDACTED);
+        assert!(json.get("reason").is_none());
+        assert!(json.get("error_kind").is_none());
+    }
+
+    #[test]
+    fn memory_sink_collects_decisions_in_order() {
+        let sink = MemoryAuditSink::new();
+        assert!(sink.is_empty());
+        sink.record(&allow_decision()).unwrap();
+        let deny = Decision::deny(
+            &TokenError::AudienceMismatch,
+            None,
+            Some("read_file".into()),
+            None,
+            8,
+            0,
+            BTreeMap::new(),
+        );
+        sink.record(&deny).unwrap();
+        assert_eq!(sink.len(), 2);
+        let recorded = sink.decisions();
+        assert_eq!(recorded[0].outcome, Outcome::Allow);
+        assert_eq!(recorded[1].error_kind.as_deref(), Some("audience_mismatch"));
+        sink.clear();
+        assert!(sink.is_empty());
+    }
+
+    #[test]
+    fn jsonl_sink_writes_one_object_per_line() {
+        let sink = JsonlAuditSink::new(Vec::new());
+        sink.record(&allow_decision()).unwrap();
+        sink.record(&Decision::deny(
+            &TokenError::Expired,
+            Some("jti-1".into()),
+            Some("read_file".into()),
+            None,
+            9,
+            0,
+            BTreeMap::new(),
+        ))
+        .unwrap();
+        let bytes = sink.into_inner().unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let first: Decision = serde_json::from_str(lines[0]).unwrap();
+        let second: Decision = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(first.outcome, Outcome::Allow);
+        assert_eq!(second.outcome, Outcome::Deny);
+        assert_eq!(second.error_kind.as_deref(), Some("expired"));
+        assert!(!text.contains("super-secret"));
+        assert!(!text.contains("/tmp/secret.txt"));
+    }
+
+    #[test]
+    fn redaction_default_replaces_all_values() {
+        let redacted = Redaction::default().apply(&sample_args());
+        assert_eq!(redacted.get("path").unwrap(), REDACTED);
+        assert_eq!(redacted.get("token").unwrap(), REDACTED);
+        assert_eq!(redacted.len(), 2);
+    }
+
+    #[test]
+    fn redaction_keys_only_strips_listed_values() {
+        let redacted = Redaction::keys(["token"]).apply(&sample_args());
+        assert_eq!(redacted.get("path").unwrap(), "/tmp/secret.txt");
+        assert_eq!(redacted.get("token").unwrap(), REDACTED);
+    }
+
+    #[test]
+    fn redaction_none_keeps_values() {
+        let redacted = Redaction::none().apply(&sample_args());
+        assert_eq!(redacted.get("token").unwrap(), "super-secret");
+    }
+}
