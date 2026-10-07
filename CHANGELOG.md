@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-10-07
+
+### Added
+- **Compact string tokens**: `tg1.` + unpadded base64url of the existing wire bytes
+  - `Token::to_token_string()` / `Token::from_token_string()` / `FromStr`
+  - Rejects wrong prefix, invalid base64url, trailing garbage, and oversized input (`MAX_TOKEN_STRING_LEN`)
+- **`Verifier` builder**: consolidates `verify_*` variants
+  - `Verifier::new(secret)` with `.clock()` / `.at()`, `.leeway()`, `.audience()`, `.revocation()`, `.keyring()`
+  - `.verify()`, `.verify_call()`, `.verify_call_with_args()`
+  - Existing `Token` and `Keyring` verify APIs keep their behaviour and delegate to `Verifier`
+  - Single-use / `UseStore` checks stay on the existing methods
+- **MCP `tools/call` check**: `mcp` module behind a default-on `mcp` feature (`serde_json`)
+  - `check_tools_call(&Verifier, &Token, &Value)` extracts tool name and arguments
+  - Scalars convert to strings; nested values on constrained keys are `MalformedRequest`
+  - `token_string_from_meta()` reads `params._meta.toolgate`
+- **CLI**:
+  - `tg encode`: JSON token → `{"token":"tg1...."}`
+  - `tg decode`: string → JSON token with `"verified": false` (no MAC check)
+  - `tg check-mcp`: verify a token against a JSON-RPC `tools/call` request
+  - `tg check` / `tg check-call` accept a `tg1.` string in `token`
+- **New error variant**: `TokenError::MalformedRequest` (`malformed_request`)
+
+### Notes
+- The MCP helper inspects the request only and does not dispatch tools
+- No new crate dependencies; `serde_json` is optional and enabled by the default `mcp` feature
+
 ## [0.6.0] - 2026-10-06
 
 ### Added

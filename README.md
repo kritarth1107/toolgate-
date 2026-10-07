@@ -25,7 +25,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-toolgate = "0.6"
+toolgate = "0.7"
 ```
 
 Or install the CLI:
@@ -607,6 +607,7 @@ let info = check_tools_call(&verifier, &token, &request)?;
 
 ## Version History
 
+- **0.7.0**: Compact `tg1.` string tokens, `Verifier` builder, MCP `tools/call` check (`mcp` feature), CLI `encode` / `decode` / `check-mcp`
 - **0.6.0**: Add swappable `Clock`, expiry/nbf leeway, optional `nbf`, attenuation `depth`/`max_depth`, canonical encoding v6, wire format v5
 - **0.5.0**: Add token identifiers (`jti`), revocation lists, and replay prevention (`UseStore` trait), canonical encoding v5, wire format v4
 - **0.4.0**: Add argument value constraints (`Constraint` type), `verify_call_with_args` API, canonical encoding v4, wire format v3
