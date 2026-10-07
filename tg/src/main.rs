@@ -1,11 +1,12 @@
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::io::{self, Read};
+use std::fs::OpenOptions;
+use std::io::{self, Read, Write};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use toolgate::{
-    check_tools_call, Constraints, RevocationList, Token, TokenError, TokenStringError, Verifier,
-    VerifyTime,
+    check_tools_call, AuditSink, Constraints, Decision, JsonlAuditSink, MemoryAuditSink, Redaction,
+    RevocationList, Token, TokenStringError, Verifier,
 };
 
 #[derive(Parser)]
@@ -13,6 +14,12 @@ use toolgate::{
 #[command(about = "Toolgate CLI - macaroon-style capability tokens for tool calls")]
 #[command(version)]
 struct Cli {
+    /// Write each Decision as JSONL to stdout, stderr, or a file path
+    #[arg(long, global = true, value_name = "TARGET")]
+    audit_jsonl: Option<String>,
+    /// Comma-separated argument keys to redact in audit records (default: all values)
+    #[arg(long, global = true, value_name = "KEYS")]
+    audit_redact_keys: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -195,17 +202,36 @@ fn decode_secret(s: &str) -> Vec<u8> {
     }
 }
 
+struct AuditOpts {
+    target: Option<String>,
+    redaction: Redaction,
+}
+
+impl AuditOpts {
+    fn from_cli(cli: &Cli) -> Self {
+        let redaction = match &cli.audit_redact_keys {
+            Some(keys) => Redaction::keys(keys.split(',').map(str::trim).filter(|s| !s.is_empty())),
+            None => Redaction::all_values(),
+        };
+        AuditOpts {
+            target: cli.audit_jsonl.clone(),
+            redaction,
+        }
+    }
+}
+
 fn main() {
     let cli = Cli::parse();
+    let audit = AuditOpts::from_cli(&cli);
 
     let result = match cli.command {
         Commands::Mint => handle_mint(),
         Commands::Attenuate => handle_attenuate(),
-        Commands::Check => handle_check(),
-        Commands::CheckCall => handle_check_call(),
+        Commands::Check => handle_check(&audit),
+        Commands::CheckCall => handle_check_call(&audit),
         Commands::Encode => handle_encode(),
         Commands::Decode => handle_decode(),
-        Commands::CheckMcp => handle_check_mcp(),
+        Commands::CheckMcp => handle_check_mcp(&audit),
     };
 
     if let Err(e) = result {
@@ -291,74 +317,63 @@ fn parse_token_string_input(raw: &str) -> Result<String, Box<dyn std::error::Err
     Err("decode expects a tg1. string, a JSON string, or {\"token\":\"tg1....\"}".into())
 }
 
-fn handle_check() -> Result<(), Box<dyn std::error::Error>> {
+fn handle_check(audit: &AuditOpts) -> Result<(), Box<dyn std::error::Error>> {
     let input: CheckInput = serde_json::from_str(&read_stdin()?)?;
     let secret = decode_secret(&input.secret);
     let token = input.token.into_token()?;
     let current_time = input.current_time.unwrap_or_else(current_unix_time);
     let leeway = Duration::from_secs(input.leeway.unwrap_or(0));
-    let time = VerifyTime::unix_with_leeway(current_time, leeway);
+    let sink = MemoryAuditSink::new();
+    let mut verifier = Verifier::new(&secret).at(current_time).leeway(leeway);
+    if let Some(ref audience) = input.audience {
+        verifier = verifier.audience(audience);
+    }
+    if audit.target.is_some() {
+        verifier = verifier.audit(&sink).redaction(&audit.redaction);
+    }
 
-    let output = match token.verify_at(&secret, &time, input.audience.as_deref()) {
+    let output = match verifier.verify(&token) {
         Ok(()) => CheckOutput {
             valid: true,
             error: None,
         },
         Err(e) => CheckOutput {
             valid: false,
-            error: Some(error_to_string(&e)),
+            error: Some(e.kind().to_string()),
         },
     };
 
     println!("{}", serde_json::to_string_pretty(&output)?);
+    emit_audit(audit, &sink)?;
     Ok(())
 }
 
-fn handle_check_call() -> Result<(), Box<dyn std::error::Error>> {
+fn handle_check_call(audit: &AuditOpts) -> Result<(), Box<dyn std::error::Error>> {
     let input: CheckCallInput = serde_json::from_str(&read_stdin()?)?;
     let secret = decode_secret(&input.secret);
     let token = input.token.into_token()?;
     let current_time = input.current_time.unwrap_or_else(current_unix_time);
     let leeway = Duration::from_secs(input.leeway.unwrap_or(0));
-    let time = VerifyTime::unix_with_leeway(current_time, leeway);
-
-    // Build revocation list if provided
     let revocation_list = input
         .revoked
         .map(|jtis| jtis.into_iter().collect::<RevocationList>());
+    let sink = MemoryAuditSink::new();
+    let mut verifier = Verifier::new(&secret).at(current_time).leeway(leeway);
+    if let Some(ref audience) = input.audience {
+        verifier = verifier.audience(audience);
+    }
+    if let Some(ref list) = revocation_list {
+        verifier = verifier.revocation(list);
+    }
+    if audit.target.is_some() {
+        verifier = verifier.audit(&sink).redaction(&audit.redaction);
+    }
 
-    // If args provided, use verify_call_with_args_at for constraint checking
-    // Otherwise fall back to verify_call_at with just arg_keys
     let result = if let Some(ref args) = input.args {
-        token.verify_call_with_args_at(
-            &secret,
-            &time,
-            &input.tool_name,
-            args,
-            input.audience.as_deref(),
-        )
+        verifier.verify_call_with_args(&token, &input.tool_name, args)
     } else {
         let arg_keys_refs: Vec<&str> = input.arg_keys.iter().map(|s| s.as_str()).collect();
-        token.verify_call_at(
-            &secret,
-            &time,
-            &input.tool_name,
-            &arg_keys_refs,
-            input.audience.as_deref(),
-        )
-    };
-
-    // Check revocation if list provided and basic verification passed
-    let result = match (result, &revocation_list) {
-        (Ok(()), Some(list)) => {
-            // Check against revocation list
-            match &token.jti {
-                Some(jti) if list.is_revoked(jti) => Err(TokenError::Revoked { jti: jti.clone() }),
-                Some(_) => Ok(()),
-                None => Err(TokenError::MissingJti),
-            }
-        }
-        (result, _) => result,
+        verifier.verify_call(&token, &input.tool_name, &arg_keys_refs)
     };
 
     let output = match result {
@@ -370,15 +385,16 @@ fn handle_check_call() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => CheckCallOutput {
             authorized: false,
             error: Some(e.to_string()),
-            error_kind: Some(error_to_kind(&e)),
+            error_kind: Some(e.kind().to_string()),
         },
     };
 
     println!("{}", serde_json::to_string_pretty(&output)?);
+    emit_audit(audit, &sink)?;
     Ok(())
 }
 
-fn handle_check_mcp() -> Result<(), Box<dyn std::error::Error>> {
+fn handle_check_mcp(audit: &AuditOpts) -> Result<(), Box<dyn std::error::Error>> {
     let input: CheckMcpInput = serde_json::from_str(&read_stdin()?)?;
     let secret = decode_secret(&input.secret);
     let token = input.token.into_token()?;
@@ -387,6 +403,7 @@ fn handle_check_mcp() -> Result<(), Box<dyn std::error::Error>> {
     let revocation_list = input
         .revoked
         .map(|jtis| jtis.into_iter().collect::<RevocationList>());
+    let sink = MemoryAuditSink::new();
 
     let mut verifier = Verifier::new(&secret).at(current_time).leeway(leeway);
     if let Some(ref audience) = input.audience {
@@ -394,6 +411,9 @@ fn handle_check_mcp() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(ref list) = revocation_list {
         verifier = verifier.revocation(list);
+    }
+    if audit.target.is_some() {
+        verifier = verifier.audit(&sink).redaction(&audit.redaction);
     }
 
     let result = check_tools_call(&verifier, &token, &input.request);
@@ -406,52 +426,44 @@ fn handle_check_mcp() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => CheckCallOutput {
             authorized: false,
             error: Some(e.to_string()),
-            error_kind: Some(error_to_kind(&e)),
+            error_kind: Some(e.kind().to_string()),
         },
     };
 
     println!("{}", serde_json::to_string_pretty(&output)?);
+    emit_audit(audit, &sink)?;
     Ok(())
 }
 
-fn error_to_string(e: &TokenError) -> String {
-    match e {
-        TokenError::InvalidMac => "invalid_mac".to_string(),
-        TokenError::Expired => "expired".to_string(),
-        TokenError::AttenuationWidens => "attenuation_widens".to_string(),
-        TokenError::AudienceMismatch => "audience_mismatch".to_string(),
-        TokenError::ToolMismatch { .. } => "tool_mismatch".to_string(),
-        TokenError::ArgKeyNotAllowed { .. } => "arg_key_not_allowed".to_string(),
-        TokenError::UnknownKeyId { .. } => "unknown_key_id".to_string(),
-        TokenError::NoActiveKey => "no_active_key".to_string(),
-        TokenError::MissingKeyId => "missing_key_id".to_string(),
-        TokenError::ConstraintViolation { .. } => "constraint_violation".to_string(),
-        TokenError::Revoked { .. } => "revoked".to_string(),
-        TokenError::ReplayDetected { .. } => "replay_detected".to_string(),
-        TokenError::MissingJti => "missing_jti".to_string(),
-        TokenError::NotYetValid => "not_yet_valid".to_string(),
-        TokenError::MaxDepthExceeded { .. } => "max_depth_exceeded".to_string(),
-        TokenError::MalformedRequest => "malformed_request".to_string(),
+fn emit_audit(audit: &AuditOpts, sink: &MemoryAuditSink) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(target) = audit.target.as_deref() else {
+        return Ok(());
+    };
+    write_audit_jsonl(target, &sink.decisions())?;
+    Ok(())
+}
+
+fn write_audit_jsonl(
+    target: &str,
+    decisions: &[Decision],
+) -> Result<(), Box<dyn std::error::Error>> {
+    match target {
+        "stdout" => write_jsonl(io::stdout(), decisions),
+        "stderr" => write_jsonl(io::stderr(), decisions),
+        path => {
+            let file = OpenOptions::new().create(true).append(true).open(path)?;
+            write_jsonl(file, decisions)
+        }
     }
 }
 
-fn error_to_kind(e: &TokenError) -> String {
-    match e {
-        TokenError::InvalidMac => "invalid_mac".to_string(),
-        TokenError::Expired => "expired".to_string(),
-        TokenError::AttenuationWidens => "attenuation_widens".to_string(),
-        TokenError::AudienceMismatch => "audience_mismatch".to_string(),
-        TokenError::ToolMismatch { .. } => "tool_mismatch".to_string(),
-        TokenError::ArgKeyNotAllowed { .. } => "arg_key_not_allowed".to_string(),
-        TokenError::UnknownKeyId { .. } => "unknown_key_id".to_string(),
-        TokenError::NoActiveKey => "no_active_key".to_string(),
-        TokenError::MissingKeyId => "missing_key_id".to_string(),
-        TokenError::ConstraintViolation { .. } => "constraint_violation".to_string(),
-        TokenError::Revoked { .. } => "revoked".to_string(),
-        TokenError::ReplayDetected { .. } => "replay_detected".to_string(),
-        TokenError::MissingJti => "missing_jti".to_string(),
-        TokenError::NotYetValid => "not_yet_valid".to_string(),
-        TokenError::MaxDepthExceeded { .. } => "max_depth_exceeded".to_string(),
-        TokenError::MalformedRequest => "malformed_request".to_string(),
+fn write_jsonl<W: Write>(
+    writer: W,
+    decisions: &[Decision],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let sink = JsonlAuditSink::new(writer);
+    for decision in decisions {
+        sink.record(decision)?;
     }
+    Ok(())
 }
