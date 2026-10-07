@@ -70,6 +70,7 @@ pub mod revocation;
 pub mod token;
 pub mod token_string;
 pub mod use_store;
+pub mod verifier;
 pub mod wire;
 
 pub use clock::{Clock, FixedClock, InstantClock, SystemClock, VerifyTime};
@@ -79,4 +80,5 @@ pub use revocation::RevocationList;
 pub use token::{Token, TokenError};
 pub use token_string::{TokenStringError, MAX_TOKEN_STRING_LEN, TOKEN_STRING_PREFIX};
 pub use use_store::{MemoryUseStore, UseResult, UseStore};
+pub use verifier::Verifier;
 pub use wire::WireError;
