@@ -295,6 +295,7 @@ fn error_to_string(e: &TokenError) -> String {
         TokenError::MissingJti => "missing_jti".to_string(),
         TokenError::NotYetValid => "not_yet_valid".to_string(),
         TokenError::MaxDepthExceeded { .. } => "max_depth_exceeded".to_string(),
+        TokenError::MalformedRequest => "malformed_request".to_string(),
     }
 }
 
@@ -315,5 +316,6 @@ fn error_to_kind(e: &TokenError) -> String {
         TokenError::MissingJti => "missing_jti".to_string(),
         TokenError::NotYetValid => "not_yet_valid".to_string(),
         TokenError::MaxDepthExceeded { .. } => "max_depth_exceeded".to_string(),
+        TokenError::MalformedRequest => "malformed_request".to_string(),
     }
 }

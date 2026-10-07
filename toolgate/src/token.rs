@@ -89,6 +89,9 @@ pub enum TokenError {
         depth: u32,
         max: u32,
     },
+    /// Request is not a usable `tools/call` payload (wrong method, missing
+    /// name, or a nested value on a constrained argument).
+    MalformedRequest,
 }
 
 impl std::fmt::Display for TokenError {
@@ -123,6 +126,7 @@ impl std::fmt::Display for TokenError {
             TokenError::MaxDepthExceeded { depth, max } => {
                 write!(f, "attenuation depth {} exceeds maximum {}", depth, max)
             }
+            TokenError::MalformedRequest => write!(f, "malformed request"),
         }
     }
 }

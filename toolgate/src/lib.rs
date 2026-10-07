@@ -66,6 +66,8 @@ pub mod clock;
 pub mod constraint;
 pub mod encoding;
 pub mod keyring;
+#[cfg(feature = "mcp")]
+pub mod mcp;
 pub mod revocation;
 pub mod token;
 pub mod token_string;
@@ -76,6 +78,8 @@ pub mod wire;
 pub use clock::{Clock, FixedClock, InstantClock, SystemClock, VerifyTime};
 pub use constraint::{Constraint, Constraints};
 pub use keyring::Keyring;
+#[cfg(feature = "mcp")]
+pub use mcp::{check_tools_call, token_string_from_meta, CallInfo};
 pub use revocation::RevocationList;
 pub use token::{Token, TokenError};
 pub use token_string::{TokenStringError, MAX_TOKEN_STRING_LEN, TOKEN_STRING_PREFIX};
