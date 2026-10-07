@@ -193,3 +193,162 @@ fn decode_b64url_digit(b: u8) -> Option<u32> {
 fn b64_digit(b: u8) -> Result<u32, TokenStringError> {
     decode_b64url_digit(b).ok_or(TokenStringError::InvalidBase64)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constraint::Constraint;
+    use std::collections::BTreeMap;
+
+    const SECRET: &[u8] = b"test-secret-key-32-bytes-long!!";
+
+    fn sample_token() -> Token {
+        Token::mint(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into()],
+            2000000000,
+        )
+    }
+
+    #[test]
+    fn token_string_roundtrip() {
+        let token = sample_token();
+        let encoded = token.to_token_string();
+        assert!(encoded.starts_with(TOKEN_STRING_PREFIX));
+        assert!(!encoded.contains('='));
+        assert!(!encoded[TOKEN_STRING_PREFIX.len()..].contains('+'));
+        assert!(!encoded[TOKEN_STRING_PREFIX.len()..].contains('/'));
+
+        let decoded = Token::from_token_string(&encoded).unwrap();
+        assert_eq!(decoded, token);
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn token_string_from_str() {
+        let token = sample_token();
+        let encoded = token.to_token_string();
+        let parsed: Token = encoded.parse().unwrap();
+        assert_eq!(parsed, token);
+    }
+
+    #[test]
+    fn token_string_roundtrip_with_constraints_and_jti() {
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+        let token = Token::mint_complete(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            Some("client".into()),
+            Some("key-1".into()),
+            Some(constraints),
+            true,
+            Some(1_900_000_000),
+            Some(2),
+        );
+        let decoded = Token::from_token_string(&token.to_token_string()).unwrap();
+        assert_eq!(decoded, token);
+        assert!(decoded.verify(SECRET, 1_950_000_000).is_ok());
+    }
+
+    #[test]
+    fn token_string_matches_wire_bytes() {
+        let token = sample_token();
+        let encoded = token.to_token_string();
+        let payload = encoded.strip_prefix(TOKEN_STRING_PREFIX).unwrap();
+        let bytes = decode_base64url(payload).unwrap();
+        assert_eq!(bytes, token.to_wire());
+    }
+
+    #[test]
+    fn token_string_rejects_wrong_prefix() {
+        let token = sample_token();
+        let encoded = token.to_token_string();
+        let payload = encoded.strip_prefix(TOKEN_STRING_PREFIX).unwrap();
+
+        assert_eq!(
+            Token::from_token_string(payload),
+            Err(TokenStringError::WrongPrefix)
+        );
+        assert_eq!(
+            Token::from_token_string(&format!("tg2.{payload}")),
+            Err(TokenStringError::WrongPrefix)
+        );
+        assert_eq!(
+            Token::from_token_string(&format!("TG1.{payload}")),
+            Err(TokenStringError::WrongPrefix)
+        );
+    }
+
+    #[test]
+    fn token_string_rejects_invalid_base64() {
+        assert_eq!(
+            Token::from_token_string("tg1.@@@"),
+            Err(TokenStringError::InvalidBase64)
+        );
+        assert_eq!(
+            Token::from_token_string("tg1.abc+def"),
+            Err(TokenStringError::InvalidBase64)
+        );
+        assert_eq!(
+            Token::from_token_string("tg1.abc/def"),
+            Err(TokenStringError::InvalidBase64)
+        );
+        assert_eq!(
+            Token::from_token_string("tg1.abcd="),
+            Err(TokenStringError::InvalidBase64)
+        );
+        // One leftover character cannot form a byte.
+        assert_eq!(
+            Token::from_token_string("tg1.a"),
+            Err(TokenStringError::InvalidBase64)
+        );
+    }
+
+    #[test]
+    fn token_string_rejects_trailing_garbage() {
+        let token = sample_token();
+        let encoded = token.to_token_string();
+
+        assert_eq!(
+            Token::from_token_string(&format!("{encoded} extra")),
+            Err(TokenStringError::InvalidBase64)
+        );
+
+        // Extra decoded wire bytes after a complete token.
+        let mut padded = token.to_wire();
+        padded.push(0xFF);
+        let mut s = String::from(TOKEN_STRING_PREFIX);
+        encode_base64url(&padded, &mut s);
+        assert_eq!(
+            Token::from_token_string(&s),
+            Err(TokenStringError::TrailingGarbage)
+        );
+
+        // Non-zero leftover bits in the final base64url character.
+        assert_eq!(
+            Token::from_token_string("tg1.ab"),
+            Err(TokenStringError::TrailingGarbage)
+        );
+    }
+
+    #[test]
+    fn token_string_rejects_oversized_input() {
+        let mut s = String::from(TOKEN_STRING_PREFIX);
+        s.push_str(&"A".repeat(MAX_TOKEN_STRING_LEN));
+        assert!(s.len() > MAX_TOKEN_STRING_LEN);
+        assert_eq!(
+            Token::from_token_string(&s),
+            Err(TokenStringError::InputTooLong)
+        );
+    }
+
+    #[test]
+    fn token_string_rejects_empty_payload() {
+        let result = Token::from_token_string(TOKEN_STRING_PREFIX);
+        assert!(matches!(result, Err(TokenStringError::Wire(_))));
+    }
+}
