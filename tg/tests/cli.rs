@@ -1,6 +1,7 @@
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Write;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 fn tg() -> Command {
@@ -320,4 +321,98 @@ fn check_call_audit_redact_keys_keeps_unlisted_values() {
     assert_eq!(decisions[0]["arguments"]["limit"], "10");
     assert!(!text.contains("/tmp/secret.txt"));
     let _ = fs::remove_file(&path);
+}
+
+fn example_policy_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../examples/policy.json")
+}
+
+fn write_temp_policy(name: &str, contents: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "toolgate-policy-{}-{}-{}.json",
+        std::process::id(),
+        name,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::write(&path, contents).unwrap();
+    path
+}
+
+#[test]
+fn policy_lint_ok_on_example() {
+    let output = tg()
+        .args(["policy", "lint", example_policy_path().to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "lint failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "ok");
+}
+
+#[test]
+fn policy_lint_reports_validation_errors() {
+    let path = write_temp_policy(
+        "dup",
+        r#"{
+            "version": "1",
+            "tools": [
+                {"name": "read_file", "arg_keys": ["path"]},
+                {"name": "read_file", "arg_keys": ["limit"]}
+            ]
+        }"#,
+    );
+    let output = tg()
+        .args(["policy", "lint", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("duplicate tool name"),
+        "stdout={stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn mint_from_policy_file() {
+    let out = run_json(
+        &[
+            "mint",
+            "--policy",
+            example_policy_path().to_str().unwrap(),
+            "--tool",
+            "read_file",
+        ],
+        &json!({
+            "secret": "cli-secret",
+            "current_time": 1700000000
+        }),
+    );
+    let token = &out["token"];
+    assert_eq!(token["tool_name"], "read_file");
+    assert_eq!(token["expiry"], 1700003600);
+    assert_eq!(token["audience"], "agent-runtime");
+    assert_eq!(token["max_depth"], 2);
+    assert_eq!(token["kid"], "key-2025");
+    assert!(token["arg_keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|k| k == "path"));
+}
+
+#[test]
+fn mint_stdin_json_unchanged() {
+    let token = mint_token();
+    assert_eq!(token["tool_name"], "read_file");
+    assert_eq!(token["expiry"], 2000000000);
+    assert!(token.get("kid").is_none() || token["kid"].is_null());
 }

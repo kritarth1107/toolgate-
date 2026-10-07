@@ -1,0 +1,26 @@
+{
+  "version": "1",
+  "default_audience": "agent-runtime",
+  "default_ttl_seconds": 3600,
+  "default_max_depth": 2,
+  "default_kid": "key-2025",
+  "tools": [
+    {
+      "name": "read_file",
+      "arg_keys": ["path", "limit"],
+      "constraints": {
+        "path": { "type": "prefix", "value": "/tmp/" },
+        "limit": { "type": "int_range", "value": { "min": 1, "max": 100 } }
+      }
+    },
+    {
+      "name": "list_dir",
+      "arg_keys": ["path"],
+      "constraints": {
+        "path": { "type": "prefix", "value": "/tmp/" }
+      },
+      "ttl_seconds": 300,
+      "max_depth": 1
+    }
+  ]
+}

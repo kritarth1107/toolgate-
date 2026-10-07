@@ -1,12 +1,13 @@
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use toolgate::{
-    check_tools_call, AuditSink, Constraints, Decision, JsonlAuditSink, MemoryAuditSink, Redaction,
-    RevocationList, Token, TokenStringError, Verifier,
+    check_tools_call, AuditSink, Constraints, Decision, JsonlAuditSink, MemoryAuditSink, Policy,
+    Redaction, RevocationList, Token, TokenStringError, Verifier,
 };
 
 #[derive(Parser)]
@@ -27,7 +28,14 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Mint a new capability token
-    Mint,
+    Mint {
+        /// Mint from a policy file instead of a full stdin mint request
+        #[arg(long, value_name = "FILE")]
+        policy: Option<PathBuf>,
+        /// Tool name to mint (requires --policy)
+        #[arg(long)]
+        tool: Option<String>,
+    },
     /// Attenuate an existing token (reduce capabilities)
     Attenuate,
     /// Check/verify a token
@@ -40,6 +48,20 @@ enum Commands {
     Decode,
     /// Verify a token against an MCP tools/call JSON-RPC request
     CheckMcp,
+    /// Inspect a declarative policy file
+    Policy {
+        #[command(subcommand)]
+        command: PolicyCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum PolicyCommands {
+    /// Validate a policy file
+    Lint {
+        /// Path to the policy JSON file
+        file: PathBuf,
+    },
 }
 
 #[derive(Deserialize)]
@@ -58,6 +80,13 @@ struct MintInput {
     nbf: Option<u64>,
     #[serde(default)]
     max_depth: Option<u32>,
+}
+
+#[derive(Deserialize)]
+struct PolicyMintInput {
+    secret: String,
+    #[serde(default)]
+    current_time: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -225,13 +254,16 @@ fn main() {
     let audit = AuditOpts::from_cli(&cli);
 
     let result = match cli.command {
-        Commands::Mint => handle_mint(),
+        Commands::Mint { policy, tool } => handle_mint(policy, tool),
         Commands::Attenuate => handle_attenuate(),
         Commands::Check => handle_check(&audit),
         Commands::CheckCall => handle_check_call(&audit),
         Commands::Encode => handle_encode(),
         Commands::Decode => handle_decode(),
         Commands::CheckMcp => handle_check_mcp(&audit),
+        Commands::Policy { command } => match command {
+            PolicyCommands::Lint { file } => handle_policy_lint(file),
+        },
     };
 
     if let Err(e) = result {
@@ -240,7 +272,19 @@ fn main() {
     }
 }
 
-fn handle_mint() -> Result<(), Box<dyn std::error::Error>> {
+fn handle_mint(
+    policy_path: Option<PathBuf>,
+    tool: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match (policy_path, tool) {
+        (Some(path), Some(tool)) => handle_mint_from_policy(path, tool),
+        (None, None) => handle_mint_from_stdin(),
+        (Some(_), None) => Err("--tool is required with --policy".into()),
+        (None, Some(_)) => Err("--policy is required with --tool".into()),
+    }
+}
+
+fn handle_mint_from_stdin() -> Result<(), Box<dyn std::error::Error>> {
     let input: MintInput = serde_json::from_str(&read_stdin()?)?;
     let secret = decode_secret(&input.secret);
 
@@ -260,6 +304,38 @@ fn handle_mint() -> Result<(), Box<dyn std::error::Error>> {
     let output = MintOutput { token };
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
+}
+
+fn handle_mint_from_policy(path: PathBuf, tool: String) -> Result<(), Box<dyn std::error::Error>> {
+    let policy = load_policy(&path)?;
+    let input: PolicyMintInput = serde_json::from_str(&read_stdin()?)?;
+    let secret = decode_secret(&input.secret);
+    let now = input.current_time.unwrap_or_else(current_unix_time);
+    let token = policy.mint(&tool, &secret, now)?;
+    let output = MintOutput { token };
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+fn load_policy(path: &std::path::Path) -> Result<Policy, Box<dyn std::error::Error>> {
+    let contents = fs::read_to_string(path)?;
+    let policy = Policy::from_json(&contents)?;
+    policy.validate()?;
+    Ok(policy)
+}
+
+fn handle_policy_lint(file: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let contents = fs::read_to_string(&file)?;
+    match Policy::from_json(&contents).and_then(|p| p.validate()) {
+        Ok(()) => {
+            println!("ok");
+            Ok(())
+        }
+        Err(err) => {
+            println!("{err}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn handle_attenuate() -> Result<(), Box<dyn std::error::Error>> {
