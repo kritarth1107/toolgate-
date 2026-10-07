@@ -78,14 +78,14 @@ struct AttenuateOutput {
 #[derive(Deserialize)]
 #[serde(untagged)]
 enum TokenArg {
-    Object(Token),
+    Object(Box<Token>),
     String(String),
 }
 
 impl TokenArg {
     fn into_token(self) -> Result<Token, TokenStringError> {
         match self {
-            TokenArg::Object(token) => Ok(token),
+            TokenArg::Object(token) => Ok(*token),
             TokenArg::String(s) => Token::from_token_string(&s),
         }
     }
