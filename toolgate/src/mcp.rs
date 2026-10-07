@@ -43,23 +43,23 @@ pub fn check_tools_call(
     request: &Value,
 ) -> Result<CallInfo, TokenError> {
     if request.get("method").and_then(Value::as_str) != Some("tools/call") {
-        return Err(TokenError::MalformedRequest);
+        return Err(deny_malformed(verifier, token, None));
     }
 
     let params = match request.get("params") {
         Some(Value::Object(map)) => map,
-        _ => return Err(TokenError::MalformedRequest),
+        _ => return Err(deny_malformed(verifier, token, None)),
     };
 
     let Some(tool_name) = params.get("name").and_then(Value::as_str) else {
-        return Err(TokenError::MalformedRequest);
+        return Err(deny_malformed(verifier, token, None));
     };
 
     let empty = Map::new();
     let args_obj = match params.get("arguments") {
         None => &empty,
         Some(Value::Object(map)) => map,
-        Some(_) => return Err(TokenError::MalformedRequest),
+        Some(_) => return Err(deny_malformed(verifier, token, Some(tool_name))),
     };
 
     let mut arguments = BTreeMap::new();
@@ -73,28 +73,26 @@ pub fn check_tools_call(
             }
             None => {
                 if has_constraint(token, key) {
-                    return Err(TokenError::MalformedRequest);
+                    let err = TokenError::MalformedRequest;
+                    verifier.record(token, Some(tool_name), None, &Err(err.clone()));
+                    return Err(err);
                 }
             }
         }
     }
 
-    verifier.verify_call(token, tool_name, &keys)?;
-
-    if let Some(constraints) = &token.constraints {
-        for (key, value) in &arguments {
-            if let Some(constraint) = constraints.get(key) {
-                if !constraint.check(value) {
-                    return Err(TokenError::ConstraintViolation { key: key.clone() });
-                }
-            }
-        }
-    }
+    verifier.verify_extracted_call(token, tool_name, &keys, &arguments)?;
 
     Ok(CallInfo {
         tool_name: tool_name.to_string(),
         arguments,
     })
+}
+
+fn deny_malformed(verifier: &Verifier<'_>, token: &Token, tool_name: Option<&str>) -> TokenError {
+    let err = TokenError::MalformedRequest;
+    verifier.record(token, tool_name, None, &Err(err.clone()));
+    err
 }
 
 fn has_constraint(token: &Token, key: &str) -> bool {
@@ -120,6 +118,7 @@ fn scalar_to_string(value: &Value) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::{MemoryAuditSink, Outcome, REDACTED};
     use crate::constraint::Constraint;
     use crate::Verifier;
     use serde_json::json;
@@ -271,5 +270,61 @@ mod tests {
         let request = tools_call("toggle", json!({"flag": true}));
         let info = check_tools_call(&verifier(), &token, &request).unwrap();
         assert_eq!(info.arguments.get("flag").unwrap(), "true");
+    }
+
+    #[test]
+    fn check_tools_call_records_allow_with_redacted_args() {
+        let token = token_with_constraints();
+        let sink = MemoryAuditSink::new();
+        let verifier = Verifier::new(SECRET).at(1999999999).audit(&sink);
+        let request = tools_call("read_file", json!({"path": "/tmp/notes.txt", "limit": 50}));
+        check_tools_call(&verifier, &token, &request).unwrap();
+        assert_eq!(sink.len(), 1);
+        let decision = &sink.decisions()[0];
+        assert_eq!(decision.outcome, Outcome::Allow);
+        assert_eq!(decision.tool_name.as_deref(), Some("read_file"));
+        assert_eq!(decision.arguments.get("path").unwrap(), REDACTED);
+        assert_eq!(decision.arguments.get("limit").unwrap(), REDACTED);
+        assert!(!format!("{decision:?}").contains("/tmp/notes.txt"));
+    }
+
+    #[test]
+    fn check_tools_call_records_malformed_request() {
+        let token = token_with_constraints();
+        let sink = MemoryAuditSink::new();
+        let verifier = Verifier::new(SECRET).at(1999999999).audit(&sink);
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {"name": "read_file", "arguments": {}}
+        });
+        assert_eq!(
+            check_tools_call(&verifier, &token, &request),
+            Err(TokenError::MalformedRequest)
+        );
+        assert_eq!(sink.len(), 1);
+        assert_eq!(sink.decisions()[0].outcome, Outcome::Deny);
+        assert_eq!(
+            sink.decisions()[0].error_kind.as_deref(),
+            Some("malformed_request")
+        );
+    }
+
+    #[test]
+    fn check_tools_call_records_constraint_violation_once() {
+        let token = token_with_constraints();
+        let sink = MemoryAuditSink::new();
+        let verifier = Verifier::new(SECRET).at(1999999999).audit(&sink);
+        let request = tools_call("read_file", json!({"path": "/tmp/a", "limit": 200}));
+        assert!(matches!(
+            check_tools_call(&verifier, &token, &request),
+            Err(TokenError::ConstraintViolation { key }) if key == "limit"
+        ));
+        assert_eq!(sink.len(), 1);
+        assert_eq!(
+            sink.decisions()[0].error_kind.as_deref(),
+            Some("constraint_violation")
+        );
     }
 }
