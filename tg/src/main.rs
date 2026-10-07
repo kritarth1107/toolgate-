@@ -24,6 +24,10 @@ enum Commands {
     Check,
     /// Verify a token authorizes a specific tool call
     CheckCall,
+    /// Encode a JSON token as a compact `tg1.` string
+    Encode,
+    /// Decode a compact `tg1.` string to JSON (does not verify the MAC)
+    Decode,
 }
 
 #[derive(Deserialize)]
@@ -115,6 +119,25 @@ struct CheckOutput {
     error: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum EncodeInput {
+    Wrapped { token: Token },
+    Raw(Token),
+}
+
+#[derive(Serialize)]
+struct EncodeOutput {
+    token: String,
+}
+
+#[derive(Serialize)]
+struct DecodeOutput {
+    token: Token,
+    /// Decode does not check the MAC.
+    verified: bool,
+}
+
 fn read_stdin() -> io::Result<String> {
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
@@ -144,6 +167,8 @@ fn main() {
         Commands::Attenuate => handle_attenuate(),
         Commands::Check => handle_check(),
         Commands::CheckCall => handle_check_call(),
+        Commands::Encode => handle_encode(),
+        Commands::Decode => handle_decode(),
     };
 
     if let Err(e) = result {
@@ -188,6 +213,45 @@ fn handle_attenuate() -> Result<(), Box<dyn std::error::Error>> {
     let output = AttenuateOutput { token: attenuated };
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
+}
+
+fn handle_encode() -> Result<(), Box<dyn std::error::Error>> {
+    let input: EncodeInput = serde_json::from_str(&read_stdin()?)?;
+    let token = match input {
+        EncodeInput::Wrapped { token } | EncodeInput::Raw(token) => token,
+    };
+    let output = EncodeOutput {
+        token: token.to_token_string(),
+    };
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+fn handle_decode() -> Result<(), Box<dyn std::error::Error>> {
+    let raw = read_stdin()?;
+    let token_string = parse_token_string_input(&raw)?;
+    let token = Token::from_token_string(&token_string)?;
+    let output = DecodeOutput {
+        token,
+        verified: false,
+    };
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+fn parse_token_string_input(raw: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let trimmed = raw.trim();
+    if trimmed.starts_with("tg1.") {
+        return Ok(trimmed.to_string());
+    }
+    if let Ok(s) = serde_json::from_str::<String>(trimmed) {
+        return Ok(s);
+    }
+    let value: serde_json::Value = serde_json::from_str(trimmed)?;
+    if let Some(s) = value.get("token").and_then(|t| t.as_str()) {
+        return Ok(s.to_string());
+    }
+    Err("decode expects a tg1. string, a JSON string, or {\"token\":\"tg1....\"}".into())
 }
 
 fn handle_check() -> Result<(), Box<dyn std::error::Error>> {
