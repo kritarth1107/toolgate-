@@ -116,3 +116,160 @@ fn scalar_to_string(value: &Value) -> Option<String> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constraint::Constraint;
+    use crate::Verifier;
+    use serde_json::json;
+
+    const SECRET: &[u8] = b"test-secret-key-32-bytes-long!!";
+
+    fn token_with_constraints() -> Token {
+        let mut constraints = BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+        constraints.insert(
+            "limit".to_string(),
+            Constraint::IntRange { min: 1, max: 100 },
+        );
+        Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into(), "meta".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        )
+    }
+
+    fn verifier() -> Verifier<'static> {
+        Verifier::new(SECRET).at(1999999999)
+    }
+
+    fn tools_call(name: &str, arguments: Value) -> Value {
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": name,
+                "arguments": arguments
+            }
+        })
+    }
+
+    #[test]
+    fn check_tools_call_good() {
+        let token = token_with_constraints();
+        let request = tools_call(
+            "read_file",
+            json!({
+                "path": "/tmp/notes.txt",
+                "limit": 50,
+                "meta": {"extra": true}
+            }),
+        );
+        let info = check_tools_call(&verifier(), &token, &request).unwrap();
+        assert_eq!(info.tool_name, "read_file");
+        assert_eq!(info.arguments.get("path").unwrap(), "/tmp/notes.txt");
+        assert_eq!(info.arguments.get("limit").unwrap(), "50");
+        assert!(!info.arguments.contains_key("meta"));
+    }
+
+    #[test]
+    fn check_tools_call_wrong_method() {
+        let token = token_with_constraints();
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/list",
+            "params": {"name": "read_file", "arguments": {}}
+        });
+        assert_eq!(
+            check_tools_call(&verifier(), &token, &request),
+            Err(TokenError::MalformedRequest)
+        );
+    }
+
+    #[test]
+    fn check_tools_call_missing_name() {
+        let token = token_with_constraints();
+        let request = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"arguments": {"path": "/tmp/a"}}
+        });
+        assert_eq!(
+            check_tools_call(&verifier(), &token, &request),
+            Err(TokenError::MalformedRequest)
+        );
+    }
+
+    #[test]
+    fn check_tools_call_wrong_tool() {
+        let token = token_with_constraints();
+        let request = tools_call("write_file", json!({"path": "/tmp/a"}));
+        assert!(matches!(
+            check_tools_call(&verifier(), &token, &request),
+            Err(TokenError::ToolMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn check_tools_call_disallowed_key() {
+        let token = token_with_constraints();
+        let request = tools_call("read_file", json!({"path": "/tmp/a", "secret": "nope"}));
+        assert!(matches!(
+            check_tools_call(&verifier(), &token, &request),
+            Err(TokenError::ArgKeyNotAllowed { key }) if key == "secret"
+        ));
+    }
+
+    #[test]
+    fn check_tools_call_integer_constraint_violation() {
+        let token = token_with_constraints();
+        let request = tools_call("read_file", json!({"path": "/tmp/a", "limit": 200}));
+        assert!(matches!(
+            check_tools_call(&verifier(), &token, &request),
+            Err(TokenError::ConstraintViolation { key }) if key == "limit"
+        ));
+    }
+
+    #[test]
+    fn check_tools_call_nested_value_under_constrained_key() {
+        let token = token_with_constraints();
+        let request = tools_call("read_file", json!({"path": {"nested": true}, "limit": 10}));
+        assert_eq!(
+            check_tools_call(&verifier(), &token, &request),
+            Err(TokenError::MalformedRequest)
+        );
+    }
+
+    #[test]
+    fn token_string_from_meta_reads_toolgate_field() {
+        let request = json!({
+            "method": "tools/call",
+            "params": {
+                "name": "read_file",
+                "arguments": {},
+                "_meta": {"toolgate": "tg1.abc"}
+            }
+        });
+        assert_eq!(token_string_from_meta(&request), Some("tg1.abc"));
+        assert_eq!(
+            token_string_from_meta(&json!({"method": "tools/call"})),
+            None
+        );
+    }
+
+    #[test]
+    fn check_tools_call_converts_bool_scalars() {
+        let token = Token::mint(SECRET, "toggle", vec!["flag".into()], 2000000000);
+        let request = tools_call("toggle", json!({"flag": true}));
+        let info = check_tools_call(&verifier(), &token, &request).unwrap();
+        assert_eq!(info.arguments.get("flag").unwrap(), "true");
+    }
+}
