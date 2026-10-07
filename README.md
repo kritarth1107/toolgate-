@@ -74,6 +74,12 @@ token.verify_call(
     None, // no audience check
 )?;
 
+// Same checks through the Verifier builder
+use toolgate::Verifier;
+Verifier::new(secret)
+    .at(current_time)
+    .verify_call(&token, "read_file", &["path", "offset"])?;
+
 // Attenuate: drop keys or shorten expiry
 let restricted = token.attenuate(
     secret,
@@ -433,9 +439,51 @@ echo '{
 }' | tg check-call
 ```
 
+The `token` field on `check` and `check-call` may be a JSON token object or a `tg1.` string.
+
 Returns `{"authorized": true}` or `{"authorized": false, "error": "...", "error_kind": "..."}`.
 
-Error kinds: `invalid_mac`, `expired`, `not_yet_valid`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `constraint_violation`, `revoked`, `missing_jti`, `max_depth_exceeded`.
+### Encode
+
+Convert a JSON token (raw object or `{"token": {...}}`) to a compact string:
+
+```bash
+echo '{"token": { ... }}' | tg encode
+# {"token":"tg1...."}
+```
+
+### Decode
+
+Convert a `tg1.` string to JSON. The MAC is not checked; the output always includes `"verified": false`.
+
+```bash
+echo 'tg1....' | tg decode
+```
+
+### Check-Mcp
+
+Verify a token against an MCP `tools/call` JSON-RPC request:
+
+```bash
+echo '{
+  "secret": "my-secret",
+  "token": "tg1....",
+  "request": {
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "tools/call",
+    "params": {"name": "read_file", "arguments": {"path": "/tmp/a.txt", "limit": 10}}
+  },
+  "audience": "client-123",
+  "leeway": 30,
+  "current_time": 1699999999,
+  "revoked": []
+}' | tg check-mcp
+```
+
+`token` may be a JSON token or a `tg1.` string. Returns `{"authorized": true}` or `{"authorized": false, "error": "...", "error_kind": "..."}`.
+
+Error kinds: `invalid_mac`, `expired`, `not_yet_valid`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `constraint_violation`, `revoked`, `missing_jti`, `max_depth_exceeded`, `malformed_request`.
 
 Secrets can be hex-encoded with `"secret": "hex:deadbeef..."`.
 
@@ -495,11 +543,66 @@ let decoded = Token::from_wire(&wire_bytes)?;
 
 Wire format is typically smaller than JSON and suitable for constrained channels.
 
+## String Tokens
+
+`Token::to_token_string()` encodes the wire bytes as `tg1.` plus unpadded base64url. `Token::from_token_string()` (and `FromStr`) decode that form. The string is suitable for an HTTP header or an MCP `_meta` field.
+
+```rust
+use toolgate::Token;
+
+let compact = token.to_token_string(); // "tg1...."
+let parsed = Token::from_token_string(&compact)?;
+assert_eq!(parsed, token);
+```
+
+Decoding rejects a wrong prefix, invalid base64url, trailing garbage after the wire payload, and input longer than `MAX_TOKEN_STRING_LEN` (8192 bytes). Parsing a string does not verify the MAC.
+
+## Verifier
+
+`Verifier` consolidates the `verify_*` variants. Existing `Token` and `Keyring` methods keep their behaviour and delegate to it.
+
+```rust
+use std::time::Duration;
+use toolgate::{FixedClock, Verifier};
+
+let clock = FixedClock::at(1699999999);
+Verifier::new(secret)
+    .clock(&clock)          // or .at(unix)
+    .leeway(Duration::from_secs(30))
+    .audience("client-123")
+    .revocation(&revocation_list)
+    .keyring(&keyring)      // looks up the secret by kid
+    .verify(&token)?;
+
+Verifier::new(secret)
+    .at(1699999999)
+    .verify_call(&token, "read_file", &["path"])?;
+
+Verifier::new(secret)
+    .at(1699999999)
+    .verify_call_with_args(&token, "read_file", &args)?;
+```
+
+`.keyring()` overrides the constructor secret and looks up the signing key by `kid`. Single-use and max-uses checks stay on `Token::verify_single_use` / `Token::verify_with_max_uses` (and the matching `Keyring` methods); threading a `&mut UseStore` through the builder would make every check require a mutable borrow.
+
+## MCP tools/call
+
+The `mcp` feature (on by default, pulls `serde_json`) checks a JSON-RPC `tools/call` request against a token:
+
+```rust
+use toolgate::{check_tools_call, token_string_from_meta, Verifier};
+
+let compact = token_string_from_meta(&request); // params._meta.toolgate, if present
+let info = check_tools_call(&verifier, &token, &request)?;
+```
+
+`check_tools_call` extracts `params.name` and `params.arguments`. Scalar values become strings (strings as-is, integers in decimal, bools as `true`/`false`) for constraint checks. Nested object or array values are allowed on unconstrained keys for allowlist checking, and rejected as `MalformedRequest` when the key has a constraint. Non-`tools/call` methods and a missing name are also `MalformedRequest`. The helper inspects the request only; it does not dispatch the tool.
+
 ## Limits
 
 - **Shared secret**: This is a symmetric-key system. All parties that mint or verify tokens share the same secret.
 - **Not a public-key system**: Tokens cannot be verified without the secret.
-- **Not a full MCP gateway**: This library only handles token issuance and verification. It does not implement tool dispatch, argument validation, or network transport.
+- **Not a full MCP gateway**: This library only handles token issuance and verification. The MCP helper inspects a `tools/call` request and does not dispatch tools, validate transport, or implement a server.
 - **Nonce is random, not sequential**: Each mint/attenuate generates a fresh random nonce.
 
 ## Version History
