@@ -59,12 +59,64 @@ pub struct ToolGrant {
 pub enum PolicyError {
     /// The document is not valid JSON or does not match the schema.
     InvalidJson(String),
+    /// `version` is not a supported policy schema version.
+    UnknownVersion {
+        version: String,
+    },
+    /// The same tool name appears in more than one grant.
+    DuplicateTool {
+        name: String,
+    },
+    /// A constraint is attached to a key that is not in the grant's allowlist.
+    ConstraintKeyNotAllowed {
+        tool: String,
+        key: String,
+    },
+    /// A TTL (default or per-grant) is present and zero.
+    ZeroTtl {
+        /// `None` when the policy default TTL is zero; otherwise the grant name.
+        tool: Option<String>,
+    },
+    /// A grant has an empty tool name.
+    EmptyToolName,
+    /// More than one validation error.
+    Multiple(Vec<PolicyError>),
 }
 
 impl std::fmt::Display for PolicyError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PolicyError::InvalidJson(msg) => write!(f, "invalid policy JSON: {msg}"),
+            PolicyError::UnknownVersion { version } => {
+                write!(
+                    f,
+                    "unknown policy version '{version}' (supported: {POLICY_VERSION})"
+                )
+            }
+            PolicyError::DuplicateTool { name } => {
+                write!(f, "duplicate tool name: '{name}'")
+            }
+            PolicyError::ConstraintKeyNotAllowed { tool, key } => {
+                write!(
+                    f,
+                    "constraint key '{key}' on tool '{tool}' is not in the allowed key list"
+                )
+            }
+            PolicyError::ZeroTtl { tool: Some(tool) } => {
+                write!(f, "ttl_seconds for tool '{tool}' must be greater than zero")
+            }
+            PolicyError::ZeroTtl { tool: None } => {
+                write!(f, "default_ttl_seconds must be greater than zero")
+            }
+            PolicyError::EmptyToolName => write!(f, "tool name must not be empty"),
+            PolicyError::Multiple(errors) => {
+                let joined = errors
+                    .iter()
+                    .map(|e| e.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                write!(f, "{joined}")
+            }
         }
     }
 }
@@ -75,5 +127,61 @@ impl Policy {
     /// Parse a policy from a JSON document. Does not validate semantic rules.
     pub fn from_json(json: &str) -> Result<Self, PolicyError> {
         serde_json::from_str(json).map_err(|e| PolicyError::InvalidJson(e.to_string()))
+    }
+
+    /// Collect every semantic validation error.
+    pub fn validation_errors(&self) -> Vec<PolicyError> {
+        let mut errors = Vec::new();
+
+        if self.version != POLICY_VERSION {
+            errors.push(PolicyError::UnknownVersion {
+                version: self.version.clone(),
+            });
+        }
+
+        if self.default_ttl_seconds == Some(0) {
+            errors.push(PolicyError::ZeroTtl { tool: None });
+        }
+
+        let mut seen = std::collections::BTreeSet::new();
+        for grant in &self.tools {
+            if grant.name.is_empty() {
+                errors.push(PolicyError::EmptyToolName);
+            } else if !seen.insert(grant.name.clone()) {
+                errors.push(PolicyError::DuplicateTool {
+                    name: grant.name.clone(),
+                });
+            }
+
+            if grant.ttl_seconds == Some(0) {
+                errors.push(PolicyError::ZeroTtl {
+                    tool: Some(grant.name.clone()),
+                });
+            }
+
+            if let Some(constraints) = &grant.constraints {
+                for key in constraints.keys() {
+                    if !grant.arg_keys.iter().any(|k| k == key) {
+                        errors.push(PolicyError::ConstraintKeyNotAllowed {
+                            tool: grant.name.clone(),
+                            key: key.clone(),
+                        });
+                    }
+                }
+            }
+        }
+
+        errors
+    }
+
+    /// Validate semantic rules. Returns the first error, or
+    /// [`PolicyError::Multiple`] when several fail.
+    pub fn validate(&self) -> Result<(), PolicyError> {
+        let mut errors = self.validation_errors();
+        match errors.len() {
+            0 => Ok(()),
+            1 => Err(errors.remove(0)),
+            _ => Err(PolicyError::Multiple(errors)),
+        }
     }
 }
