@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-10-07
+
+### Added
+- **Audit decisions**: every verify/check can emit a structured, serializable `Decision`
+  - Fields: `outcome` (allow/deny), `reason` / `error_kind`, `token_id` (`jti`), `tool_name`, `audience`, `timestamp` (from the verifier `Clock`), `depth`, and call `arguments`
+  - `TokenError::kind()` returns the stable machine-readable kind used by CLI `error_kind`
+- **`AuditSink` trait** plus two built-ins:
+  - `MemoryAuditSink`: in-process collection for tests
+  - `JsonlAuditSink<W>`: one JSON object per line on any `io::Write`
+- **Argument redaction**: `Redaction` keeps keys and replaces values with `[REDACTED]` by default, or only a configured key list
+- **`Verifier`**: optional `.audit(&sink)` and `.redaction(&policy)`
+  - `verify`, `verify_call`, and `verify_call_with_args` each emit one record when a sink is attached
+  - Existing `Token` / `Keyring` verify APIs stay unchanged when no sink is set
+- **MCP `tools/call`**: `check_tools_call` records through the verifier, including `malformed_request`
+- **CLI**:
+  - `--audit-jsonl stdout|stderr|<path>` on `check`, `check-call`, and `check-mcp`
+  - `--audit-redact-keys key1,key2` to redact only listed argument keys
+
+### Notes
+- `serde_json` is now a required dependency (used by `JsonlAuditSink`); the default `mcp` feature still gates the MCP module
+- Audit write failures do not change the verification result
+
 ## [0.7.0] - 2026-10-07
 
 ### Added
