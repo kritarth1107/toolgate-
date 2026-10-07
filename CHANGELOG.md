@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-10-07
+
+### Added
+- **Declarative policy files**: operators describe which tools an agent may call in one JSON document
+  - `Policy` / `ToolGrant` (serde): `version`, optional `default_audience` / `default_ttl_seconds` / `default_max_depth` / `default_kid`, and a list of grants
+  - Each grant: tool `name`, `arg_keys`, optional per-key `Constraint`s (existing serde form), optional `ttl_seconds` / `audience` / `max_depth` overrides
+  - `Policy::from_json` / `validate()` with `PolicyError`: unknown version, duplicate tool names, constraints on keys not in the allowlist, zero TTL, empty tool name
+  - `Policy::mint(tool, secret, now)` and `mint_with_keyring` (active key): token fields come from the grant with defaults applied
+  - `Policy::check_call` / `check_call_with_args`: verify through `Verifier` **and** confirm the token is still permitted by the current policy (tightening denies older broader tokens). An attached `AuditSink` records exactly one `Decision`
+- **New error variant**: `TokenError::PolicyDenied` (`policy_denied`)
+- **CLI**:
+  - `tg policy lint <file>`: prints `ok` or the validation errors; nonzero exit on error
+  - `tg mint --policy <file> --tool <name>`: mint from a grant; stdin still supplies `secret` (and optional `current_time`). Existing stdin JSON minting is unchanged
+- **Example**: `examples/policy.json`
+
+### Notes
+- Policy version `"1"` is the only accepted schema version
+- Grant TTL (or `default_ttl_seconds`) is required to mint; expiry is `now + ttl`
+
 ## [0.8.0] - 2026-10-07
 
 ### Added

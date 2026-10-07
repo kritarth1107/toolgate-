@@ -25,7 +25,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-toolgate = "0.8"
+toolgate = "0.9"
 ```
 
 Or install the CLI:
@@ -350,6 +350,52 @@ Key points:
 - `UseStore` trait enables pluggable use-count tracking (in-memory impl provided)
 - Tokens without `jti` cannot be checked against revocation lists or use stores
 
+## Policy Files
+
+Operators describe which tools an agent may call in one JSON document. toolgate mints tokens from a grant (defaults applied) and re-checks calls against the current file, so tightening the policy denies older broader tokens.
+
+```rust
+use std::collections::BTreeMap;
+use toolgate::{MemoryAuditSink, Policy, Verifier};
+
+let secret = b"your-256-bit-secret-key-here!!";
+let json = std::fs::read_to_string("examples/policy.json")?;
+let policy = Policy::from_json(&json)?;
+policy.validate()?;
+
+// Mint: expiry is now + ttl; audience / max_depth / constraints come from
+// the grant with policy defaults applied.
+let now = 1_700_000_000;
+let token = policy.mint("read_file", secret, now)?;
+
+// Or mint with the keyring's active key (token kid is the active key id).
+// policy.mint_with_keyring("read_file", &keyring, now)?;
+
+let mut args = BTreeMap::new();
+args.insert("path".to_string(), "/tmp/a.txt".to_string());
+args.insert("limit".to_string(), "10".to_string());
+
+let sink = MemoryAuditSink::new();
+let verifier = Verifier::new(secret).at(now).audit(&sink);
+policy.check_call_with_args(&verifier, &token, "read_file", &args)?;
+assert_eq!(sink.len(), 1); // one Decision, even when the policy check fails
+```
+
+`examples/policy.json` is a complete sample. Schema:
+
+| Field | Where | Description |
+|-------|--------|-------------|
+| `version` | policy | Must be `"1"` |
+| `default_audience` / `default_ttl_seconds` / `default_max_depth` / `default_kid` | policy | Optional defaults |
+| `tools[]` | policy | Grants; each `name` may appear once |
+| `name` / `arg_keys` | grant | Tool name and allowed argument keys |
+| `constraints` | grant | Per-key [`Constraint`](#argument-value-constraints) (same serde form as tokens) |
+| `ttl_seconds` / `audience` / `max_depth` | grant | Optional overrides of the defaults |
+
+`Policy::validate()` rejects unknown versions, duplicate tool names, empty tool names, zero TTLs, and constraints on keys that are not in the grant's allowlist. Minting an unknown tool, or a grant with no TTL and no default TTL, is an error.
+
+`check_call` / `check_call_with_args` verify the token through [`Verifier`](#verifier) **and** confirm the token is still within the current policy (argument keys, constraints, audience, and max depth). An attached `AuditSink` still records exactly one `Decision`.
+
 ## CLI Usage
 
 The `tg` binary accepts JSON on stdin and outputs JSON.
@@ -374,6 +420,22 @@ echo '{
 ```
 
 The `audience`, `constraints`, `generate_jti`, `nbf`, and `max_depth` fields are optional. Set `generate_jti: true` to generate a unique token identifier for revocation/replay tracking.
+
+Mint from a policy file instead of a full mint request. Stdin still supplies the secret (and optional `current_time`); expiry is `now + ttl` from the grant.
+
+```bash
+echo '{"secret": "my-secret", "current_time": 1700000000}' | tg mint --policy examples/policy.json --tool read_file
+```
+
+Existing stdin JSON minting is unchanged when `--policy` is omitted.
+
+### Policy lint
+
+Validate a policy file. Prints `ok` or the validation errors; exits nonzero on error.
+
+```bash
+tg policy lint examples/policy.json
+```
 
 ### Attenuate
 
@@ -483,7 +545,7 @@ echo '{
 
 `token` may be a JSON token or a `tg1.` string. Returns `{"authorized": true}` or `{"authorized": false, "error": "...", "error_kind": "..."}`.
 
-Error kinds: `invalid_mac`, `expired`, `not_yet_valid`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `constraint_violation`, `revoked`, `missing_jti`, `max_depth_exceeded`, `malformed_request`.
+Error kinds: `invalid_mac`, `expired`, `not_yet_valid`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `constraint_violation`, `revoked`, `missing_jti`, `max_depth_exceeded`, `malformed_request`, `policy_denied`.
 
 ### Audit JSONL
 
@@ -665,6 +727,7 @@ let info = check_tools_call(&verifier, &token, &request)?;
 
 ## Version History
 
+- **0.9.0**: Declarative policy files (`Policy`), mint/check from grants, CLI `policy lint` and `mint --policy`
 - **0.8.0**: Structured audit `Decision` records, `AuditSink` (memory + JSONL), argument redaction, optional `Verifier` sink, CLI `--audit-jsonl`
 - **0.7.0**: Compact `tg1.` string tokens, `Verifier` builder, MCP `tools/call` check (`mcp` feature), CLI `encode` / `decode` / `check-mcp`
 - **0.6.0**: Add swappable `Clock`, expiry/nbf leeway, optional `nbf`, attenuation `depth`/`max_depth`, canonical encoding v6, wire format v5

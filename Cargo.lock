@@ -362,7 +362,7 @@ dependencies = [
 
 [[package]]
 name = "tg"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "clap",
  "hex",
@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "toolgate"
-version = "0.8.0"
+version = "0.9.0"
 dependencies = [
  "hex",
  "hmac",
