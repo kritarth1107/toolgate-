@@ -278,6 +278,7 @@ fn keys_as_args(arg_keys: &[&str]) -> BTreeMap<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::{MemoryAuditSink, Outcome, Redaction, REDACTED};
     use crate::clock::FixedClock;
     use crate::constraint::Constraint;
     use crate::use_store::MemoryUseStore;
@@ -530,5 +531,127 @@ mod tests {
             token.verify_single_use(SECRET, 1999999999, &mut store),
             Err(TokenError::ReplayDetected { .. })
         ));
+    }
+
+    #[test]
+    fn verifier_without_sink_does_not_record() {
+        let token = basic_token();
+        assert!(Verifier::new(SECRET).at(1999999999).verify(&token).is_ok());
+    }
+
+    #[test]
+    fn verifier_records_allow_from_clock_and_token() {
+        let token = Token::mint_with_jti(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            Some("client-abc".to_string()),
+            None,
+            None,
+            true,
+        );
+        let sink = MemoryAuditSink::new();
+        let clock = FixedClock::at(1999999999);
+        let mut args = BTreeMap::new();
+        args.insert("path".to_string(), "/tmp/secret.txt".to_string());
+
+        Verifier::new(SECRET)
+            .clock(&clock)
+            .audit(&sink)
+            .verify_call_with_args(&token, "read_file", &args)
+            .unwrap();
+
+        let recorded = sink.decisions();
+        assert_eq!(recorded.len(), 1);
+        let decision = &recorded[0];
+        assert_eq!(decision.outcome, Outcome::Allow);
+        assert_eq!(decision.token_id, token.jti);
+        assert_eq!(decision.tool_name.as_deref(), Some("read_file"));
+        assert_eq!(decision.audience.as_deref(), Some("client-abc"));
+        assert_eq!(decision.timestamp, 1999999999);
+        assert_eq!(decision.depth, 0);
+        assert_eq!(decision.arguments.get("path").unwrap(), REDACTED);
+        assert!(decision.error_kind.is_none());
+    }
+
+    #[test]
+    fn verifier_records_deny_with_error_kind() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 1700000000);
+        let sink = MemoryAuditSink::new();
+        let err = Verifier::new(SECRET)
+            .at(1700000001)
+            .audit(&sink)
+            .verify(&token);
+        assert_eq!(err, Err(TokenError::Expired));
+        let decision = &sink.decisions()[0];
+        assert_eq!(decision.outcome, Outcome::Deny);
+        assert_eq!(decision.error_kind.as_deref(), Some("expired"));
+        assert_eq!(decision.timestamp, 1700000001);
+        assert_eq!(decision.tool_name.as_deref(), Some("read_file"));
+    }
+
+    #[test]
+    fn verifier_records_tool_mismatch_once() {
+        let token = basic_token();
+        let sink = MemoryAuditSink::new();
+        let err = Verifier::new(SECRET)
+            .at(1999999999)
+            .audit(&sink)
+            .verify_call(&token, "write_file", &["path"]);
+        assert!(matches!(err, Err(TokenError::ToolMismatch { .. })));
+        assert_eq!(sink.len(), 1);
+        assert_eq!(
+            sink.decisions()[0].error_kind.as_deref(),
+            Some("tool_mismatch")
+        );
+        assert_eq!(sink.decisions()[0].tool_name.as_deref(), Some("write_file"));
+    }
+
+    #[test]
+    fn verifier_redaction_keys_keep_unlisted_values() {
+        let token = basic_token();
+        let sink = MemoryAuditSink::new();
+        let redaction = Redaction::keys(["path"]);
+        let mut args = BTreeMap::new();
+        args.insert("path".to_string(), "/etc/passwd".to_string());
+        args.insert("limit".to_string(), "10".to_string());
+
+        Verifier::new(SECRET)
+            .at(1999999999)
+            .audit(&sink)
+            .redaction(&redaction)
+            .verify_call_with_args(&token, "read_file", &args)
+            .unwrap();
+
+        let args = &sink.decisions()[0].arguments;
+        assert_eq!(args.get("path").unwrap(), REDACTED);
+        assert_eq!(args.get("limit").unwrap(), "10");
+    }
+
+    #[test]
+    fn verifier_records_attenuated_depth() {
+        let token = Token::mint_complete(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            false,
+            None,
+            Some(2),
+        );
+        let once = token
+            .attenuate(SECRET, Some(vec!["path".into()]), None)
+            .unwrap();
+        let sink = MemoryAuditSink::new();
+        Verifier::new(SECRET)
+            .at(1999999999)
+            .audit(&sink)
+            .verify(&once)
+            .unwrap();
+        assert_eq!(sink.decisions()[0].depth, 1);
     }
 }
