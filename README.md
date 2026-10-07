@@ -485,6 +485,16 @@ echo '{
 
 Error kinds: `invalid_mac`, `expired`, `not_yet_valid`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `constraint_violation`, `revoked`, `missing_jti`, `max_depth_exceeded`, `malformed_request`.
 
+### Audit JSONL
+
+`tg check`, `tg check-call`, and `tg check-mcp` accept `--audit-jsonl TARGET` to write one `Decision` per line after the command JSON. `TARGET` is `stdout`, `stderr`, or a file path (created/appended). Argument values are redacted by default. Pass `--audit-redact-keys path,token` to redact only those keys.
+
+```bash
+echo '{ ... }' | tg check-call --audit-jsonl stderr
+echo '{ ... }' | tg check-mcp --audit-jsonl /tmp/decisions.jsonl
+echo '{ ... }' | tg check --audit-jsonl stdout --audit-redact-keys path
+```
+
 Secrets can be hex-encoded with `"secret": "hex:deadbeef..."`.
 
 ## Canonical Byte Encoding (v6)
@@ -572,6 +582,7 @@ Verifier::new(secret)
     .audience("client-123")
     .revocation(&revocation_list)
     .keyring(&keyring)      // looks up the secret by kid
+    .audit(&sink)           // optional Decision sink
     .verify(&token)?;
 
 Verifier::new(secret)
@@ -584,6 +595,53 @@ Verifier::new(secret)
 ```
 
 `.keyring()` overrides the constructor secret and looks up the signing key by `kid`. Single-use and max-uses checks stay on `Token::verify_single_use` / `Token::verify_with_max_uses` (and the matching `Keyring` methods); threading a `&mut UseStore` through the builder would make every check require a mutable borrow.
+
+Attach `.audit(&sink)` to record each verify/check as a [`Decision`]. Argument values are redacted by default (keys kept, values replaced with `[REDACTED]`). Use `.redaction(&Redaction::keys(["token"]))` to redact only listed keys.
+
+## Audit Decisions
+
+Every `Verifier` check can emit a structured, serializable `Decision` to a pluggable `AuditSink`. The record includes allow/deny, reason/`error_kind`, token id (`jti`), tool name, audience, a timestamp from the verifier `Clock`, delegation `depth`, and the call arguments after redaction.
+
+```rust
+use std::collections::BTreeMap;
+use toolgate::{MemoryAuditSink, Outcome, Redaction, Token, Verifier, REDACTED};
+
+let secret = b"your-256-bit-secret-key-here!!";
+let token = Token::mint_with_jti(
+    secret,
+    "read_file",
+    vec!["path".into()],
+    2000000000,
+    None, None, None,
+    true,
+);
+let sink = MemoryAuditSink::new();
+let mut args = BTreeMap::new();
+args.insert("path".to_string(), "/tmp/secret.txt".to_string());
+
+Verifier::new(secret)
+    .at(1999999999)
+    .audit(&sink)
+    .verify_call_with_args(&token, "read_file", &args)?;
+
+let decision = &sink.decisions()[0];
+assert_eq!(decision.outcome, Outcome::Allow);
+assert_eq!(decision.arguments.get("path").unwrap(), REDACTED);
+```
+
+Built-in sinks:
+- `MemoryAuditSink`: in-process `Vec` of decisions (useful for tests)
+- `JsonlAuditSink<W>`: one JSON object per line on any `io::Write`
+
+`check_tools_call` records through the same verifier, including `malformed_request` parse failures. Existing `Token` / `Keyring` verify methods stay unchanged when no sink is attached.
+
+To keep selected values (for example a non-secret `limit`) while still redacting secrets:
+
+```rust
+use toolgate::Redaction;
+let redaction = Redaction::keys(["path", "token"]);
+Verifier::new(secret).audit(&sink).redaction(&redaction);
+```
 
 ## MCP tools/call
 
