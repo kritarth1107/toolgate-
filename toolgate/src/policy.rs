@@ -6,6 +6,8 @@
 //! [`Constraint`](crate::Constraint)s in the same serde form used on tokens.
 
 use crate::constraint::Constraints;
+use crate::keyring::Keyring;
+use crate::token::Token;
 
 /// Supported policy document version.
 pub const POLICY_VERSION: &str = "1";
@@ -79,6 +81,16 @@ pub enum PolicyError {
     },
     /// A grant has an empty tool name.
     EmptyToolName,
+    /// No grant exists for the requested tool.
+    UnknownTool {
+        name: String,
+    },
+    /// Neither the grant nor the policy default specifies a TTL.
+    MissingTtl {
+        tool: String,
+    },
+    /// The keyring has no active key to mint with.
+    NoActiveKey,
     /// More than one validation error.
     Multiple(Vec<PolicyError>),
 }
@@ -109,6 +121,16 @@ impl std::fmt::Display for PolicyError {
                 write!(f, "default_ttl_seconds must be greater than zero")
             }
             PolicyError::EmptyToolName => write!(f, "tool name must not be empty"),
+            PolicyError::UnknownTool { name } => {
+                write!(f, "unknown tool '{name}' is not granted by policy")
+            }
+            PolicyError::MissingTtl { tool } => {
+                write!(
+                    f,
+                    "no ttl_seconds for tool '{tool}' and no default_ttl_seconds"
+                )
+            }
+            PolicyError::NoActiveKey => write!(f, "no active key in keyring"),
             PolicyError::Multiple(errors) => {
                 let joined = errors
                     .iter()
@@ -184,4 +206,97 @@ impl Policy {
             _ => Err(PolicyError::Multiple(errors)),
         }
     }
+
+    /// Look up the grant for `tool`.
+    pub fn grant(&self, tool: &str) -> Option<&ToolGrant> {
+        self.tools.iter().find(|g| g.name == tool)
+    }
+
+    /// Effective audience: grant override, else policy default.
+    pub fn audience_for(&self, grant: &ToolGrant) -> Option<String> {
+        grant
+            .audience
+            .clone()
+            .or_else(|| self.default_audience.clone())
+    }
+
+    /// Effective TTL: grant override, else policy default.
+    pub fn ttl_for(&self, grant: &ToolGrant) -> Option<u64> {
+        grant.ttl_seconds.or(self.default_ttl_seconds)
+    }
+
+    /// Effective max depth: grant override, else policy default.
+    pub fn max_depth_for(&self, grant: &ToolGrant) -> Option<u32> {
+        grant.max_depth.or(self.default_max_depth)
+    }
+
+    fn resolve_grant<'a>(&'a self, tool: &str, now: u64) -> Result<ResolvedGrant<'a>, PolicyError> {
+        self.validate()?;
+        let grant = self.grant(tool).ok_or_else(|| PolicyError::UnknownTool {
+            name: tool.to_string(),
+        })?;
+        let ttl = self
+            .ttl_for(grant)
+            .ok_or_else(|| PolicyError::MissingTtl {
+                tool: tool.to_string(),
+            })?;
+        Ok(ResolvedGrant {
+            grant,
+            expiry: now.saturating_add(ttl),
+            audience: self.audience_for(grant),
+            max_depth: self.max_depth_for(grant),
+        })
+    }
+
+    /// Mint a token for `tool` using `secret`.
+    ///
+    /// Expiry is `now + ttl`. Audience, max depth, and argument constraints
+    /// come from the grant with policy defaults applied. `kid` is
+    /// [`Policy::default_kid`].
+    pub fn mint(&self, tool: &str, secret: &[u8], now: u64) -> Result<Token, PolicyError> {
+        let resolved = self.resolve_grant(tool, now)?;
+        Ok(Token::mint_complete(
+            secret,
+            resolved.grant.name.clone(),
+            resolved.grant.arg_keys.clone(),
+            resolved.expiry,
+            resolved.audience,
+            self.default_kid.clone(),
+            resolved.grant.constraints.clone(),
+            false,
+            None,
+            resolved.max_depth,
+        ))
+    }
+
+    /// Mint a token for `tool` using the keyring's active key.
+    ///
+    /// The token `kid` is the active key id (not [`Policy::default_kid`]).
+    pub fn mint_with_keyring(
+        &self,
+        tool: &str,
+        keyring: &Keyring,
+        now: u64,
+    ) -> Result<Token, PolicyError> {
+        let resolved = self.resolve_grant(tool, now)?;
+        keyring
+            .mint_complete(
+                resolved.grant.name.clone(),
+                resolved.grant.arg_keys.clone(),
+                resolved.expiry,
+                resolved.audience,
+                resolved.grant.constraints.clone(),
+                false,
+                None,
+                resolved.max_depth,
+            )
+            .map_err(|_| PolicyError::NoActiveKey)
+    }
+}
+
+struct ResolvedGrant<'a> {
+    grant: &'a ToolGrant,
+    expiry: u64,
+    audience: Option<String>,
+    max_depth: Option<u32>,
 }
