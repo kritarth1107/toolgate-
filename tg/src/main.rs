@@ -3,7 +3,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use toolgate::{Constraints, RevocationList, Token, TokenError, VerifyTime};
+use toolgate::{
+    check_tools_call, Constraints, RevocationList, Token, TokenError, TokenStringError, Verifier,
+    VerifyTime,
+};
 
 #[derive(Parser)]
 #[command(name = "tg")]
@@ -28,6 +31,8 @@ enum Commands {
     Encode,
     /// Decode a compact `tg1.` string to JSON (does not verify the MAC)
     Decode,
+    /// Verify a token against an MCP tools/call JSON-RPC request
+    CheckMcp,
 }
 
 #[derive(Deserialize)]
@@ -71,9 +76,25 @@ struct AttenuateOutput {
 }
 
 #[derive(Deserialize)]
+#[serde(untagged)]
+enum TokenArg {
+    Object(Token),
+    String(String),
+}
+
+impl TokenArg {
+    fn into_token(self) -> Result<Token, TokenStringError> {
+        match self {
+            TokenArg::Object(token) => Ok(token),
+            TokenArg::String(s) => Token::from_token_string(&s),
+        }
+    }
+}
+
+#[derive(Deserialize)]
 struct CheckInput {
     secret: String,
-    token: Token,
+    token: TokenArg,
     #[serde(default)]
     current_time: Option<u64>,
     #[serde(default)]
@@ -86,7 +107,7 @@ struct CheckInput {
 #[derive(Deserialize)]
 struct CheckCallInput {
     secret: String,
-    token: Token,
+    token: TokenArg,
     tool_name: String,
     #[serde(default)]
     arg_keys: Vec<String>,
@@ -138,6 +159,21 @@ struct DecodeOutput {
     verified: bool,
 }
 
+#[derive(Deserialize)]
+struct CheckMcpInput {
+    secret: String,
+    token: TokenArg,
+    request: serde_json::Value,
+    #[serde(default)]
+    audience: Option<String>,
+    #[serde(default)]
+    leeway: Option<u64>,
+    #[serde(default)]
+    current_time: Option<u64>,
+    #[serde(default)]
+    revoked: Option<Vec<String>>,
+}
+
 fn read_stdin() -> io::Result<String> {
     let mut input = String::new();
     io::stdin().read_to_string(&mut input)?;
@@ -169,6 +205,7 @@ fn main() {
         Commands::CheckCall => handle_check_call(),
         Commands::Encode => handle_encode(),
         Commands::Decode => handle_decode(),
+        Commands::CheckMcp => handle_check_mcp(),
     };
 
     if let Err(e) = result {
@@ -257,14 +294,12 @@ fn parse_token_string_input(raw: &str) -> Result<String, Box<dyn std::error::Err
 fn handle_check() -> Result<(), Box<dyn std::error::Error>> {
     let input: CheckInput = serde_json::from_str(&read_stdin()?)?;
     let secret = decode_secret(&input.secret);
+    let token = input.token.into_token()?;
     let current_time = input.current_time.unwrap_or_else(current_unix_time);
     let leeway = Duration::from_secs(input.leeway.unwrap_or(0));
     let time = VerifyTime::unix_with_leeway(current_time, leeway);
 
-    let output = match input
-        .token
-        .verify_at(&secret, &time, input.audience.as_deref())
-    {
+    let output = match token.verify_at(&secret, &time, input.audience.as_deref()) {
         Ok(()) => CheckOutput {
             valid: true,
             error: None,
@@ -282,6 +317,7 @@ fn handle_check() -> Result<(), Box<dyn std::error::Error>> {
 fn handle_check_call() -> Result<(), Box<dyn std::error::Error>> {
     let input: CheckCallInput = serde_json::from_str(&read_stdin()?)?;
     let secret = decode_secret(&input.secret);
+    let token = input.token.into_token()?;
     let current_time = input.current_time.unwrap_or_else(current_unix_time);
     let leeway = Duration::from_secs(input.leeway.unwrap_or(0));
     let time = VerifyTime::unix_with_leeway(current_time, leeway);
@@ -294,7 +330,7 @@ fn handle_check_call() -> Result<(), Box<dyn std::error::Error>> {
     // If args provided, use verify_call_with_args_at for constraint checking
     // Otherwise fall back to verify_call_at with just arg_keys
     let result = if let Some(ref args) = input.args {
-        input.token.verify_call_with_args_at(
+        token.verify_call_with_args_at(
             &secret,
             &time,
             &input.tool_name,
@@ -303,7 +339,7 @@ fn handle_check_call() -> Result<(), Box<dyn std::error::Error>> {
         )
     } else {
         let arg_keys_refs: Vec<&str> = input.arg_keys.iter().map(|s| s.as_str()).collect();
-        input.token.verify_call_at(
+        token.verify_call_at(
             &secret,
             &time,
             &input.tool_name,
@@ -316,7 +352,7 @@ fn handle_check_call() -> Result<(), Box<dyn std::error::Error>> {
     let result = match (result, &revocation_list) {
         (Ok(()), Some(list)) => {
             // Check against revocation list
-            match &input.token.jti {
+            match &token.jti {
                 Some(jti) if list.is_revoked(jti) => Err(TokenError::Revoked { jti: jti.clone() }),
                 Some(_) => Ok(()),
                 None => Err(TokenError::MissingJti),
@@ -327,6 +363,42 @@ fn handle_check_call() -> Result<(), Box<dyn std::error::Error>> {
 
     let output = match result {
         Ok(()) => CheckCallOutput {
+            authorized: true,
+            error: None,
+            error_kind: None,
+        },
+        Err(e) => CheckCallOutput {
+            authorized: false,
+            error: Some(e.to_string()),
+            error_kind: Some(error_to_kind(&e)),
+        },
+    };
+
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+fn handle_check_mcp() -> Result<(), Box<dyn std::error::Error>> {
+    let input: CheckMcpInput = serde_json::from_str(&read_stdin()?)?;
+    let secret = decode_secret(&input.secret);
+    let token = input.token.into_token()?;
+    let current_time = input.current_time.unwrap_or_else(current_unix_time);
+    let leeway = Duration::from_secs(input.leeway.unwrap_or(0));
+    let revocation_list = input
+        .revoked
+        .map(|jtis| jtis.into_iter().collect::<RevocationList>());
+
+    let mut verifier = Verifier::new(&secret).at(current_time).leeway(leeway);
+    if let Some(ref audience) = input.audience {
+        verifier = verifier.audience(audience);
+    }
+    if let Some(ref list) = revocation_list {
+        verifier = verifier.revocation(list);
+    }
+
+    let result = check_tools_call(&verifier, &token, &input.request);
+    let output = match result {
+        Ok(_) => CheckCallOutput {
             authorized: true,
             error: None,
             error_kind: None,
