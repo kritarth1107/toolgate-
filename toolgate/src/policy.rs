@@ -65,18 +65,11 @@ pub enum PolicyError {
     /// The document is not valid JSON or does not match the schema.
     InvalidJson(String),
     /// `version` is not a supported policy schema version.
-    UnknownVersion {
-        version: String,
-    },
+    UnknownVersion { version: String },
     /// The same tool name appears in more than one grant.
-    DuplicateTool {
-        name: String,
-    },
+    DuplicateTool { name: String },
     /// A constraint is attached to a key that is not in the grant's allowlist.
-    ConstraintKeyNotAllowed {
-        tool: String,
-        key: String,
-    },
+    ConstraintKeyNotAllowed { tool: String, key: String },
     /// A TTL (default or per-grant) is present and zero.
     ZeroTtl {
         /// `None` when the policy default TTL is zero; otherwise the grant name.
@@ -85,13 +78,9 @@ pub enum PolicyError {
     /// A grant has an empty tool name.
     EmptyToolName,
     /// No grant exists for the requested tool.
-    UnknownTool {
-        name: String,
-    },
+    UnknownTool { name: String },
     /// Neither the grant nor the policy default specifies a TTL.
-    MissingTtl {
-        tool: String,
-    },
+    MissingTtl { tool: String },
     /// The keyring has no active key to mint with.
     NoActiveKey,
     /// More than one validation error.
@@ -238,11 +227,9 @@ impl Policy {
         let grant = self.grant(tool).ok_or_else(|| PolicyError::UnknownTool {
             name: tool.to_string(),
         })?;
-        let ttl = self
-            .ttl_for(grant)
-            .ok_or_else(|| PolicyError::MissingTtl {
-                tool: tool.to_string(),
-            })?;
+        let ttl = self.ttl_for(grant).ok_or_else(|| PolicyError::MissingTtl {
+            tool: tool.to_string(),
+        })?;
         Ok(ResolvedGrant {
             grant,
             expiry: now.saturating_add(ttl),
@@ -301,11 +288,11 @@ impl Policy {
     /// Used after mint: a later, tighter policy denies older broader tokens
     /// even if the token MAC is still valid.
     pub fn authorize_token(&self, token: &Token) -> Result<(), TokenError> {
-        let grant = self.grant(&token.tool_name).ok_or_else(|| {
-            TokenError::PolicyDenied {
+        let grant = self
+            .grant(&token.tool_name)
+            .ok_or_else(|| TokenError::PolicyDenied {
                 reason: format!("tool '{}' is not permitted by policy", token.tool_name),
-            }
-        })?;
+            })?;
 
         for key in &token.arg_keys {
             if !grant.arg_keys.iter().any(|k| k == key) {
@@ -339,7 +326,9 @@ impl Policy {
                 Some(got) if got == &expected => {}
                 Some(got) => {
                     return Err(TokenError::PolicyDenied {
-                        reason: format!("token audience '{got}' does not match policy '{expected}'"),
+                        reason: format!(
+                            "token audience '{got}' does not match policy '{expected}'"
+                        ),
                     });
                 }
                 None => {
@@ -402,4 +391,390 @@ struct ResolvedGrant<'a> {
     expiry: u64,
     audience: Option<String>,
     max_depth: Option<u32>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audit::{MemoryAuditSink, Outcome};
+    use crate::constraint::Constraint;
+    use crate::TokenError;
+
+    const SECRET: &[u8] = b"test-secret-key-32-bytes-long!!";
+    const NOW: u64 = 1_700_000_000;
+
+    fn sample_json() -> &'static str {
+        r#"{
+            "version": "1",
+            "default_audience": "agent",
+            "default_ttl_seconds": 3600,
+            "default_max_depth": 2,
+            "default_kid": "key-2025",
+            "tools": [
+                {
+                    "name": "read_file",
+                    "arg_keys": ["path", "limit"],
+                    "constraints": {
+                        "path": {"type": "prefix", "value": "/tmp/"},
+                        "limit": {"type": "int_range", "value": {"min": 1, "max": 100}}
+                    }
+                },
+                {
+                    "name": "ping",
+                    "arg_keys": [],
+                    "ttl_seconds": 60,
+                    "audience": "monitor",
+                    "max_depth": 0
+                }
+            ]
+        }"#
+    }
+
+    fn sample_policy() -> Policy {
+        let policy = Policy::from_json(sample_json()).unwrap();
+        policy.validate().unwrap();
+        policy
+    }
+
+    #[test]
+    fn from_json_parses_defaults_and_constraint_serde() {
+        let policy = sample_policy();
+        assert_eq!(policy.version, POLICY_VERSION);
+        assert_eq!(policy.default_audience.as_deref(), Some("agent"));
+        assert_eq!(policy.default_ttl_seconds, Some(3600));
+        assert_eq!(policy.default_max_depth, Some(2));
+        assert_eq!(policy.default_kid.as_deref(), Some("key-2025"));
+        assert_eq!(policy.tools.len(), 2);
+        let grant = policy.grant("read_file").unwrap();
+        assert_eq!(grant.arg_keys, vec!["path", "limit"]);
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("path"),
+            Some(&Constraint::Prefix("/tmp/".into()))
+        );
+    }
+
+    #[test]
+    fn from_json_rejects_malformed() {
+        let err = Policy::from_json("{not json").unwrap_err();
+        assert!(matches!(err, PolicyError::InvalidJson(_)));
+    }
+
+    #[test]
+    fn validate_unknown_version() {
+        let policy = Policy::from_json(r#"{"version":"9","tools":[]}"#).unwrap();
+        assert_eq!(
+            policy.validate(),
+            Err(PolicyError::UnknownVersion {
+                version: "9".into()
+            })
+        );
+    }
+
+    #[test]
+    fn validate_duplicate_tool_names() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [
+                    {"name": "read_file", "arg_keys": ["path"]},
+                    {"name": "read_file", "arg_keys": ["limit"]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.validate(),
+            Err(PolicyError::DuplicateTool {
+                name: "read_file".into()
+            })
+        );
+    }
+
+    #[test]
+    fn validate_constraint_key_not_in_allowlist() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["path"],
+                    "constraints": {"offset": {"type": "max_len", "value": 8}}
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.validate(),
+            Err(PolicyError::ConstraintKeyNotAllowed {
+                tool: "read_file".into(),
+                key: "offset".into()
+            })
+        );
+    }
+
+    #[test]
+    fn validate_zero_default_ttl() {
+        let policy =
+            Policy::from_json(r#"{"version":"1","default_ttl_seconds":0,"tools":[]}"#).unwrap();
+        assert_eq!(policy.validate(), Err(PolicyError::ZeroTtl { tool: None }));
+    }
+
+    #[test]
+    fn validate_zero_grant_ttl() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{"name": "ping", "ttl_seconds": 0}]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.validate(),
+            Err(PolicyError::ZeroTtl {
+                tool: Some("ping".into())
+            })
+        );
+    }
+
+    #[test]
+    fn validate_empty_tool_name() {
+        let policy = Policy::from_json(r#"{"version":"1","tools":[{"name":""}]}"#).unwrap();
+        assert_eq!(policy.validate(), Err(PolicyError::EmptyToolName));
+    }
+
+    #[test]
+    fn validate_collects_multiple_errors() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "2",
+                "default_ttl_seconds": 0,
+                "tools": [
+                    {"name": ""},
+                    {"name": "a"},
+                    {"name": "a"}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let err = policy.validate().unwrap_err();
+        match err {
+            PolicyError::Multiple(errors) => {
+                assert!(errors
+                    .iter()
+                    .any(|e| matches!(e, PolicyError::UnknownVersion { .. })));
+                assert!(errors
+                    .iter()
+                    .any(|e| matches!(e, PolicyError::ZeroTtl { tool: None })));
+                assert!(errors
+                    .iter()
+                    .any(|e| matches!(e, PolicyError::EmptyToolName)));
+                assert!(errors
+                    .iter()
+                    .any(|e| matches!(e, PolicyError::DuplicateTool { .. })));
+            }
+            other => panic!("expected Multiple, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn mint_applies_defaults() {
+        let policy = sample_policy();
+        let token = policy.mint("read_file", SECRET, NOW).unwrap();
+        assert_eq!(token.tool_name, "read_file");
+        assert_eq!(token.arg_keys, vec!["path", "limit"]);
+        assert_eq!(token.expiry, NOW + 3600);
+        assert_eq!(token.audience.as_deref(), Some("agent"));
+        assert_eq!(token.max_depth, Some(2));
+        assert_eq!(token.kid.as_deref(), Some("key-2025"));
+        assert_eq!(
+            token.constraints.as_ref().unwrap().get("path"),
+            Some(&Constraint::Prefix("/tmp/".into()))
+        );
+        assert!(token.verify(SECRET, NOW).is_ok());
+    }
+
+    #[test]
+    fn mint_grant_overrides_defaults() {
+        let policy = sample_policy();
+        let token = policy.mint("ping", SECRET, NOW).unwrap();
+        assert_eq!(token.expiry, NOW + 60);
+        assert_eq!(token.audience.as_deref(), Some("monitor"));
+        assert_eq!(token.max_depth, Some(0));
+        assert_eq!(token.kid.as_deref(), Some("key-2025"));
+        assert!(token.arg_keys.is_empty());
+    }
+
+    #[test]
+    fn mint_unknown_tool() {
+        let policy = sample_policy();
+        let err = policy.mint("write_file", SECRET, NOW).unwrap_err();
+        assert_eq!(
+            err,
+            PolicyError::UnknownTool {
+                name: "write_file".into()
+            }
+        );
+    }
+
+    #[test]
+    fn mint_missing_ttl() {
+        let policy =
+            Policy::from_json(r#"{"version":"1","tools":[{"name":"ping","arg_keys":[]}]}"#)
+                .unwrap();
+        let err = policy.mint("ping", SECRET, NOW).unwrap_err();
+        assert_eq!(
+            err,
+            PolicyError::MissingTtl {
+                tool: "ping".into()
+            }
+        );
+    }
+
+    #[test]
+    fn mint_with_keyring_uses_active_key() {
+        let policy = sample_policy();
+        let mut keyring = Keyring::new();
+        keyring.add("active-1", SECRET.to_vec());
+        let token = policy
+            .mint_with_keyring("read_file", &keyring, NOW)
+            .unwrap();
+        assert_eq!(token.kid.as_deref(), Some("active-1"));
+        assert_eq!(token.expiry, NOW + 3600);
+        assert!(keyring.verify(&token, NOW).is_ok());
+    }
+
+    #[test]
+    fn mint_with_keyring_requires_active_key() {
+        let policy = sample_policy();
+        let keyring = Keyring::new();
+        let err = policy
+            .mint_with_keyring("read_file", &keyring, NOW)
+            .unwrap_err();
+        assert_eq!(err, PolicyError::NoActiveKey);
+    }
+
+    #[test]
+    fn check_call_allows_when_policy_unchanged() {
+        let policy = sample_policy();
+        let token = policy.mint("read_file", SECRET, NOW).unwrap();
+        let mut args = BTreeMap::new();
+        args.insert("path".into(), "/tmp/a.txt".into());
+        args.insert("limit".into(), "10".into());
+        let verifier = Verifier::new(SECRET).at(NOW);
+        assert!(policy
+            .check_call_with_args(&verifier, &token, "read_file", &args)
+            .is_ok());
+    }
+
+    #[test]
+    fn tightening_policy_denies_broader_token() {
+        let broad = sample_policy();
+        let token = broad.mint("read_file", SECRET, NOW).unwrap();
+        assert!(token
+            .verify_call(SECRET, NOW, "read_file", &["path"], None)
+            .is_ok());
+
+        let tight = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 3600,
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["path"],
+                    "constraints": {
+                        "path": {"type": "prefix", "value": "/tmp/"}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        let verifier = Verifier::new(SECRET).at(NOW);
+        let err = tight
+            .check_call(&verifier, &token, "read_file", &["path"])
+            .unwrap_err();
+        assert!(matches!(err, TokenError::ArgKeyNotAllowed { key } if key == "limit"));
+    }
+
+    #[test]
+    fn tightening_constraint_denies_broader_token() {
+        let broad = sample_policy();
+        let token = broad.mint("read_file", SECRET, NOW).unwrap();
+
+        let tight = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_audience": "agent",
+                "default_ttl_seconds": 3600,
+                "default_max_depth": 2,
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["path", "limit"],
+                    "constraints": {
+                        "path": {"type": "prefix", "value": "/tmp/subdir/"},
+                        "limit": {"type": "int_range", "value": {"min": 1, "max": 100}}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        let verifier = Verifier::new(SECRET).at(NOW);
+        let err = tight
+            .check_call(&verifier, &token, "read_file", &["path"])
+            .unwrap_err();
+        assert!(matches!(err, TokenError::PolicyDenied { .. }));
+        assert_eq!(err.kind(), "policy_denied");
+    }
+
+    #[test]
+    fn removing_tool_denies_old_token() {
+        let policy = sample_policy();
+        let token = policy.mint("ping", SECRET, NOW).unwrap();
+        let empty =
+            Policy::from_json(r#"{"version":"1","default_ttl_seconds":60,"tools":[]}"#).unwrap();
+        let verifier = Verifier::new(SECRET).at(NOW);
+        let err = empty
+            .check_call(&verifier, &token, "ping", &[])
+            .unwrap_err();
+        assert!(matches!(err, TokenError::PolicyDenied { .. }));
+    }
+
+    #[test]
+    fn check_call_records_exactly_one_allow_decision() {
+        let policy = sample_policy();
+        let token = policy.mint("read_file", SECRET, NOW).unwrap();
+        let sink = MemoryAuditSink::new();
+        let verifier = Verifier::new(SECRET).at(NOW).audit(&sink);
+        policy
+            .check_call(&verifier, &token, "read_file", &["path"])
+            .unwrap();
+        assert_eq!(sink.len(), 1);
+        assert_eq!(sink.decisions()[0].outcome, Outcome::Allow);
+        assert_eq!(sink.decisions()[0].tool_name.as_deref(), Some("read_file"));
+    }
+
+    #[test]
+    fn check_call_records_exactly_one_deny_decision() {
+        let policy = sample_policy();
+        let token = policy.mint("read_file", SECRET, NOW).unwrap();
+        let tight = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 3600,
+                "tools": [{"name": "read_file", "arg_keys": ["path"]}]
+            }"#,
+        )
+        .unwrap();
+        let sink = MemoryAuditSink::new();
+        let verifier = Verifier::new(SECRET).at(NOW).audit(&sink);
+        let err = tight
+            .check_call(&verifier, &token, "read_file", &["path"])
+            .unwrap_err();
+        assert!(matches!(err, TokenError::ArgKeyNotAllowed { .. }));
+        assert_eq!(sink.len(), 1);
+        assert_eq!(sink.decisions()[0].outcome, Outcome::Deny);
+        assert_eq!(
+            sink.decisions()[0].error_kind.as_deref(),
+            Some("arg_key_not_allowed")
+        );
+    }
 }
