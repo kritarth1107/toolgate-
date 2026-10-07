@@ -297,7 +297,16 @@ impl Token {
     /// Decode a token from compact binary wire format.
     ///
     /// Supports both v1 (no kid) and v2 (with kid) formats.
+    /// Extra trailing bytes after a complete token are ignored.
     pub fn from_wire(data: &[u8]) -> Result<Token, WireError> {
+        Self::from_wire_consumed(data).map(|(token, _)| token)
+    }
+
+    /// Decode a token and report how many bytes were consumed.
+    ///
+    /// Used by the compact string codec to reject trailing garbage after
+    /// the wire payload.
+    pub(crate) fn from_wire_consumed(data: &[u8]) -> Result<(Token, usize), WireError> {
         let mut pos = 0;
 
         // Helper to read bytes
@@ -419,20 +428,23 @@ impl Token {
             (None, 0, None)
         };
 
-        Ok(Token {
-            tool_name,
-            arg_keys,
-            expiry,
-            nonce,
-            mac,
-            audience,
-            kid,
-            constraints,
-            jti,
-            nbf,
-            depth,
-            max_depth,
-        })
+        Ok((
+            Token {
+                tool_name,
+                arg_keys,
+                expiry,
+                nonce,
+                mac,
+                audience,
+                kid,
+                constraints,
+                jti,
+                nbf,
+                depth,
+                max_depth,
+            },
+            pos,
+        ))
     }
 }
 
