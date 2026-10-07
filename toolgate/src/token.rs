@@ -134,6 +134,30 @@ impl std::fmt::Display for TokenError {
 
 impl std::error::Error for TokenError {}
 
+impl TokenError {
+    /// Stable machine-readable kind, matching CLI `error_kind` values.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            TokenError::InvalidMac => "invalid_mac",
+            TokenError::Expired => "expired",
+            TokenError::AttenuationWidens => "attenuation_widens",
+            TokenError::AudienceMismatch => "audience_mismatch",
+            TokenError::ToolMismatch { .. } => "tool_mismatch",
+            TokenError::ArgKeyNotAllowed { .. } => "arg_key_not_allowed",
+            TokenError::UnknownKeyId { .. } => "unknown_key_id",
+            TokenError::NoActiveKey => "no_active_key",
+            TokenError::MissingKeyId => "missing_key_id",
+            TokenError::ConstraintViolation { .. } => "constraint_violation",
+            TokenError::Revoked { .. } => "revoked",
+            TokenError::ReplayDetected { .. } => "replay_detected",
+            TokenError::MissingJti => "missing_jti",
+            TokenError::NotYetValid => "not_yet_valid",
+            TokenError::MaxDepthExceeded { .. } => "max_depth_exceeded",
+            TokenError::MalformedRequest => "malformed_request",
+        }
+    }
+}
+
 impl Token {
     /// Mint a new token with the given parameters.
     ///

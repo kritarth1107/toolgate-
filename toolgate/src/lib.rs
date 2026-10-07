@@ -62,6 +62,7 @@
 //! assert!(keyring.verify(&token, 1999999999).is_ok());
 //! ```
 
+pub mod audit;
 pub mod clock;
 pub mod constraint;
 pub mod encoding;
@@ -75,6 +76,7 @@ pub mod use_store;
 pub mod verifier;
 pub mod wire;
 
+pub use audit::{Decision, Outcome};
 pub use clock::{Clock, FixedClock, InstantClock, SystemClock, VerifyTime};
 pub use constraint::{Constraint, Constraints};
 pub use keyring::Keyring;
