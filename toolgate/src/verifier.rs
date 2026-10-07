@@ -8,6 +8,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use crate::audit::{AuditSink, Decision, Redaction};
 use crate::clock::{Clock, SystemClock};
 use crate::keyring::Keyring;
 use crate::revocation::RevocationList;
@@ -17,7 +18,9 @@ use crate::token::{Token, TokenError};
 ///
 /// Start with [`Verifier::new`] and chain optional checks. When a [`Keyring`]
 /// is attached, the token's `kid` selects the secret and the constructor
-/// secret is ignored.
+/// secret is ignored. Attach [`.audit()`](Verifier::audit) to record each
+/// decision; argument values are redacted unless [`.redaction()`](Verifier::redaction)
+/// selects a narrower policy.
 ///
 /// ```
 /// use std::time::Duration;
@@ -41,6 +44,8 @@ pub struct Verifier<'a> {
     audience: Option<&'a str>,
     revocation: Option<&'a RevocationList>,
     keyring: Option<&'a Keyring>,
+    audit: Option<&'a dyn AuditSink>,
+    redaction: Option<&'a Redaction>,
 }
 
 #[derive(Clone, Copy)]
@@ -64,6 +69,8 @@ impl<'a> Verifier<'a> {
             audience: None,
             revocation: None,
             keyring: None,
+            audit: None,
+            redaction: None,
         }
     }
 
@@ -107,11 +114,25 @@ impl<'a> Verifier<'a> {
         self
     }
 
+    /// Emit a [`Decision`] to `sink` after each verify/check.
+    pub fn audit(mut self, sink: &'a dyn AuditSink) -> Self {
+        self.audit = Some(sink);
+        self
+    }
+
+    /// Apply `redaction` to argument values written into audit records.
+    ///
+    /// Defaults to [`Redaction::all_values`] when unset.
+    pub fn redaction(mut self, redaction: &'a Redaction) -> Self {
+        self.redaction = Some(redaction);
+        self
+    }
+
     /// Verify MAC, time window, optional audience, and optional revocation.
     pub fn verify(&self, token: &Token) -> Result<(), TokenError> {
-        let secret = self.resolve_secret(token)?;
-        token.verify_mac_audience(secret, self.now_unix(), self.leeway, self.audience)?;
-        self.check_revocation(token)
+        let result = self.verify_inner(token);
+        self.record(token, Some(token.tool_name.as_str()), None, &result);
+        result
     }
 
     /// Verify that `token` authorizes `tool` with the given argument keys.
@@ -121,8 +142,12 @@ impl<'a> Verifier<'a> {
         tool: &str,
         arg_keys: &[&str],
     ) -> Result<(), TokenError> {
-        self.verify(token)?;
-        token.check_call_keys(tool, arg_keys)
+        let result = self
+            .verify_inner(token)
+            .and_then(|_| token.check_call_keys(tool, arg_keys));
+        let args = keys_as_args(arg_keys);
+        self.record(token, Some(tool), Some(&args), &result);
+        result
     }
 
     /// Verify a tool call including argument-value constraints.
@@ -133,8 +158,75 @@ impl<'a> Verifier<'a> {
         args: &BTreeMap<String, String>,
     ) -> Result<(), TokenError> {
         let keys: Vec<&str> = args.keys().map(|s| s.as_str()).collect();
-        self.verify_call(token, tool, &keys)?;
-        token.check_arg_constraints(args)
+        let result = self
+            .verify_inner(token)
+            .and_then(|_| token.check_call_keys(tool, &keys))
+            .and_then(|_| token.check_arg_constraints(args));
+        self.record(token, Some(tool), Some(args), &result);
+        result
+    }
+
+    /// Check tool name, argument keys, and constraints, then record one decision.
+    ///
+    /// `arg_keys` may include keys whose values are omitted from `args` (for
+    /// example nested MCP values used only for allowlist checking).
+    pub(crate) fn verify_extracted_call(
+        &self,
+        token: &Token,
+        tool: &str,
+        arg_keys: &[&str],
+        args: &BTreeMap<String, String>,
+    ) -> Result<(), TokenError> {
+        let result = self
+            .verify_inner(token)
+            .and_then(|_| token.check_call_keys(tool, arg_keys))
+            .and_then(|_| token.check_arg_constraints(args));
+        self.record(token, Some(tool), Some(args), &result);
+        result
+    }
+
+    /// Build and emit a decision for `result` when a sink is configured.
+    pub fn record(
+        &self,
+        token: &Token,
+        tool_name: Option<&str>,
+        args: Option<&BTreeMap<String, String>>,
+        result: &Result<(), TokenError>,
+    ) {
+        let Some(sink) = self.audit else {
+            return;
+        };
+        let decision = self.decision_for(token, tool_name, args, result);
+        let _ = sink.record(&decision);
+    }
+
+    /// Build a [`Decision`] using this verifier's clock and redaction policy.
+    pub fn decision_for(
+        &self,
+        token: &Token,
+        tool_name: Option<&str>,
+        args: Option<&BTreeMap<String, String>>,
+        result: &Result<(), TokenError>,
+    ) -> Decision {
+        let redaction = self.redaction.cloned().unwrap_or_default();
+        let arguments = args.map(|a| redaction.apply(a)).unwrap_or_default();
+        Decision::from_result(
+            result,
+            token.jti.clone(),
+            tool_name
+                .map(str::to_string)
+                .or_else(|| Some(token.tool_name.clone())),
+            token.audience.clone(),
+            self.now_unix(),
+            token.depth,
+            arguments,
+        )
+    }
+
+    fn verify_inner(&self, token: &Token) -> Result<(), TokenError> {
+        let secret = self.resolve_secret(token)?;
+        token.verify_mac_audience(secret, self.now_unix(), self.leeway, self.audience)?;
+        self.check_revocation(token)
     }
 
     fn now_unix(&self) -> u64 {
@@ -174,6 +266,13 @@ impl<'a> Verifier<'a> {
             None => Err(TokenError::MissingJti),
         }
     }
+}
+
+fn keys_as_args(arg_keys: &[&str]) -> BTreeMap<String, String> {
+    arg_keys
+        .iter()
+        .map(|key| ((*key).to_string(), String::new()))
+        .collect()
 }
 
 #[cfg(test)]
