@@ -12,6 +12,7 @@ use crate::constraint::Constraints;
 use crate::encoding::encode_canonical_v6;
 use crate::revocation::RevocationList;
 use crate::use_store::{UseResult, UseStore};
+use crate::verifier::Verifier;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -371,7 +372,24 @@ impl Token {
         time: &VerifyTime<C>,
         expected_audience: Option<&str>,
     ) -> Result<(), TokenError> {
-        self.check_time_window(time.now_unix(), time.leeway)?;
+        let mut verifier = Verifier::new(secret)
+            .at(time.now_unix())
+            .leeway(time.leeway);
+        if let Some(audience) = expected_audience {
+            verifier = verifier.audience(audience);
+        }
+        verifier.verify(self)
+    }
+
+    /// MAC, expiry, not-before, and optional audience. Used by [`Verifier`].
+    pub(crate) fn verify_mac_audience(
+        &self,
+        secret: &[u8],
+        now: u64,
+        leeway: Duration,
+        expected_audience: Option<&str>,
+    ) -> Result<(), TokenError> {
+        self.check_time_window(now, leeway)?;
 
         // Check audience if required
         if let Some(expected) = expected_audience {
@@ -452,22 +470,13 @@ impl Token {
         revocation_list: &RevocationList,
         expected_audience: Option<&str>,
     ) -> Result<(), TokenError> {
-        // First verify basic token properties
-        self.verify_with_audience(secret, current_time, expected_audience)?;
-
-        // Check revocation
-        match &self.jti {
-            Some(jti) => {
-                if revocation_list.is_revoked(jti) {
-                    return Err(TokenError::Revoked { jti: jti.clone() });
-                }
-            }
-            None => {
-                return Err(TokenError::MissingJti);
-            }
+        let mut verifier = Verifier::new(secret)
+            .at(current_time)
+            .revocation(revocation_list);
+        if let Some(audience) = expected_audience {
+            verifier = verifier.audience(audience);
         }
-
-        Ok(())
+        verifier.verify(self)
     }
 
     /// Verify the token and consume one use from the use store.
@@ -590,10 +599,20 @@ impl Token {
         requested_arg_keys: &[&str],
         expected_audience: Option<&str>,
     ) -> Result<(), TokenError> {
-        // First verify MAC, expiry, nbf, and audience
-        self.verify_at(secret, time, expected_audience)?;
+        let mut verifier = Verifier::new(secret)
+            .at(time.now_unix())
+            .leeway(time.leeway);
+        if let Some(audience) = expected_audience {
+            verifier = verifier.audience(audience);
+        }
+        verifier.verify_call(self, tool_name, requested_arg_keys)
+    }
 
-        // Check tool name matches
+    pub(crate) fn check_call_keys(
+        &self,
+        tool_name: &str,
+        requested_arg_keys: &[&str],
+    ) -> Result<(), TokenError> {
         if self.tool_name != tool_name {
             return Err(TokenError::ToolMismatch {
                 expected: tool_name.to_string(),
@@ -601,7 +620,6 @@ impl Token {
             });
         }
 
-        // Check all requested arg keys are in the allowlist
         for key in requested_arg_keys {
             if !self.arg_keys.iter().any(|k| k == *key) {
                 return Err(TokenError::ArgKeyNotAllowed {
@@ -650,10 +668,19 @@ impl Token {
         args: &BTreeMap<String, String>,
         expected_audience: Option<&str>,
     ) -> Result<(), TokenError> {
-        let arg_keys: Vec<&str> = args.keys().map(|s| s.as_str()).collect();
-        self.verify_call_at(secret, time, tool_name, &arg_keys, expected_audience)?;
+        let mut verifier = Verifier::new(secret)
+            .at(time.now_unix())
+            .leeway(time.leeway);
+        if let Some(audience) = expected_audience {
+            verifier = verifier.audience(audience);
+        }
+        verifier.verify_call_with_args(self, tool_name, args)
+    }
 
-        // Then check constraints on values
+    pub(crate) fn check_arg_constraints(
+        &self,
+        args: &BTreeMap<String, String>,
+    ) -> Result<(), TokenError> {
         if let Some(ref constraints) = self.constraints {
             for (key, value) in args.iter() {
                 if let Some(constraint) = constraints.get(key) {
@@ -663,7 +690,6 @@ impl Token {
                 }
             }
         }
-
         Ok(())
     }
 

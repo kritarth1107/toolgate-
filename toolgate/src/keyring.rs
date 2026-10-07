@@ -11,6 +11,7 @@ use crate::constraint::Constraints;
 use crate::revocation::RevocationList;
 use crate::token::Token;
 use crate::use_store::UseStore;
+use crate::verifier::Verifier;
 use crate::TokenError;
 
 /// A collection of signing keys with rotation support.
@@ -206,8 +207,11 @@ impl Keyring {
         current_time: u64,
         expected_audience: Option<&str>,
     ) -> Result<(), TokenError> {
-        let secret = self.get_secret_for_token(token)?;
-        token.verify_with_audience(secret, current_time, expected_audience)
+        let mut verifier = Verifier::new(&[]).keyring(self).at(current_time);
+        if let Some(audience) = expected_audience {
+            verifier = verifier.audience(audience);
+        }
+        verifier.verify(token)
     }
 
     /// Verify a token using an explicit unix timestamp and clock-skew leeway.
@@ -217,8 +221,11 @@ impl Keyring {
         current_time: u64,
         leeway: Duration,
     ) -> Result<(), TokenError> {
-        let secret = self.get_secret_for_token(token)?;
-        token.verify_with_leeway(secret, current_time, leeway)
+        Verifier::new(&[])
+            .keyring(self)
+            .at(current_time)
+            .leeway(leeway)
+            .verify(token)
     }
 
     /// Verify a token using a swappable [`Clock`] and leeway.
@@ -228,8 +235,11 @@ impl Keyring {
         clock: &C,
         leeway: Duration,
     ) -> Result<(), TokenError> {
-        let secret = self.get_secret_for_token(token)?;
-        token.verify_with_clock(secret, clock, leeway)
+        Verifier::new(&[])
+            .keyring(self)
+            .clock(clock)
+            .leeway(leeway)
+            .verify(token)
     }
 
     /// Verify a token using a bundled clock and leeway.
@@ -239,8 +249,14 @@ impl Keyring {
         time: &VerifyTime<C>,
         expected_audience: Option<&str>,
     ) -> Result<(), TokenError> {
-        let secret = self.get_secret_for_token(token)?;
-        token.verify_at(secret, time, expected_audience)
+        let mut verifier = Verifier::new(&[])
+            .keyring(self)
+            .at(time.now_unix())
+            .leeway(time.leeway);
+        if let Some(audience) = expected_audience {
+            verifier = verifier.audience(audience);
+        }
+        verifier.verify(token)
     }
 
     /// Verify a token with revocation list checking using the keyring.
@@ -265,13 +281,14 @@ impl Keyring {
         revocation_list: &RevocationList,
         expected_audience: Option<&str>,
     ) -> Result<(), TokenError> {
-        let secret = self.get_secret_for_token(token)?;
-        token.verify_with_revocation_and_audience(
-            secret,
-            current_time,
-            revocation_list,
-            expected_audience,
-        )
+        let mut verifier = Verifier::new(&[])
+            .keyring(self)
+            .at(current_time)
+            .revocation(revocation_list);
+        if let Some(audience) = expected_audience {
+            verifier = verifier.audience(audience);
+        }
+        verifier.verify(token)
     }
 
     /// Verify a single-use token using the keyring.
@@ -334,14 +351,11 @@ impl Keyring {
         requested_arg_keys: &[&str],
         expected_audience: Option<&str>,
     ) -> Result<(), TokenError> {
-        let secret = self.get_secret_for_token(token)?;
-        token.verify_call(
-            secret,
-            current_time,
-            tool_name,
-            requested_arg_keys,
-            expected_audience,
-        )
+        let mut verifier = Verifier::new(&[]).keyring(self).at(current_time);
+        if let Some(audience) = expected_audience {
+            verifier = verifier.audience(audience);
+        }
+        verifier.verify_call(token, tool_name, requested_arg_keys)
     }
 
     /// Verify that a token authorizes a specific tool call with argument values.
@@ -355,8 +369,11 @@ impl Keyring {
         args: &std::collections::BTreeMap<String, String>,
         expected_audience: Option<&str>,
     ) -> Result<(), TokenError> {
-        let secret = self.get_secret_for_token(token)?;
-        token.verify_call_with_args(secret, current_time, tool_name, args, expected_audience)
+        let mut verifier = Verifier::new(&[]).keyring(self).at(current_time);
+        if let Some(audience) = expected_audience {
+            verifier = verifier.audience(audience);
+        }
+        verifier.verify_call_with_args(token, tool_name, args)
     }
 
     /// Attenuate a token using the keyring.

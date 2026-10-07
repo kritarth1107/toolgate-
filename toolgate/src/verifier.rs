@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use crate::clock::{Clock, SystemClock, VerifyTime};
+use crate::clock::{Clock, SystemClock};
 use crate::keyring::Keyring;
 use crate::revocation::RevocationList;
 use crate::token::{Token, TokenError};
@@ -110,8 +110,7 @@ impl<'a> Verifier<'a> {
     /// Verify MAC, time window, optional audience, and optional revocation.
     pub fn verify(&self, token: &Token) -> Result<(), TokenError> {
         let secret = self.resolve_secret(token)?;
-        let time = VerifyTime::unix_with_leeway(self.now_unix(), self.leeway);
-        token.verify_at(secret, &time, self.audience)?;
+        token.verify_mac_audience(secret, self.now_unix(), self.leeway, self.audience)?;
         self.check_revocation(token)
     }
 
@@ -122,10 +121,8 @@ impl<'a> Verifier<'a> {
         tool: &str,
         arg_keys: &[&str],
     ) -> Result<(), TokenError> {
-        let secret = self.resolve_secret(token)?;
-        let time = VerifyTime::unix_with_leeway(self.now_unix(), self.leeway);
-        token.verify_call_at(secret, &time, tool, arg_keys, self.audience)?;
-        self.check_revocation(token)
+        self.verify(token)?;
+        token.check_call_keys(tool, arg_keys)
     }
 
     /// Verify a tool call including argument-value constraints.
@@ -135,10 +132,9 @@ impl<'a> Verifier<'a> {
         tool: &str,
         args: &BTreeMap<String, String>,
     ) -> Result<(), TokenError> {
-        let secret = self.resolve_secret(token)?;
-        let time = VerifyTime::unix_with_leeway(self.now_unix(), self.leeway);
-        token.verify_call_with_args_at(secret, &time, tool, args, self.audience)?;
-        self.check_revocation(token)
+        let keys: Vec<&str> = args.keys().map(|s| s.as_str()).collect();
+        self.verify_call(token, tool, &keys)?;
+        token.check_arg_constraints(args)
     }
 
     fn now_unix(&self) -> u64 {
