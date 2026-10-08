@@ -241,7 +241,9 @@ mod tests {
     use crate::audit::{MemoryAuditSink, Outcome};
     use crate::constraint::Constraint;
     use crate::policy::Policy;
+    use crate::revocation::RevocationList;
     use crate::token::Token;
+    use crate::use_store::MemoryUseStore;
     use crate::Verifier;
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -524,6 +526,56 @@ mod tests {
         let response = error_of(decide(&line, &verifier(), None));
         assert_eq!(response["id"], "req-9");
         assert_eq!(response["jsonrpc"], "2.0");
+    }
+
+    #[test]
+    fn audit_records_revoked_and_replay_kinds() {
+        let token = Token::mint_with_jti(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2_000_000_000,
+            None,
+            None,
+            None,
+            true,
+        );
+        let jti = token.jti.clone().unwrap();
+        let line = tools_call(
+            Some(json!(1)),
+            "read_file",
+            json!({"path": "/tmp/a.txt"}),
+            Some(tg1_token(&token)),
+        );
+
+        let sink = MemoryAuditSink::new();
+        let mut list = RevocationList::new();
+        list.revoke(jti.clone());
+        let verifier = Verifier::new(SECRET).at(NOW).revocation(&list).audit(&sink);
+        decide(&line, &verifier, None);
+        assert_eq!(sink.len(), 1);
+        assert_eq!(sink.decisions()[0].outcome, Outcome::Deny);
+        assert_eq!(sink.decisions()[0].error_kind.as_deref(), Some("revoked"));
+        assert_eq!(sink.decisions()[0].token_id.as_deref(), Some(jti.as_str()));
+
+        let sink = MemoryAuditSink::new();
+        let verifier = Verifier::new(SECRET).at(NOW).audit(&sink);
+        let mut store = MemoryUseStore::new();
+        assert!(matches!(
+            decide_with_replay(&line, &verifier, None, Some((&mut store, 1))),
+            GateAction::Forward(_)
+        ));
+        assert_eq!(sink.len(), 1);
+        assert_eq!(sink.decisions()[0].outcome, Outcome::Allow);
+
+        decide_with_replay(&line, &verifier, None, Some((&mut store, 1)));
+        assert_eq!(sink.len(), 2);
+        assert_eq!(sink.decisions()[1].outcome, Outcome::Deny);
+        assert_eq!(
+            sink.decisions()[1].error_kind.as_deref(),
+            Some("replay_detected")
+        );
+        assert_eq!(sink.decisions()[1].token_id.as_deref(), Some(jti.as_str()));
     }
 
     #[test]

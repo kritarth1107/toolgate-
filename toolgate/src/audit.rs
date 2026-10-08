@@ -32,6 +32,8 @@ pub struct Decision {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     /// Stable machine-readable error kind on deny (see [`TokenError::kind`]).
+    ///
+    /// Gate revocation and replay denials use `revoked` and `replay_detected`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_kind: Option<String>,
     /// Token identifier (`jti`) when present.
@@ -359,6 +361,11 @@ mod tests {
         assert_eq!(
             TokenError::ConstraintViolation { key: "path".into() }.kind(),
             "constraint_violation"
+        );
+        assert_eq!(TokenError::Revoked { jti: "abc".into() }.kind(), "revoked");
+        assert_eq!(
+            TokenError::ReplayDetected { jti: "abc".into() }.kind(),
+            "replay_detected"
         );
     }
 
