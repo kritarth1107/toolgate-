@@ -31,6 +31,25 @@ pub fn token_string_from_meta(request: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
+/// Parse `params._meta.toolgate` as a `tg1.` string or a JSON token object.
+///
+/// Returns `None` when the field is absent. A present but unusable value is
+/// `Some(Err(TokenError::MalformedRequest))`.
+pub fn token_from_meta(request: &Value) -> Option<Result<Token, TokenError>> {
+    let raw = request.get("params")?.get("_meta")?.get("toolgate")?;
+    Some(parse_meta_token(raw))
+}
+
+fn parse_meta_token(raw: &Value) -> Result<Token, TokenError> {
+    match raw {
+        Value::String(s) => Token::from_token_string(s).map_err(|_| TokenError::MalformedRequest),
+        obj if obj.is_object() => {
+            serde_json::from_value(obj.clone()).map_err(|_| TokenError::MalformedRequest)
+        }
+        _ => Err(TokenError::MalformedRequest),
+    }
+}
+
 /// Verify that `token` authorizes the MCP `tools/call` in `request`.
 ///
 /// Scalar argument values are converted to strings: strings as-is, integers

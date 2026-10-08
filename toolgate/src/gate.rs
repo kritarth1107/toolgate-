@@ -1,11 +1,13 @@
 //! Line-oriented stdio MCP gate types and JSON-RPC error codes.
 //!
-//! The decision function that uses these types lives alongside them. This
-//! module is I/O-free.
+//! [`decide`] inspects one newline-delimited JSON-RPC message. It does no I/O.
 
 use serde_json::{json, Map, Value};
 
+use crate::mcp::{check_tools_call, token_from_meta};
+use crate::policy::Policy;
 use crate::token::TokenError;
+use crate::verifier::Verifier;
 
 /// JSON-RPC 2.0 parse error (`error.code`).
 pub const JSONRPC_PARSE_ERROR: i64 = -32700;
@@ -60,6 +62,53 @@ pub fn denied_response(id: Value, err: &TokenError) -> Value {
         err.to_string(),
         Some(err.kind()),
     )
+}
+
+/// Inspect one newline-delimited JSON-RPC message.
+///
+/// Non-`tools/call` objects are forwarded unchanged. A `tools/call` must
+/// carry a token at `params._meta.toolgate`. Denied calls become a JSON-RPC
+/// error with the same `id` (notifications are dropped). Malformed JSON is
+/// a parse error. JSON-RPC batch arrays are rejected.
+///
+/// `policy` is reserved for a later check against a declarative [`Policy`].
+pub fn decide(line: &str, verifier: &Verifier<'_>, _policy: Option<&Policy>) -> GateAction {
+    let value: Value = match serde_json::from_str(line) {
+        Ok(v) => v,
+        Err(_) => return GateAction::Respond(parse_error_response()),
+    };
+
+    if value.is_array() {
+        return GateAction::Respond(jsonrpc_error(
+            Value::Null,
+            JSONRPC_INVALID_REQUEST,
+            "batched JSON-RPC is not supported",
+            None,
+        ));
+    }
+
+    if value.get("method").and_then(Value::as_str) != Some("tools/call") {
+        return GateAction::Forward(line.to_string());
+    }
+
+    let id = value.get("id").cloned();
+    let token = match token_from_meta(&value) {
+        Some(Ok(token)) => token,
+        Some(Err(err)) => return deny_action(id, &err),
+        None => return deny_action(id, &TokenError::MalformedRequest),
+    };
+
+    match check_tools_call(verifier, &token, &value) {
+        Ok(_) => GateAction::Forward(line.to_string()),
+        Err(err) => deny_action(id, &err),
+    }
+}
+
+fn deny_action(id: Option<Value>, err: &TokenError) -> GateAction {
+    match id {
+        Some(id) => GateAction::Respond(denied_response(id, err)),
+        None => GateAction::Drop,
+    }
 }
 
 #[cfg(test)]
