@@ -11,7 +11,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use toolgate::{
     append_revoked_jti, check_tools_call, decide, decide_with_replay, AuditSink, Constraints,
     Decision, GateAction, JsonlAuditSink, KeyringFile, MemoryAuditSink, MemoryUseStore, Policy,
-    Redaction, RevocationFile, RevocationList, Token, TokenStringError, UseStore, Verifier,
+    PolicyFile, Redaction, RevocationFile, RevocationList, Token, TokenStringError, UseStore,
+    Verifier,
 };
 
 #[derive(Parser)]
@@ -663,8 +664,8 @@ fn handle_gate(opts: GateOpts, audit: &AuditOpts) -> Result<(), Box<dyn std::err
         (Some(raw), None) => (decode_secret(&raw), None),
         (None, Some(path)) => (Vec::new(), Some(KeyringFile::load(path)?)),
     };
-    let policy = match opts.policy {
-        Some(path) => Some(load_policy(&path)?),
+    let mut policy_file = match opts.policy {
+        Some(path) => Some(PolicyFile::load(path)?),
         None => None,
     };
     if let Some(0) = opts.max_uses {
@@ -684,6 +685,9 @@ fn handle_gate(opts: GateOpts, audit: &AuditOpts) -> Result<(), Box<dyn std::err
         if let Some(file) = keyring_file.as_mut() {
             file.reload_if_changed();
         }
+        if let Some(file) = policy_file.as_mut() {
+            file.reload_if_changed();
+        }
         let mut verifier = match keyring_file.as_ref() {
             Some(file) => Verifier::new(&secret)
                 .keyring(file.keyring())
@@ -699,14 +703,15 @@ fn handle_gate(opts: GateOpts, audit: &AuditOpts) -> Result<(), Box<dyn std::err
         if audit.target.is_some() {
             verifier = verifier.audit(&sink).redaction(&audit.redaction);
         }
+        let policy = policy_file.as_ref().map(|file| file.policy());
         let action = match opts.max_uses {
             Some(n) => decide_with_replay(
                 line,
                 &verifier,
-                policy.as_ref(),
+                policy,
                 Some((&mut use_store as &mut dyn UseStore, n)),
             ),
-            None => decide(line, &verifier, policy.as_ref()),
+            None => decide(line, &verifier, policy),
         };
         if audit.target.is_some() {
             emit_audit(audit, &sink)?;
