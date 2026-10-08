@@ -383,13 +383,25 @@ let mut file = RevocationFile::load("/tmp/revoked-jtis.txt")?;
 file.reload_if_changed()?;
 ```
 
+`MemoryUseStore` keeps counts in process. `FileUseStore` is an append-only JSONL log (one `UseRecord` per accepted use: `jti` plus the token `expiry`). On open it rebuilds counts from the file, skips a torn or garbage trailing line with one stderr warning, and drops records whose token has already expired. Each accepted use is appended and `fsync`ed before the caller treats it as recorded. A write failure is `UseResult::StoreError` / `use_store_failed` — the call is denied, never failed open.
+
+```rust
+use toolgate::{FileUseStore, UseStore};
+
+let mut store = FileUseStore::open("/tmp/toolgate-uses.jsonl")?;
+assert!(single_use_token.verify_single_use(secret, 1999999999, &mut store).is_ok());
+// After a process restart, the same path still has the count:
+let mut store = FileUseStore::open("/tmp/toolgate-uses.jsonl")?;
+assert!(single_use_token.verify_single_use(secret, 1999999999, &mut store).is_err());
+```
+
 Key points:
 - `jti` is a 16-byte random identifier (hex-encoded, 32 chars) covered by the MAC
 - Attenuated tokens inherit their parent's `jti`
 - `RevocationList` tracks explicitly revoked token IDs
-- `UseStore` trait enables pluggable use-count tracking (in-memory impl provided)
+- `UseStore` trait enables pluggable use-count tracking (`MemoryUseStore` and `FileUseStore`)
 - Tokens without `jti` cannot be checked against revocation lists or use stores
-- `tg gate --revoked` / `--max-uses` apply the same checks on each `tools/call`
+- `tg gate --revoked` / `--max-uses` / `--use-store` apply the same checks on each `tools/call`
 
 ## Policy Files
 
@@ -588,7 +600,7 @@ echo '{
 
 `token` may be a JSON token or a `tg1.` string. Returns `{"authorized": true}` or `{"authorized": false, "error": "...", "error_kind": "..."}`.
 
-Error kinds: `invalid_mac`, `expired`, `not_yet_valid`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `constraint_violation`, `revoked`, `replay_detected`, `missing_jti`, `max_depth_exceeded`, `malformed_request`, `policy_denied`.
+Error kinds: `invalid_mac`, `expired`, `not_yet_valid`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `constraint_violation`, `revoked`, `replay_detected`, `missing_jti`, `max_depth_exceeded`, `malformed_request`, `policy_denied`, `use_store_failed`.
 
 ### Gate (stdio MCP)
 
@@ -610,7 +622,7 @@ echo '{
 
 # Front a local stdio MCP server
 tg gate --policy examples/policy.json --audience agent-runtime --leeway 30 \
-  --revoked /tmp/revoked-jtis.txt --max-uses 1 \
+  --revoked /tmp/revoked-jtis.txt --max-uses 1 --use-store /tmp/toolgate-uses.jsonl \
   --audit-jsonl /tmp/decisions.jsonl -- \
   ./my-mcp-server
 
@@ -619,7 +631,7 @@ tg gate --keyring /tmp/keyring.json --policy examples/policy.json -- \
   ./my-mcp-server
 ```
 
-`--revoked FILE` is a revoked-jti list: one token id per line, `#` comments and blank lines ignored. The gate loads it at start and reloads when the file's mtime changes. `--max-uses N` counts uses per `jti` through the existing `UseStore` (tokens without a `jti` are denied as `missing_jti`). Revocation and replay denials are recorded as `revoked` and `replay_detected`.
+`--revoked FILE` is a revoked-jti list: one token id per line, `#` comments and blank lines ignored. The gate loads it at start and reloads when the file's mtime changes. `--max-uses N` counts uses per `jti` through `UseStore` (tokens without a `jti` are denied as `missing_jti`). Without `--use-store` the counts live in `MemoryUseStore` and reset when the process exits. `--use-store FILE` (only valid with `--max-uses`) uses `FileUseStore`: the same append-only log, rebuilt on start, so a single-use token cannot be replayed by restarting the gate. A persist failure denies the call as `use_store_failed` and is recorded in the audit; the gate never fails open. Revocation and replay denials are recorded as `revoked` and `replay_detected`.
 
 `--keyring FILE` and `--policy FILE` use the same mtime-check reload as the revoked-jti file: no watcher thread and no extra crate. A keyring or policy reload that fails to parse or validate keeps the previous good version and writes one warning line to stderr; the gate does not fail open. Unknown kids stay `unknown_key_id`.
 
@@ -855,7 +867,7 @@ let info = check_tools_call(&verifier, &token, &request)?;
 
 `check_tools_call` extracts `params.name` and `params.arguments`. Scalar values become strings (strings as-is, integers in decimal, bools as `true`/`false`) for constraint checks. Nested object or array values are allowed on unconstrained keys for allowlist checking, and rejected as `MalformedRequest` when the key has a constraint. Non-`tools/call` methods and a missing name are also `MalformedRequest`. The helper inspects the request only; it does not dispatch the tool.
 
-[`decide`](#gate-stdio-mcp) is the stdio gate: one client line in, `Forward` / `Respond` / `Drop` out. It uses the same verifier, optional policy, and audit sink. `decide_with_replay` adds a `UseStore` max-uses check after the verifier accepts the call.
+[`decide`](#gate-stdio-mcp) is the stdio gate: one client line in, `Forward` / `Respond` / `Drop` out. It uses the same verifier, optional policy, and audit sink. `decide_with_replay` adds a `UseStore` max-uses check after the verifier accepts the call, including `FileUseStore` when `tg gate --use-store` is set.
 
 ## Limits
 
