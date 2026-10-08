@@ -273,6 +273,34 @@ Key points:
 - Attenuation preserves the original `kid`
 - Tokens without `kid` cannot be verified through a keyring (use `Token::verify` directly)
 
+### Keyring files
+
+A JSON keyring file maps key ids to secrets. Secrets accept the same `hex:` prefix as `TG_SECRET`. Optional `active` names the key used for minting; when omitted, the first key (sorted by kid) becomes active.
+
+```json
+{
+  "keys": {
+    "key-2024": "old-secret-key-32-bytes-here!!",
+    "key-2025": "hex:6e65772d7365637265742d6b65792d33322d62797465732d686572652121"
+  },
+  "active": "key-2025"
+}
+```
+
+```rust
+use toolgate::{parse_keyring_file, Keyring, KeyringFile};
+
+let keyring = parse_keyring_file(r#"{"keys":{"key-2025":"hex:616263"}}"#)?;
+assert_eq!(keyring.active_kid(), Some("key-2025"));
+
+let mut file = KeyringFile::load("/tmp/keyring.json")?;
+file.reload_if_changed();
+```
+
+`Keyring::from_file` / `parse_keyring_file` reject an empty `keys` object, an empty kid, invalid hex, and an `active` that is not in `keys`. `KeyringFile` remembers mtime and reloads when the file changes. A reload that fails to parse keeps the previous good keyring and writes one warning line to stderr — it never fails open.
+
+`tg gate --keyring FILE` verifies tokens through this keyring. Tokens minted with different `kid`s verify when that kid is present. An unknown kid is still `unknown_key_id`. Do not set `TG_SECRET` when `--keyring` is given; secrets are never taken from argv.
+
 ## Revocation and Replay Prevention
 
 Tokens can carry a unique identifier (`jti`) for revocation tracking and replay prevention:
@@ -408,6 +436,8 @@ assert_eq!(sink.len(), 1); // one Decision, even when the policy check fails
 `Policy::validate()` rejects unknown versions, duplicate tool names, empty tool names, zero TTLs, and constraints on keys that are not in the grant's allowlist. Minting an unknown tool, or a grant with no TTL and no default TTL, is an error.
 
 `check_call` / `check_call_with_args` verify the token through [`Verifier`](#verifier) **and** confirm the token is still within the current policy (argument keys, constraints, audience, and max depth). An attached `AuditSink` still records exactly one `Decision`.
+
+`PolicyFile` loads a policy JSON path, remembers mtime, and reloads when the file changes (`tg gate --policy` uses this). A failed reload keeps the previous good policy and writes one warning line to stderr, so tightening takes effect without a restart and a bad edit does not fail open.
 
 ## CLI Usage
 
@@ -564,7 +594,7 @@ Error kinds: `invalid_mac`, `expired`, `not_yet_valid`, `audience_mismatch`, `to
 
 `tg gate` sits in front of a local stdio MCP server. It reads newline-delimited JSON-RPC from the client, forwards everything that is not `tools/call`, and checks `tools/call` against a token at `params._meta.toolgate` (`tg1.` string or JSON token). Allowed calls are forwarded with `_meta.toolgate` stripped so the child never sees the secret. Denied calls are answered by the gate with a JSON-RPC error (same `id`, stable `error.code`, `data.error_kind`). Denied notifications (no `id`) are dropped.
 
-The shared secret comes from `TG_SECRET` (the existing `hex:` form is accepted). It is never taken from argv.
+The shared secret comes from `TG_SECRET` (the existing `hex:` form is accepted) **or** from `tg gate --keyring FILE`. Giving both is an error. The secret is never taken from argv.
 
 ```bash
 export TG_SECRET=my-shared-secret
@@ -583,9 +613,15 @@ tg gate --policy examples/policy.json --audience agent-runtime --leeway 30 \
   --revoked /tmp/revoked-jtis.txt --max-uses 1 \
   --audit-jsonl /tmp/decisions.jsonl -- \
   ./my-mcp-server
+
+# Or verify with a keyring file instead of TG_SECRET
+tg gate --keyring /tmp/keyring.json --policy examples/policy.json -- \
+  ./my-mcp-server
 ```
 
 `--revoked FILE` is a revoked-jti list: one token id per line, `#` comments and blank lines ignored. The gate loads it at start and reloads when the file's mtime changes. `--max-uses N` counts uses per `jti` through the existing `UseStore` (tokens without a `jti` are denied as `missing_jti`). Revocation and replay denials are recorded as `revoked` and `replay_detected`.
+
+`--keyring FILE` and `--policy FILE` use the same mtime-check reload as the revoked-jti file: no watcher thread and no extra crate. A keyring or policy reload that fails to parse or validate keeps the previous good version and writes one warning line to stderr; the gate does not fail open. Unknown kids stay `unknown_key_id`.
 
 ### Revoke
 
@@ -823,7 +859,7 @@ let info = check_tools_call(&verifier, &token, &request)?;
 
 ## Limits
 
-- **Shared secret**: This is a symmetric-key system. All parties that mint or verify tokens share the same secret. The stdio gate reads that secret from `TG_SECRET`; the model is unchanged.
+- **Shared secret**: This is a symmetric-key system. All parties that mint or verify tokens share the same secret. The stdio gate reads that secret from `TG_SECRET` or a `--keyring` file; the model is unchanged.
 - **Not a public-key system**: Tokens cannot be verified without the secret.
 - **Line-oriented stdio gate only**: `tg gate` / `decide` sit in front of a local child process. They inspect newline-delimited JSON-RPC (one object per line). There is no HTTP or SSE transport. JSON-RPC batch arrays are rejected (`-32600`). Server responses are copied through and not validated. JSON strings must not contain raw newlines.
 - **Not a hosted gateway**: The gate does not dispatch tools, open a network listener, or run as a service. `check_tools_call` still only inspects a request.
