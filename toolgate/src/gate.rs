@@ -240,6 +240,7 @@ mod tests {
     use super::*;
     use crate::audit::{MemoryAuditSink, Outcome};
     use crate::constraint::Constraint;
+    use crate::keyring::Keyring;
     use crate::policy::Policy;
     use crate::revocation::RevocationList;
     use crate::token::Token;
@@ -757,5 +758,62 @@ mod tests {
             GateAction::Respond(value) => value.to_string(),
             GateAction::Drop => String::new(),
         }
+    }
+
+    const SECRET_A: &[u8] = b"keyring-secret-a-32-bytes-long!";
+    const SECRET_B: &[u8] = b"keyring-secret-b-32-bytes-long!";
+
+    fn kid_token(secret: &[u8], kid: &str) -> Token {
+        Token::mint_with_kid(
+            secret,
+            "read_file",
+            vec!["path".into()],
+            2_000_000_000,
+            None,
+            Some(kid.to_string()),
+        )
+    }
+
+    fn two_key_keyring() -> Keyring {
+        let mut keyring = Keyring::new();
+        keyring.add("key-a", SECRET_A.to_vec());
+        keyring.add("key-b", SECRET_B.to_vec());
+        keyring
+    }
+
+    #[test]
+    fn multi_kid_tokens_verify_through_keyring() {
+        let keyring = two_key_keyring();
+        let verifier = Verifier::new(&[]).keyring(&keyring).at(NOW);
+
+        for (secret, kid) in [(SECRET_A, "key-a"), (SECRET_B, "key-b")] {
+            let token = kid_token(secret, kid);
+            let line = tools_call(
+                Some(json!(1)),
+                "read_file",
+                json!({"path": "/tmp/a.txt"}),
+                Some(tg1_token(&token)),
+            );
+            let forwarded = forwarded(decide(&line, &verifier, None));
+            assert_eq!(forwarded["method"], "tools/call");
+            assert!(forwarded["params"].get("_meta").is_none());
+        }
+    }
+
+    #[test]
+    fn unknown_kid_is_denied() {
+        let keyring = two_key_keyring();
+        let verifier = Verifier::new(&[]).keyring(&keyring).at(NOW);
+        let token = kid_token(b"other-secret-key-32-bytes-long!", "key-missing");
+        let line = tools_call(
+            Some(json!(5)),
+            "read_file",
+            json!({"path": "/tmp/a.txt"}),
+            Some(tg1_token(&token)),
+        );
+        let response = error_of(decide(&line, &verifier, None));
+        assert_eq!(response["id"], 5);
+        assert_eq!(response["error"]["code"], JSONRPC_TOOLGATE_DENIED);
+        assert_eq!(response["error"]["data"]["error_kind"], "unknown_key_id");
     }
 }
