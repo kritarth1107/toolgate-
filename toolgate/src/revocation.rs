@@ -2,9 +2,13 @@
 //!
 //! The `RevocationList` type maintains a set of revoked token identifiers (jti values).
 //! When verifying tokens, the revocation list can be checked to reject tokens that
-//! have been explicitly revoked.
+//! have been explicitly revoked. A revoked-jti file is one identifier per line;
+//! blank lines and `#` comments are ignored.
 
 use std::collections::HashSet;
+use std::fs;
+use std::io;
+use std::path::Path;
 
 /// A list of revoked token identifiers.
 ///
@@ -72,6 +76,29 @@ impl RevocationList {
     pub fn clear(&mut self) {
         self.revoked.clear();
     }
+
+    /// Load revoked identifiers from a file (see [`parse_revoked_jtis`]).
+    pub fn from_file(path: impl AsRef<Path>) -> io::Result<Self> {
+        let text = fs::read_to_string(path)?;
+        Ok(parse_revoked_jtis(&text))
+    }
+}
+
+/// Parse a revoked-jti file: one token id per line.
+///
+/// Empty lines and lines whose first non-whitespace character is `#` are ignored.
+/// Other lines are trimmed and treated as jti values.
+pub fn parse_revoked_jtis(text: &str) -> RevocationList {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                None
+            } else {
+                Some(line.to_string())
+            }
+        })
+        .collect()
 }
 
 impl<I: IntoIterator<Item = String>> From<I> for RevocationList {
