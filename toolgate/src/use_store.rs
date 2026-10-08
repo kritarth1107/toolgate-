@@ -6,6 +6,8 @@
 //! [`FileUseStore`] is the durable, file-backed implementation.
 
 use std::collections::HashMap;
+use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -60,6 +62,41 @@ pub struct UseRecord {
     pub expiry: u64,
 }
 
+/// Parse one JSONL use-store line into a [`UseRecord`].
+pub fn parse_use_record(line: &str) -> Result<UseRecord, serde_json::Error> {
+    serde_json::from_str(line.trim())
+}
+
+/// Load records from a use-store log.
+///
+/// A torn or garbage trailing line (typical after a crash mid-write) is
+/// skipped and produces one warning on stderr. A bad line anywhere else
+/// is a hard error so a corrupt log cannot silently lose earlier uses.
+pub fn parse_use_log(text: &str) -> io::Result<Vec<UseRecord>> {
+    let mut records = Vec::new();
+    let lines: Vec<&str> = text.lines().collect();
+    for (index, raw) in lines.iter().enumerate() {
+        let line = raw.trim();
+        if line.is_empty() {
+            continue;
+        }
+        match parse_use_record(line) {
+            Ok(record) => records.push(record),
+            Err(err) => {
+                if index + 1 == lines.len() {
+                    let _ = writeln!(io::stderr(), "warning: skipping torn use-store tail: {err}");
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("corrupt use-store record: {err}"),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(records)
+}
+
 /// File-backed [`UseStore`].
 ///
 /// Counts are keyed by `jti`. Each accepted use is represented as a
@@ -89,6 +126,34 @@ impl FileUseStore {
             path: path.into(),
             counts: HashMap::new(),
             records: Vec::new(),
+        }
+    }
+
+    /// Open `path` and rebuild in-memory counts from existing records.
+    ///
+    /// A missing file starts empty. A torn or garbage trailing line is
+    /// skipped with one stderr warning; other corrupt lines fail the open.
+    pub fn open(path: impl Into<PathBuf>) -> io::Result<Self> {
+        let path = path.into();
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(err) => return Err(err),
+        };
+        let records = parse_use_log(&text)?;
+        let mut store = FileUseStore {
+            path,
+            counts: HashMap::new(),
+            records,
+        };
+        store.rebuild_counts();
+        Ok(store)
+    }
+
+    fn rebuild_counts(&mut self) {
+        self.counts.clear();
+        for record in &self.records {
+            *self.counts.entry(record.jti.clone()).or_insert(0) += 1;
         }
     }
 

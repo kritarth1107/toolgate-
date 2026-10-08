@@ -97,6 +97,8 @@ pub use policy::{Policy, PolicyError, PolicyFile, PolicyFileError, ToolGrant, PO
 pub use revocation::{append_revoked_jti, parse_revoked_jtis, RevocationFile, RevocationList};
 pub use token::{Token, TokenError};
 pub use token_string::{TokenStringError, MAX_TOKEN_STRING_LEN, TOKEN_STRING_PREFIX};
-pub use use_store::{FileUseStore, MemoryUseStore, UseRecord, UseResult, UseStore};
+pub use use_store::{
+    parse_use_log, parse_use_record, FileUseStore, MemoryUseStore, UseRecord, UseResult, UseStore,
+};
 pub use verifier::Verifier;
 pub use wire::WireError;
