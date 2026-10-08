@@ -8,7 +8,8 @@
 use std::collections::HashSet;
 use std::fs;
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 /// A list of revoked token identifiers.
 ///
@@ -99,6 +100,54 @@ pub fn parse_revoked_jtis(text: &str) -> RevocationList {
             }
         })
         .collect()
+}
+
+/// File-backed [`RevocationList`] that reloads when the file's mtime changes.
+///
+/// The gate loads this at start and calls [`RevocationFile::reload_if_changed`]
+/// before each decision. No watcher thread or extra crate is required.
+#[derive(Debug, Clone)]
+pub struct RevocationFile {
+    path: PathBuf,
+    list: RevocationList,
+    mtime: Option<SystemTime>,
+}
+
+impl RevocationFile {
+    /// Read `path` and remember its modification time.
+    pub fn load(path: impl Into<PathBuf>) -> io::Result<Self> {
+        let path = path.into();
+        let mtime = file_mtime(&path);
+        let list = RevocationList::from_file(&path)?;
+        Ok(RevocationFile { path, list, mtime })
+    }
+
+    /// Path of the revoked-jti file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Current in-memory list.
+    pub fn list(&self) -> &RevocationList {
+        &self.list
+    }
+
+    /// Re-read the file when its modification time differs from the last load.
+    ///
+    /// Returns `true` when the list was replaced.
+    pub fn reload_if_changed(&mut self) -> io::Result<bool> {
+        let mtime = file_mtime(&self.path);
+        if mtime == self.mtime {
+            return Ok(false);
+        }
+        self.list = RevocationList::from_file(&self.path)?;
+        self.mtime = mtime;
+        Ok(true)
+    }
+}
+
+fn file_mtime(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).and_then(|meta| meta.modified()).ok()
 }
 
 impl<I: IntoIterator<Item = String>> From<I> for RevocationList {
