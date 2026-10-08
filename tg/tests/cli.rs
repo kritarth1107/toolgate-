@@ -616,6 +616,24 @@ fn gate_help_lists_revoked_and_max_uses() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("--revoked"));
     assert!(stdout.contains("--max-uses"));
+    assert!(stdout.contains("--use-store"));
+}
+
+#[test]
+fn gate_use_store_requires_max_uses() {
+    let store = unique_temp("use-store-only", "jsonl");
+    let output = tg()
+        .args(["gate", "--use-store", store.to_str().unwrap(), "--", "cat"])
+        .env("TG_SECRET", "cli-secret")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--use-store") && stderr.contains("--max-uses"),
+        "stderr={stderr:?}"
+    );
+    let _ = fs::remove_file(&store);
 }
 
 #[test]
@@ -827,6 +845,92 @@ fn gate_max_uses_denies_replay() {
     let _ = fs::remove_file(&audit);
     let _ = fs::remove_file(&log);
     let _ = fs::remove_file(&script);
+}
+
+#[test]
+fn gate_use_store_denies_replay_after_restart() {
+    let token = mint_token_with_jti();
+    let encoded = run_json(&["encode"], &token);
+    let tg1 = encoded["token"].as_str().unwrap();
+
+    let store = unique_temp("gate-use-store", "jsonl");
+    let _ = fs::remove_file(&store);
+    let audit = unique_temp("gate-use-store-audit", "jsonl");
+    let _ = fs::remove_file(&audit);
+    let log = unique_temp("fake-mcp-use-store", "log");
+    let _ = fs::remove_file(&log);
+
+    let args = [
+        "gate",
+        "--max-uses",
+        "1",
+        "--use-store",
+        store.to_str().unwrap(),
+        "--audit-jsonl",
+        audit.to_str().unwrap(),
+    ];
+
+    let (mut child, script) = spawn_gate(&args, &log);
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    writeln!(stdin, "{}", tools_call_line(1, tg1)).unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let forwarded: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(forwarded["method"], "tools/call");
+    assert!(
+        forwarded["params"].get("_meta").is_none()
+            || forwarded["params"]["_meta"].get("toolgate").is_none()
+    );
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success());
+    assert!(
+        fs::read_to_string(&store)
+            .unwrap()
+            .contains(token["jti"].as_str().unwrap()),
+        "first use was not persisted"
+    );
+
+    let (mut child, script2) = spawn_gate(&args, &log);
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    writeln!(stdin, "{}", tools_call_line(2, tg1)).unwrap();
+    stdin.flush().unwrap();
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    let error: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(error["id"], 2);
+    assert_eq!(error["error"]["data"]["error_kind"], "replay_detected");
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success());
+
+    let server_seen = fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        server_seen.contains("read_file"),
+        "first call never reached the server: {server_seen}"
+    );
+    assert!(
+        !server_seen.contains("\"id\":2") && !server_seen.contains("\"id\": 2"),
+        "replay after restart reached the server: {server_seen}"
+    );
+    let decisions = parse_jsonl_decisions(&fs::read_to_string(&audit).unwrap());
+    assert_eq!(decisions.len(), 2);
+    assert_eq!(decisions[0]["outcome"], "allow");
+    assert_eq!(decisions[1]["outcome"], "deny");
+    assert_eq!(decisions[1]["error_kind"], "replay_detected");
+
+    let _ = fs::remove_file(&store);
+    let _ = fs::remove_file(&audit);
+    let _ = fs::remove_file(&log);
+    let _ = fs::remove_file(&script);
+    let _ = fs::remove_file(&script2);
 }
 
 #[test]
