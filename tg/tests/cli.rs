@@ -416,3 +416,26 @@ fn mint_stdin_json_unchanged() {
     assert_eq!(token["expiry"], 2000000000);
     assert!(token.get("kid").is_none() || token["kid"].is_null());
 }
+
+#[test]
+fn gate_help_lists_policy_audience_leeway() {
+    let output = tg().args(["gate", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--policy"));
+    assert!(stdout.contains("--audience"));
+    assert!(stdout.contains("--leeway"));
+    assert!(stdout.contains("SERVER"));
+}
+
+#[test]
+fn gate_requires_tg_secret_env() {
+    let output = tg()
+        .args(["gate", "--", "cat"])
+        .env_remove("TG_SECRET")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("TG_SECRET"), "stderr={stderr:?}");
+}

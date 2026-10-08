@@ -53,6 +53,27 @@ enum Commands {
         #[command(subcommand)]
         command: PolicyCommands,
     },
+    /// Line-oriented stdio MCP gate in front of a local server
+    Gate {
+        /// Policy file applied to every tools/call
+        #[arg(long, value_name = "FILE")]
+        policy: Option<PathBuf>,
+        /// Expected token audience
+        #[arg(long, value_name = "A")]
+        audience: Option<String>,
+        /// Clock-skew leeway in seconds
+        #[arg(long, value_name = "SECS")]
+        leeway: Option<u64>,
+        /// Downstream MCP server command (pass it after `--`)
+        #[arg(
+            required = true,
+            num_args = 1..,
+            last = true,
+            value_name = "SERVER",
+            allow_hyphen_values = true
+        )]
+        server: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -264,6 +285,12 @@ fn main() {
         Commands::Policy { command } => match command {
             PolicyCommands::Lint { file } => handle_policy_lint(file),
         },
+        Commands::Gate {
+            policy,
+            audience,
+            leeway,
+            server,
+        } => handle_gate(policy, audience, leeway, server, &audit),
     };
 
     if let Err(e) = result {
@@ -542,4 +569,37 @@ fn write_jsonl<W: Write>(
         sink.record(decision)?;
     }
     Ok(())
+}
+
+const TG_SECRET_ENV: &str = "TG_SECRET";
+
+fn handle_gate(
+    policy_path: Option<PathBuf>,
+    audience: Option<String>,
+    leeway: Option<u64>,
+    server: Vec<String>,
+    audit: &AuditOpts,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let secret_raw = std::env::var(TG_SECRET_ENV).map_err(|_| {
+        format!("{TG_SECRET_ENV} is required (do not pass the secret on the command line)")
+    })?;
+    let secret = decode_secret(&secret_raw);
+    let policy = match policy_path {
+        Some(path) => Some(load_policy(&path)?),
+        None => None,
+    };
+    let leeway = Duration::from_secs(leeway.unwrap_or(0));
+    let sink = MemoryAuditSink::new();
+    let mut verifier = Verifier::new(&secret).leeway(leeway);
+    if let Some(ref audience) = audience {
+        verifier = verifier.audience(audience);
+    }
+    if audit.target.is_some() {
+        verifier = verifier.audit(&sink).redaction(&audit.redaction);
+    }
+    if server.is_empty() {
+        return Err("server command is required (pass it after --)".into());
+    }
+    let _ = (verifier, policy, sink);
+    Err(format!("stdio pump not started for server '{}'", server[0]).into())
 }
