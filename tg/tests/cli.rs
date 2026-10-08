@@ -57,6 +57,26 @@ fn parse_jsonl_decisions(text: &str) -> Vec<Value> {
         .collect()
 }
 
+fn mint_token_with_jti() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["path", "limit"],
+            "expiry": 2000000000,
+            "generate_jti": true,
+            "constraints": {
+                "path": {"type": "prefix", "value": "/tmp/"},
+                "limit": {"type": "int_range", "value": {"min": 1, "max": 100}}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
 fn mint_token() -> Value {
     run_json(
         &["mint"],
@@ -584,6 +604,282 @@ fn gate_forwards_allowed_call_without_token_and_answers_denied() {
         "denied call reached the server: {server_seen}"
     );
 
+    let _ = fs::remove_file(&log);
+    let _ = fs::remove_file(&script);
+}
+
+#[test]
+fn gate_help_lists_revoked_and_max_uses() {
+    let output = tg().args(["gate", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--revoked"));
+    assert!(stdout.contains("--max-uses"));
+}
+
+#[test]
+fn revoke_appends_raw_jti() {
+    let path = unique_temp("revoked", "txt");
+    let _ = fs::remove_file(&path);
+    let output = tg()
+        .args(["revoke", "jti-from-cli", "--file", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "revoke failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "jti-from-cli"
+    );
+    let text = fs::read_to_string(&path).unwrap();
+    assert_eq!(text, "jti-from-cli\n");
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn revoke_extracts_jti_from_tg1_token() {
+    let token = mint_token_with_jti();
+    let jti = token["jti"].as_str().unwrap().to_string();
+    let encoded = run_json(&["encode"], &token);
+    let tg1 = encoded["token"].as_str().unwrap();
+    let path = unique_temp("revoked-token", "txt");
+    let _ = fs::remove_file(&path);
+    let output = tg()
+        .args(["revoke", tg1, "--file", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "revoke failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), jti);
+    assert_eq!(fs::read_to_string(&path).unwrap(), format!("{jti}\n"));
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn revoke_rejects_token_without_jti() {
+    let token = mint_token();
+    let encoded = run_json(&["encode"], &token);
+    let tg1 = encoded["token"].as_str().unwrap();
+    let path = unique_temp("revoked-no-jti", "txt");
+    let output = tg()
+        .args(["revoke", tg1, "--file", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("no jti"), "stderr={stderr:?}");
+    let _ = fs::remove_file(&path);
+}
+
+fn tools_call_line(id: u64, tg1: &str) -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": "tools/call",
+        "params": {
+            "name": "read_file",
+            "arguments": {"path": "/tmp/a.txt", "limit": 10},
+            "_meta": {"toolgate": tg1}
+        }
+    })
+}
+
+fn spawn_gate(args: &[&str], log: &Path) -> (std::process::Child, PathBuf) {
+    let script = write_fake_mcp_echo(log);
+    let child = tg()
+        .args(args)
+        .arg("--")
+        .args(["sh", script.to_str().unwrap()])
+        .env("TG_SECRET", "cli-secret")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn tg gate");
+    (child, script)
+}
+
+#[test]
+fn gate_revoked_file_denies_listed_jti() {
+    let token = mint_token_with_jti();
+    let jti = token["jti"].as_str().unwrap();
+    let encoded = run_json(&["encode"], &token);
+    let tg1 = encoded["token"].as_str().unwrap();
+
+    let revoked = unique_temp("gate-revoked", "txt");
+    fs::write(&revoked, format!("# denylist\n{jti}\n")).unwrap();
+    let audit = unique_temp("gate-revoked-audit", "jsonl");
+    let _ = fs::remove_file(&audit);
+    let log = unique_temp("fake-mcp-revoked", "log");
+    let _ = fs::remove_file(&log);
+
+    let (mut child, script) = spawn_gate(
+        &[
+            "gate",
+            "--revoked",
+            revoked.to_str().unwrap(),
+            "--audit-jsonl",
+            audit.to_str().unwrap(),
+        ],
+        &log,
+    );
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    writeln!(stdin, "{}", tools_call_line(1, tg1)).unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let error: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(error["id"], 1);
+    assert_eq!(error["error"]["data"]["error_kind"], "revoked");
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success());
+
+    let server_seen = fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !server_seen.contains("read_file"),
+        "revoked call reached the server: {server_seen}"
+    );
+    let decisions = parse_jsonl_decisions(&fs::read_to_string(&audit).unwrap());
+    assert_eq!(decisions.len(), 1);
+    assert_eq!(decisions[0]["outcome"], "deny");
+    assert_eq!(decisions[0]["error_kind"], "revoked");
+    assert_eq!(decisions[0]["token_id"], jti);
+
+    let _ = fs::remove_file(&revoked);
+    let _ = fs::remove_file(&audit);
+    let _ = fs::remove_file(&log);
+    let _ = fs::remove_file(&script);
+}
+
+#[test]
+fn gate_max_uses_denies_replay() {
+    let token = mint_token_with_jti();
+    let encoded = run_json(&["encode"], &token);
+    let tg1 = encoded["token"].as_str().unwrap();
+
+    let audit = unique_temp("gate-replay-audit", "jsonl");
+    let _ = fs::remove_file(&audit);
+    let log = unique_temp("fake-mcp-replay", "log");
+    let _ = fs::remove_file(&log);
+
+    let (mut child, script) = spawn_gate(
+        &[
+            "gate",
+            "--max-uses",
+            "1",
+            "--audit-jsonl",
+            audit.to_str().unwrap(),
+        ],
+        &log,
+    );
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    writeln!(stdin, "{}", tools_call_line(1, tg1)).unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let forwarded: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(forwarded["method"], "tools/call");
+    assert!(
+        forwarded["params"].get("_meta").is_none()
+            || forwarded["params"]["_meta"].get("toolgate").is_none()
+    );
+
+    writeln!(stdin, "{}", tools_call_line(2, tg1)).unwrap();
+    stdin.flush().unwrap();
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    let error: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(error["id"], 2);
+    assert_eq!(error["error"]["data"]["error_kind"], "replay_detected");
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success());
+
+    let server_seen = fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        server_seen.contains("read_file"),
+        "first call never reached the server: {server_seen}"
+    );
+    assert!(
+        !server_seen.contains("\"id\":2") && !server_seen.contains("\"id\": 2"),
+        "replay reached the server: {server_seen}"
+    );
+    let decisions = parse_jsonl_decisions(&fs::read_to_string(&audit).unwrap());
+    assert_eq!(decisions.len(), 2);
+    assert_eq!(decisions[0]["outcome"], "allow");
+    assert_eq!(decisions[1]["outcome"], "deny");
+    assert_eq!(decisions[1]["error_kind"], "replay_detected");
+
+    let _ = fs::remove_file(&audit);
+    let _ = fs::remove_file(&log);
+    let _ = fs::remove_file(&script);
+}
+
+#[test]
+fn gate_reloads_revoked_file_on_change() {
+    let token = mint_token_with_jti();
+    let jti = token["jti"].as_str().unwrap().to_string();
+    let encoded = run_json(&["encode"], &token);
+    let tg1 = encoded["token"].as_str().unwrap();
+
+    let revoked = unique_temp("gate-reload", "txt");
+    fs::write(&revoked, "# none yet\n").unwrap();
+    let log = unique_temp("fake-mcp-reload", "log");
+    let _ = fs::remove_file(&log);
+
+    let (mut child, script) = spawn_gate(&["gate", "--revoked", revoked.to_str().unwrap()], &log);
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    writeln!(stdin, "{}", tools_call_line(1, tg1)).unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let forwarded: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(forwarded["method"], "tools/call");
+
+    let output = tg()
+        .args(["revoke", &jti, "--file", revoked.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let handle = fs::File::options().write(true).open(&revoked).unwrap();
+    let newer = SystemTime::now() + std::time::Duration::from_secs(2);
+    handle.set_modified(newer).unwrap();
+    drop(handle);
+
+    writeln!(stdin, "{}", tools_call_line(2, tg1)).unwrap();
+    stdin.flush().unwrap();
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    let error: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(error["id"], 2);
+    assert_eq!(error["error"]["data"]["error_kind"], "revoked");
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success());
+
+    let server_seen = fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        !server_seen.contains("\"id\":2") && !server_seen.contains("\"id\": 2"),
+        "revoked-after-reload reached the server: {server_seen}"
+    );
+
+    let _ = fs::remove_file(&revoked);
     let _ = fs::remove_file(&log);
     let _ = fs::remove_file(&script);
 }
