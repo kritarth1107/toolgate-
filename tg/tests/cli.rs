@@ -4,6 +4,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
+use toolgate::Token;
 
 fn tg() -> Command {
     Command::new(env!("CARGO_BIN_EXE_tg"))
@@ -880,6 +881,141 @@ fn gate_reloads_revoked_file_on_change() {
     );
 
     let _ = fs::remove_file(&revoked);
+    let _ = fs::remove_file(&log);
+    let _ = fs::remove_file(&script);
+}
+
+const KEYRING_SECRET_A: &[u8] = b"cli-secret-a-32-bytes-long!!!!";
+const KEYRING_SECRET_B: &[u8] = b"cli-secret-b-32-bytes-long!!!!";
+
+fn write_temp_keyring(name: &str, contents: &str) -> PathBuf {
+    let path = unique_temp(name, "json");
+    fs::write(&path, contents).unwrap();
+    path
+}
+
+fn mint_kid_token(secret: &[u8], kid: &str) -> String {
+    let token = Token::mint_with_kid(
+        secret,
+        "read_file",
+        vec!["path".into(), "limit".into()],
+        2_000_000_000,
+        None,
+        Some(kid.to_string()),
+    );
+    token.to_token_string()
+}
+
+fn spawn_gate_keyring(args: &[&str], log: &Path) -> (std::process::Child, PathBuf) {
+    let script = write_fake_mcp_echo(log);
+    let child = tg()
+        .args(args)
+        .arg("--")
+        .args(["sh", script.to_str().unwrap()])
+        .env_remove("TG_SECRET")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn tg gate");
+    (child, script)
+}
+
+#[test]
+fn gate_help_lists_keyring() {
+    let output = tg().args(["gate", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("--keyring"));
+}
+
+#[test]
+fn gate_rejects_secret_and_keyring_together() {
+    let keyring = write_temp_keyring(
+        "both",
+        r#"{"keys":{"key-a":"cli-secret-a-32-bytes-long!!!!"}}"#,
+    );
+    let output = tg()
+        .args(["gate", "--keyring", keyring.to_str().unwrap(), "--", "cat"])
+        .env("TG_SECRET", "cli-secret")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TG_SECRET") && stderr.contains("--keyring"),
+        "stderr={stderr:?}"
+    );
+    let _ = fs::remove_file(&keyring);
+}
+
+#[test]
+fn gate_keyring_verifies_tokens_from_different_kids() {
+    let hex_b = hex::encode(KEYRING_SECRET_B);
+    let keyring = write_temp_keyring(
+        "multi-kid",
+        &format!(
+            r#"{{"keys":{{"key-a":"cli-secret-a-32-bytes-long!!!!","key-b":"hex:{hex_b}"}},"active":"key-a"}}"#
+        ),
+    );
+    let tg1_a = mint_kid_token(KEYRING_SECRET_A, "key-a");
+    let tg1_b = mint_kid_token(KEYRING_SECRET_B, "key-b");
+    let tg1_unknown = mint_kid_token(b"other-secret-key-32-bytes-long!", "key-missing");
+
+    let log = unique_temp("fake-mcp-keyring", "log");
+    let _ = fs::remove_file(&log);
+    let (mut child, script) =
+        spawn_gate_keyring(&["gate", "--keyring", keyring.to_str().unwrap()], &log);
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    writeln!(stdin, "{}", tools_call_line(1, &tg1_a)).unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let forwarded: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(forwarded["method"], "tools/call");
+    assert_eq!(forwarded["id"], 1);
+    assert!(
+        forwarded["params"].get("_meta").is_none()
+            || forwarded["params"]["_meta"].get("toolgate").is_none()
+    );
+
+    writeln!(stdin, "{}", tools_call_line(2, &tg1_b)).unwrap();
+    stdin.flush().unwrap();
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    let forwarded: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(forwarded["method"], "tools/call");
+    assert_eq!(forwarded["id"], 2);
+
+    writeln!(stdin, "{}", tools_call_line(3, &tg1_unknown)).unwrap();
+    stdin.flush().unwrap();
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    let error: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(error["id"], 3);
+    assert_eq!(error["error"]["data"]["error_kind"], "unknown_key_id");
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success());
+
+    let server_seen = fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        server_seen.contains("\"id\":1") || server_seen.contains("\"id\": 1"),
+        "key-a call never reached the server: {server_seen}"
+    );
+    assert!(
+        server_seen.contains("\"id\":2") || server_seen.contains("\"id\": 2"),
+        "key-b call never reached the server: {server_seen}"
+    );
+    assert!(
+        !server_seen.contains("\"id\":3") && !server_seen.contains("\"id\": 3"),
+        "unknown kid reached the server: {server_seen}"
+    );
+
+    let _ = fs::remove_file(&keyring);
     let _ = fs::remove_file(&log);
     let _ = fs::remove_file(&script);
 }
