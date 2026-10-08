@@ -983,4 +983,72 @@ mod tests {
         assert_eq!(keyring.get_secret("key-2"), Some(b"abc".as_slice()));
         let _ = fs::remove_file(&path);
     }
+
+    fn temp_keyring_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "toolgate-keyring-{}-{}-{}.json",
+            std::process::id(),
+            name,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn bump_mtime(path: &Path) {
+        let meta = fs::metadata(path).unwrap();
+        let newer = meta
+            .modified()
+            .unwrap()
+            .checked_add(std::time::Duration::from_secs(2))
+            .unwrap();
+        let handle = fs::File::options().write(true).open(path).unwrap();
+        handle.set_modified(newer).unwrap();
+    }
+
+    #[test]
+    fn keyring_reload_if_changed_picks_up_new_key() {
+        let path = temp_keyring_path("reload");
+        fs::write(&path, r#"{"keys":{"key-old":"old-secret"}}"#).unwrap();
+        let mut file = KeyringFile::load(&path).unwrap();
+        assert!(file.keyring().contains_key("key-old"));
+        assert!(!file.keyring().contains_key("key-new"));
+        assert!(!file.reload_if_changed());
+
+        fs::write(
+            &path,
+            r#"{"keys":{"key-old":"old-secret","key-new":"new-secret"}}"#,
+        )
+        .unwrap();
+        bump_mtime(&path);
+
+        assert!(file.reload_if_changed());
+        assert!(file.keyring().contains_key("key-old"));
+        assert!(file.keyring().contains_key("key-new"));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn keyring_bad_reload_keeps_old() {
+        let path = temp_keyring_path("bad-reload");
+        fs::write(&path, r#"{"keys":{"keep-me":"good-secret"}}"#).unwrap();
+        let mut file = KeyringFile::load(&path).unwrap();
+        assert_eq!(
+            file.keyring().get_secret("keep-me"),
+            Some(b"good-secret".as_slice())
+        );
+
+        fs::write(&path, "{not-valid-keyring").unwrap();
+        bump_mtime(&path);
+
+        assert!(!file.reload_if_changed());
+        assert_eq!(
+            file.keyring().get_secret("keep-me"),
+            Some(b"good-secret".as_slice())
+        );
+        assert!(file.keyring().contains_key("keep-me"));
+        assert!(!file.reload_if_changed());
+        let _ = fs::remove_file(&path);
+    }
 }

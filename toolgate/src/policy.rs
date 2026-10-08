@@ -893,4 +893,85 @@ mod tests {
             Some("arg_key_not_allowed")
         );
     }
+
+    fn temp_policy_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "toolgate-policy-{}-{}-{}.json",
+            std::process::id(),
+            name,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn bump_mtime(path: &Path) {
+        let meta = fs::metadata(path).unwrap();
+        let newer = meta
+            .modified()
+            .unwrap()
+            .checked_add(std::time::Duration::from_secs(2))
+            .unwrap();
+        let handle = fs::File::options().write(true).open(path).unwrap();
+        handle.set_modified(newer).unwrap();
+    }
+
+    fn broad_policy_json() -> &'static str {
+        r#"{
+            "version": "1",
+            "default_ttl_seconds": 3600,
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["path", "limit"]
+            }]
+        }"#
+    }
+
+    fn tight_policy_json() -> &'static str {
+        r#"{
+            "version": "1",
+            "default_ttl_seconds": 3600,
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["path"]
+            }]
+        }"#
+    }
+
+    #[test]
+    fn policy_reload_if_changed_picks_up_tightening() {
+        let path = temp_policy_path("reload");
+        fs::write(&path, broad_policy_json()).unwrap();
+        let mut file = PolicyFile::load(&path).unwrap();
+        assert!(file.policy().grant("read_file").unwrap().arg_keys.len() == 2);
+        assert!(!file.reload_if_changed());
+
+        fs::write(&path, tight_policy_json()).unwrap();
+        bump_mtime(&path);
+
+        assert!(file.reload_if_changed());
+        assert_eq!(
+            file.policy().grant("read_file").unwrap().arg_keys,
+            vec!["path"]
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn policy_bad_reload_keeps_old() {
+        let path = temp_policy_path("bad-reload");
+        fs::write(&path, broad_policy_json()).unwrap();
+        let mut file = PolicyFile::load(&path).unwrap();
+        assert!(file.policy().grant("read_file").is_some());
+
+        fs::write(&path, r#"{"version":"9","tools":[]}"#).unwrap();
+        bump_mtime(&path);
+
+        assert!(!file.reload_if_changed());
+        assert_eq!(file.policy().version, POLICY_VERSION);
+        assert!(file.policy().grant("read_file").is_some());
+        assert!(!file.reload_if_changed());
+        let _ = fs::remove_file(&path);
+    }
 }
