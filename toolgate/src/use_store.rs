@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -97,6 +98,41 @@ pub fn parse_use_log(text: &str) -> io::Result<Vec<UseRecord>> {
     Ok(records)
 }
 
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+/// Drop records whose token is already expired (`now > expiry`).
+///
+/// Matches [`crate::Token`] expiry with zero leeway. Returns whether any
+/// record was removed.
+fn compact_expired(records: &mut Vec<UseRecord>, now: u64) -> bool {
+    let before = records.len();
+    records.retain(|record| now <= record.expiry);
+    records.len() != before
+}
+
+fn rewrite_use_log(path: &Path, records: &[UseRecord]) -> io::Result<File> {
+    let mut tmp_name = path.as_os_str().to_os_string();
+    tmp_name.push(".tmp");
+    let tmp = PathBuf::from(tmp_name);
+    {
+        let mut file = File::create(&tmp)?;
+        for record in records {
+            let line = serde_json::to_string(record)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+            writeln!(file, "{line}")?;
+        }
+        file.flush()?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp, path)?;
+    OpenOptions::new().create(true).append(true).open(path)
+}
+
 /// File-backed [`UseStore`].
 ///
 /// Counts are keyed by `jti`. Each accepted use is represented as a
@@ -135,15 +171,27 @@ impl FileUseStore {
     ///
     /// A missing file starts empty. A torn or garbage trailing line is
     /// skipped with one stderr warning; other corrupt lines fail the open.
+    /// Records whose token expiry is already in the past are dropped and
+    /// the file is rewritten (fsync) so the log does not grow without bound.
     pub fn open(path: impl Into<PathBuf>) -> io::Result<Self> {
+        Self::open_at(path, unix_now())
+    }
+
+    /// [`FileUseStore::open`] using an explicit unix timestamp for compaction.
+    pub fn open_at(path: impl Into<PathBuf>, now: u64) -> io::Result<Self> {
         let path = path.into();
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
             Err(err) => return Err(err),
         };
-        let records = parse_use_log(&text)?;
-        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let mut records = parse_use_log(&text)?;
+        let compacted = compact_expired(&mut records, now);
+        let file = if compacted {
+            rewrite_use_log(&path, &records)?
+        } else {
+            OpenOptions::new().create(true).append(true).open(&path)?
+        };
         let mut store = FileUseStore {
             path,
             file: Some(file),
