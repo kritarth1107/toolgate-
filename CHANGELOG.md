@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0] - 2026-10-08
+
+### Added
+- **File-backed use store**: `FileUseStore` persists per-`jti` use counts across process restarts
+  - Append-only JSONL log: one `UseRecord` (`jti` + token `expiry`) per accepted use
+  - `open` / `open_at` rebuild counts; a torn or garbage trailing line is skipped with one stderr warning
+  - Expired records are compacted on open (rewrite + fsync); no extra crate or background thread
+  - Each accepted use is appended and `fsync`ed before the call is forwarded
+- **Stdio MCP gate**: `tg gate --use-store FILE` (requires `--max-uses`)
+  - Without the flag the gate still uses `MemoryUseStore`
+  - A persist failure denies the call as `use_store_failed` (never fail open) and records one audit `Decision`
+
+### Notes
+- Shared-secret model is unchanged
+- A single-use token cannot be replayed by restarting `tg gate` when `--use-store` points at the same file
+
 ## [0.12.0] - 2026-10-08
 
 ### Added
