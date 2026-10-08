@@ -1,8 +1,9 @@
 use serde_json::{json, Value};
 use std::fs;
-use std::io::Write;
-use std::path::PathBuf;
+use std::io::{BufRead, BufReader, Write};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn tg() -> Command {
     Command::new(env!("CARGO_BIN_EXE_tg"))
@@ -438,4 +439,151 @@ fn gate_requires_tg_secret_env() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("TG_SECRET"), "stderr={stderr:?}");
+}
+
+fn write_fake_mcp_echo(log: &Path) -> PathBuf {
+    let script = std::env::temp_dir().join(format!(
+        "toolgate-fake-mcp-{}-{}.sh",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> '{}'\n  printf '%s\\n' \"$line\"\ndone\n",
+            log.display()
+        ),
+    )
+    .unwrap();
+    script
+}
+
+fn unique_temp(prefix: &str, ext: &str) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "toolgate-{}-{}-{}.{}",
+        prefix,
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos(),
+        ext
+    ))
+}
+
+#[test]
+fn gate_forwards_allowed_call_without_token_and_answers_denied() {
+    let token = mint_token();
+    let encoded = run_json(&["encode"], &token);
+    let tg1 = encoded["token"].as_str().unwrap();
+
+    let log = unique_temp("fake-mcp", "log");
+    let _ = fs::remove_file(&log);
+    let script = write_fake_mcp_echo(&log);
+
+    let mut child = tg()
+        .args(["gate", "--", "sh", script.to_str().unwrap()])
+        .env("TG_SECRET", "cli-secret")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn tg gate");
+
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    let initialize = json!({
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "initialize",
+        "params": {}
+    });
+    writeln!(stdin, "{initialize}").unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let echoed: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(echoed["method"], "initialize");
+
+    let allowed = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "read_file",
+            "arguments": {"path": "/tmp/a.txt", "limit": 10},
+            "_meta": {"toolgate": tg1}
+        }
+    });
+    writeln!(stdin, "{allowed}").unwrap();
+    stdin.flush().unwrap();
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    let forwarded: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(forwarded["method"], "tools/call");
+    assert_eq!(forwarded["id"], 1);
+    assert_eq!(forwarded["params"]["name"], "read_file");
+    assert!(
+        forwarded["params"].get("_meta").is_none()
+            || forwarded["params"]["_meta"].get("toolgate").is_none()
+    );
+    assert!(
+        !line.contains("toolgate") && !line.contains("tg1."),
+        "token leaked to client/server echo: {line}"
+    );
+
+    let denied = json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {
+            "name": "read_file",
+            "arguments": {"path": "/tmp/a.txt", "limit": 10}
+        }
+    });
+    writeln!(stdin, "{denied}").unwrap();
+    stdin.flush().unwrap();
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    let error: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(error["id"], 2);
+    assert_eq!(error["error"]["data"]["error_kind"], "malformed_request");
+    assert!(error.get("method").is_none());
+
+    drop(stdin);
+    let mut stderr = child.stderr.take();
+    let status = child.wait().unwrap();
+    if !status.success() {
+        let mut err = String::new();
+        if let Some(mut pipe) = stderr.take() {
+            let _ = std::io::Read::read_to_string(&mut pipe, &mut err);
+        }
+        panic!("gate exit {:?}: {err}", status.code());
+    }
+
+    let server_seen = fs::read_to_string(&log).unwrap_or_default();
+    assert!(
+        server_seen.contains("\"method\":\"initialize\"")
+            || server_seen.contains("\"method\": \"initialize\""),
+        "server log missing initialize: {server_seen}"
+    );
+    assert!(
+        server_seen.contains("read_file"),
+        "server log missing allowed call: {server_seen}"
+    );
+    assert!(
+        !server_seen.contains("toolgate") && !server_seen.contains("tg1."),
+        "token reached the server: {server_seen}"
+    );
+    assert!(
+        !server_seen.contains("\"id\":2") && !server_seen.contains("\"id\": 2"),
+        "denied call reached the server: {server_seen}"
+    );
+
+    let _ = fs::remove_file(&log);
+    let _ = fs::remove_file(&script);
 }
