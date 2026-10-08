@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-10-08
+
+### Added
+- **Keyring file**: JSON document mapping `kid` → secret, plus optional `active`
+  - `parse_keyring_file` / `Keyring::from_json` / `Keyring::from_file`
+  - Secrets accept the same `hex:` prefix as `TG_SECRET`
+  - `KeyringFile` loads at start and reloads when the file mtime changes
+- **Stdio MCP gate**: `tg gate --keyring FILE` verifies tokens through the existing `Keyring` / `Verifier` path
+  - Tokens minted with different `kid`s verify when that key is present
+  - `TG_SECRET` still works when no keyring is given; setting both is an error
+  - Secrets are never taken from argv
+- **Policy hot-reload**: `PolicyFile` reloads `--policy` when the file mtime changes
+  - Tightening the policy denies older broader tokens on the next `tools/call`
+
+### Notes
+- Reloading the keyring or policy file is an mtime check; no watcher thread or extra crate
+- A reload that fails to parse or validate keeps the previous good version and writes one warning line to stderr; the gate never fails open
+- Unknown kids stay `unknown_key_id`; no new error kinds
+
 ## [0.11.0] - 2026-10-08
 
 ### Added
