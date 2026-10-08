@@ -9,9 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use toolgate::{
-    check_tools_call, decide, decide_with_replay, AuditSink, Constraints, Decision, GateAction,
-    JsonlAuditSink, MemoryAuditSink, MemoryUseStore, Policy, Redaction, RevocationFile,
-    RevocationList, Token, TokenStringError, UseStore, Verifier,
+    append_revoked_jti, check_tools_call, decide, decide_with_replay, AuditSink, Constraints,
+    Decision, GateAction, JsonlAuditSink, MemoryAuditSink, MemoryUseStore, Policy, Redaction,
+    RevocationFile, RevocationList, Token, TokenStringError, UseStore, Verifier,
 };
 
 #[derive(Parser)]
@@ -83,6 +83,14 @@ enum Commands {
             allow_hyphen_values = true
         )]
         server: Vec<String>,
+    },
+    /// Append a token jti to a revoked-jti file
+    Revoke {
+        /// Compact `tg1.` token, JSON token, or raw jti
+        token_or_jti: String,
+        /// Revoked-jti file to append to
+        #[arg(long, value_name = "FILE")]
+        file: PathBuf,
     },
 }
 
@@ -303,6 +311,7 @@ fn main() {
             max_uses,
             server,
         } => handle_gate(policy, audience, leeway, revoked, max_uses, server, &audit),
+        Commands::Revoke { token_or_jti, file } => handle_revoke(token_or_jti, file),
     };
 
     if let Err(e) = result {
@@ -581,6 +590,32 @@ fn write_jsonl<W: Write>(
         sink.record(decision)?;
     }
     Ok(())
+}
+
+fn handle_revoke(token_or_jti: String, file: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let jti = jti_from_token_or_id(&token_or_jti)?;
+    append_revoked_jti(&file, &jti)?;
+    println!("{jti}");
+    Ok(())
+}
+
+fn jti_from_token_or_id(input: &str) -> Result<String, Box<dyn std::error::Error>> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err("token or jti must not be empty".into());
+    }
+    if trimmed.starts_with(toolgate::TOKEN_STRING_PREFIX) {
+        let token = Token::from_token_string(trimmed)?;
+        return token.jti.ok_or_else(|| "token has no jti".into());
+    }
+    if trimmed.starts_with('{') {
+        let token: Token = serde_json::from_str(trimmed)?;
+        return token.jti.ok_or_else(|| "token has no jti".into());
+    }
+    if trimmed.contains(char::is_whitespace) {
+        return Err("jti must be a single token identifier".into());
+    }
+    Ok(trimmed.to_string())
 }
 
 const TG_SECRET_ENV: &str = "TG_SECRET";

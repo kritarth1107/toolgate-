@@ -6,8 +6,8 @@
 //! blank lines and `#` comments are ignored.
 
 use std::collections::HashSet;
-use std::fs;
-use std::io;
+use std::fs::{self, OpenOptions};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -148,6 +148,13 @@ impl RevocationFile {
 
 fn file_mtime(path: &Path) -> Option<SystemTime> {
     fs::metadata(path).and_then(|meta| meta.modified()).ok()
+}
+
+/// Append one jti to a revoked-jti file, creating the file if needed.
+pub fn append_revoked_jti(path: impl AsRef<Path>, jti: &str) -> io::Result<()> {
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(file, "{jti}")?;
+    Ok(())
 }
 
 impl<I: IntoIterator<Item = String>> From<I> for RevocationList {
