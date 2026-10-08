@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-10-08
+
+### Added
+- **Revoked-jti file**: one token id per line (`#` comments and blank lines ignored)
+  - `parse_revoked_jtis` / `RevocationList::from_file`
+  - `RevocationFile` loads at start and reloads when the file mtime changes
+  - `append_revoked_jti` appends one id, creating the file if needed
+- **Stdio MCP gate**: `tg gate --revoked FILE` denies `tools/call` whose token `jti` is listed
+- **Replay limit**: `tg gate --max-uses N` counts uses per `jti` through `UseStore`
+  - `decide_with_replay` applies the limit after verifier/policy accept
+  - Tokens without a `jti` are denied as `missing_jti`
+- **CLI**: `tg revoke <token-or-jti> --file FILE` appends a jti (raw id, `tg1.` string, or JSON token)
+- Denied revocation/replay calls emit one `Decision` with `revoked` or `replay_detected`
+
+### Notes
+- Reloading the revoked-jti file is an mtime check; no watcher thread or extra crate
+- Shared-secret model is unchanged
+
 ## [0.10.0] - 2026-10-08
 
 ### Added
