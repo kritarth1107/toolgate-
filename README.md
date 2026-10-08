@@ -25,7 +25,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-toolgate = "0.10"
+toolgate = "0.11"
 ```
 
 Or install the CLI:
@@ -831,6 +831,7 @@ let info = check_tools_call(&verifier, &token, &request)?;
 
 ## Version History
 
+- **0.11.0**: Gate revocation and replay (`tg gate --revoked` / `--max-uses`, `tg revoke`, `RevocationFile`, `decide_with_replay`)
 - **0.10.0**: Line-oriented stdio MCP gate (`decide` / `tg gate`): pass-through of non-`tools/call`, token at `_meta.toolgate`, strip before the child, JSON-RPC errors with a stable code and `data.error_kind`
 - **0.9.0**: Declarative policy files (`Policy`), mint/check from grants, CLI `policy lint` and `mint --policy`
 - **0.8.0**: Structured audit `Decision` records, `AuditSink` (memory + JSONL), argument redaction, optional `Verifier` sink, CLI `--audit-jsonl`
