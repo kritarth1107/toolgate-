@@ -66,6 +66,8 @@ pub mod audit;
 pub mod clock;
 pub mod constraint;
 pub mod encoding;
+#[cfg(feature = "mcp")]
+pub mod gate;
 pub mod keyring;
 #[cfg(feature = "mcp")]
 pub mod mcp;
@@ -82,6 +84,11 @@ pub use audit::{
 };
 pub use clock::{Clock, FixedClock, InstantClock, SystemClock, VerifyTime};
 pub use constraint::{Constraint, Constraints};
+#[cfg(feature = "mcp")]
+pub use gate::{
+    denied_response, jsonrpc_error, parse_error_response, GateAction, JSONRPC_INVALID_REQUEST,
+    JSONRPC_PARSE_ERROR, JSONRPC_TOOLGATE_DENIED,
+};
 pub use keyring::Keyring;
 #[cfg(feature = "mcp")]
 pub use mcp::{check_tools_call, token_string_from_meta, CallInfo};
