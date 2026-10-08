@@ -4,7 +4,7 @@
 
 use serde_json::{json, Map, Value};
 
-use crate::mcp::{check_tools_call, token_from_meta};
+use crate::mcp::{extract_tools_call, has_constraint, token_from_meta};
 use crate::policy::Policy;
 use crate::token::TokenError;
 use crate::verifier::Verifier;
@@ -67,12 +67,15 @@ pub fn denied_response(id: Value, err: &TokenError) -> Value {
 /// Inspect one newline-delimited JSON-RPC message.
 ///
 /// Non-`tools/call` objects are forwarded unchanged. A `tools/call` must
-/// carry a token at `params._meta.toolgate`. Denied calls become a JSON-RPC
-/// error with the same `id` (notifications are dropped). Malformed JSON is
-/// a parse error. JSON-RPC batch arrays are rejected.
+/// carry a token at `params._meta.toolgate`. Allowed calls are forwarded
+/// with that field stripped. Denied calls become a JSON-RPC error with the
+/// same `id` (notifications are dropped). Malformed JSON is a parse error.
+/// JSON-RPC batch arrays are rejected.
 ///
-/// `policy` is reserved for a later check against a declarative [`Policy`].
-pub fn decide(line: &str, verifier: &Verifier<'_>, _policy: Option<&Policy>) -> GateAction {
+/// When a [`Policy`] is set, the call is checked through the policy as well
+/// as [`Verifier`]. An attached [`crate::AuditSink`] records exactly one
+/// [`crate::Decision`] per `tools/call`.
+pub fn decide(line: &str, verifier: &Verifier<'_>, policy: Option<&Policy>) -> GateAction {
     let value: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(_) => return GateAction::Respond(parse_error_response()),
@@ -92,14 +95,73 @@ pub fn decide(line: &str, verifier: &Verifier<'_>, _policy: Option<&Policy>) -> 
     }
 
     let id = value.get("id").cloned();
+    decide_tools_call(value, id, verifier, policy)
+}
+
+fn decide_tools_call(
+    value: Value,
+    id: Option<Value>,
+    verifier: &Verifier<'_>,
+    policy: Option<&Policy>,
+) -> GateAction {
+    let tool_hint = value
+        .get("params")
+        .and_then(|params| params.get("name"))
+        .and_then(Value::as_str);
+
     let token = match token_from_meta(&value) {
         Some(Ok(token)) => token,
-        Some(Err(err)) => return deny_action(id, &err),
-        None => return deny_action(id, &TokenError::MalformedRequest),
+        Some(Err(err)) => {
+            verifier.record_unauthenticated(tool_hint, None, &err);
+            return deny_action(id, &err);
+        }
+        None => {
+            let err = TokenError::MalformedRequest;
+            verifier.record_unauthenticated(tool_hint, None, &err);
+            return deny_action(id, &err);
+        }
     };
 
-    match check_tools_call(verifier, &token, &value) {
-        Ok(_) => GateAction::Forward(strip_toolgate_meta(&value).to_string()),
+    let extracted = match extract_tools_call(&value) {
+        Ok(extracted) => extracted,
+        Err(err) => {
+            verifier.record(&token, tool_hint, None, &Err(err.clone()));
+            return deny_action(id, &err);
+        }
+    };
+
+    for key in &extracted.nested_keys {
+        if has_constraint(&token, key) {
+            let err = TokenError::MalformedRequest;
+            verifier.record(
+                &token,
+                Some(extracted.tool_name.as_str()),
+                None,
+                &Err(err.clone()),
+            );
+            return deny_action(id, &err);
+        }
+    }
+
+    let keys: Vec<&str> = extracted.arg_keys.iter().map(String::as_str).collect();
+    let result = match policy {
+        Some(policy) => verifier.verify_extracted_call_against_policy(
+            &token,
+            policy,
+            &extracted.tool_name,
+            &keys,
+            &extracted.arguments,
+        ),
+        None => verifier.verify_extracted_call(
+            &token,
+            &extracted.tool_name,
+            &keys,
+            &extracted.arguments,
+        ),
+    };
+
+    match result {
+        Ok(()) => GateAction::Forward(strip_toolgate_meta(&value).to_string()),
         Err(err) => deny_action(id, &err),
     }
 }

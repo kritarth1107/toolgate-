@@ -225,6 +225,48 @@ impl<'a> Verifier<'a> {
         result
     }
 
+    /// Like [`Self::verify_extracted_call`], also confirming `token` is within `policy`.
+    pub(crate) fn verify_extracted_call_against_policy(
+        &self,
+        token: &Token,
+        policy: &Policy,
+        tool: &str,
+        arg_keys: &[&str],
+        args: &BTreeMap<String, String>,
+    ) -> Result<(), TokenError> {
+        let result = self
+            .verify_inner(token)
+            .and_then(|_| token.check_call_keys(tool, arg_keys))
+            .and_then(|_| token.check_arg_constraints(args))
+            .and_then(|_| policy.authorize_token(token));
+        self.record(token, Some(tool), Some(args), &result);
+        result
+    }
+
+    /// Record a deny when no usable token was present (missing or unparseable).
+    pub fn record_unauthenticated(
+        &self,
+        tool_name: Option<&str>,
+        args: Option<&BTreeMap<String, String>>,
+        error: &TokenError,
+    ) {
+        let Some(sink) = self.audit else {
+            return;
+        };
+        let redaction = self.redaction.cloned().unwrap_or_default();
+        let arguments = args.map(|a| redaction.apply(a)).unwrap_or_default();
+        let decision = Decision::deny(
+            error,
+            None,
+            tool_name.map(str::to_string),
+            None,
+            self.now_unix(),
+            0,
+            arguments,
+        );
+        let _ = sink.record(&decision);
+    }
+
     /// Build and emit a decision for `result` when a sink is configured.
     pub fn record(
         &self,

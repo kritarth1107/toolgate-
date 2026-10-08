@@ -10,6 +10,15 @@ use serde_json::{Map, Value};
 use crate::token::{Token, TokenError};
 use crate::verifier::Verifier;
 
+/// Parsed `tools/call` fields used by the stdio gate and [`check_tools_call`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExtractedCall {
+    pub tool_name: String,
+    pub arg_keys: Vec<String>,
+    pub arguments: BTreeMap<String, String>,
+    pub nested_keys: Vec<String>,
+}
+
 /// Extracted `tools/call` name and scalar argument values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallInfo {
@@ -50,6 +59,52 @@ fn parse_meta_token(raw: &Value) -> Result<Token, TokenError> {
     }
 }
 
+/// Extract `params.name` and arguments from a `tools/call` request.
+///
+/// Does not verify a token or write an audit record.
+pub(crate) fn extract_tools_call(request: &Value) -> Result<ExtractedCall, TokenError> {
+    if request.get("method").and_then(Value::as_str) != Some("tools/call") {
+        return Err(TokenError::MalformedRequest);
+    }
+
+    let params = match request.get("params") {
+        Some(Value::Object(map)) => map,
+        _ => return Err(TokenError::MalformedRequest),
+    };
+
+    let Some(tool_name) = params.get("name").and_then(Value::as_str) else {
+        return Err(TokenError::MalformedRequest);
+    };
+
+    let empty = Map::new();
+    let args_obj = match params.get("arguments") {
+        None => &empty,
+        Some(Value::Object(map)) => map,
+        Some(_) => return Err(TokenError::MalformedRequest),
+    };
+
+    let mut arguments = BTreeMap::new();
+    let mut arg_keys = Vec::with_capacity(args_obj.len());
+    let mut nested_keys = Vec::new();
+
+    for (key, value) in args_obj {
+        arg_keys.push(key.clone());
+        match scalar_to_string(value) {
+            Some(converted) => {
+                arguments.insert(key.clone(), converted);
+            }
+            None => nested_keys.push(key.clone()),
+        }
+    }
+
+    Ok(ExtractedCall {
+        tool_name: tool_name.to_string(),
+        arg_keys,
+        arguments,
+        nested_keys,
+    })
+}
+
 /// Verify that `token` authorizes the MCP `tools/call` in `request`.
 ///
 /// Scalar argument values are converted to strings: strings as-is, integers
@@ -61,60 +116,37 @@ pub fn check_tools_call(
     token: &Token,
     request: &Value,
 ) -> Result<CallInfo, TokenError> {
-    if request.get("method").and_then(Value::as_str) != Some("tools/call") {
-        return Err(deny_malformed(verifier, token, None));
-    }
-
-    let params = match request.get("params") {
-        Some(Value::Object(map)) => map,
-        _ => return Err(deny_malformed(verifier, token, None)),
+    let extracted = match extract_tools_call(request) {
+        Ok(extracted) => extracted,
+        Err(err) => {
+            verifier.record(token, None, None, &Err(err.clone()));
+            return Err(err);
+        }
     };
 
-    let Some(tool_name) = params.get("name").and_then(Value::as_str) else {
-        return Err(deny_malformed(verifier, token, None));
-    };
-
-    let empty = Map::new();
-    let args_obj = match params.get("arguments") {
-        None => &empty,
-        Some(Value::Object(map)) => map,
-        Some(_) => return Err(deny_malformed(verifier, token, Some(tool_name))),
-    };
-
-    let mut arguments = BTreeMap::new();
-    let mut keys: Vec<&str> = Vec::with_capacity(args_obj.len());
-
-    for (key, value) in args_obj {
-        keys.push(key.as_str());
-        match scalar_to_string(value) {
-            Some(converted) => {
-                arguments.insert(key.clone(), converted);
-            }
-            None => {
-                if has_constraint(token, key) {
-                    let err = TokenError::MalformedRequest;
-                    verifier.record(token, Some(tool_name), None, &Err(err.clone()));
-                    return Err(err);
-                }
-            }
+    for key in &extracted.nested_keys {
+        if has_constraint(token, key) {
+            let err = TokenError::MalformedRequest;
+            verifier.record(
+                token,
+                Some(extracted.tool_name.as_str()),
+                None,
+                &Err(err.clone()),
+            );
+            return Err(err);
         }
     }
 
-    verifier.verify_extracted_call(token, tool_name, &keys, &arguments)?;
+    let keys: Vec<&str> = extracted.arg_keys.iter().map(String::as_str).collect();
+    verifier.verify_extracted_call(token, &extracted.tool_name, &keys, &extracted.arguments)?;
 
     Ok(CallInfo {
-        tool_name: tool_name.to_string(),
-        arguments,
+        tool_name: extracted.tool_name,
+        arguments: extracted.arguments,
     })
 }
 
-fn deny_malformed(verifier: &Verifier<'_>, token: &Token, tool_name: Option<&str>) -> TokenError {
-    let err = TokenError::MalformedRequest;
-    verifier.record(token, tool_name, None, &Err(err.clone()));
-    err
-}
-
-fn has_constraint(token: &Token, key: &str) -> bool {
+pub(crate) fn has_constraint(token: &Token, key: &str) -> bool {
     token
         .constraints
         .as_ref()
