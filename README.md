@@ -343,12 +343,25 @@ for _ in 0..3 {
 assert!(multi_use_token.verify_with_max_uses(secret, 1999999999, &mut store, 3, None).is_err());
 ```
 
+A revoked-jti file is one identifier per line (`#` comments and blank lines ignored). `RevocationList::from_file` / `parse_revoked_jtis` load it; `RevocationFile` remembers mtime and reloads when the file changes; `append_revoked_jti` (and `tg revoke`) append one id.
+
+```rust
+use toolgate::{parse_revoked_jtis, RevocationFile};
+
+let list = parse_revoked_jtis("# denylist\nabc123\n");
+assert!(list.is_revoked("abc123"));
+
+let mut file = RevocationFile::load("/tmp/revoked-jtis.txt")?;
+file.reload_if_changed()?;
+```
+
 Key points:
 - `jti` is a 16-byte random identifier (hex-encoded, 32 chars) covered by the MAC
 - Attenuated tokens inherit their parent's `jti`
 - `RevocationList` tracks explicitly revoked token IDs
 - `UseStore` trait enables pluggable use-count tracking (in-memory impl provided)
 - Tokens without `jti` cannot be checked against revocation lists or use stores
+- `tg gate --revoked` / `--max-uses` apply the same checks on each `tools/call`
 
 ## Policy Files
 
@@ -545,7 +558,7 @@ echo '{
 
 `token` may be a JSON token or a `tg1.` string. Returns `{"authorized": true}` or `{"authorized": false, "error": "...", "error_kind": "..."}`.
 
-Error kinds: `invalid_mac`, `expired`, `not_yet_valid`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `constraint_violation`, `revoked`, `missing_jti`, `max_depth_exceeded`, `malformed_request`, `policy_denied`.
+Error kinds: `invalid_mac`, `expired`, `not_yet_valid`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `constraint_violation`, `revoked`, `replay_detected`, `missing_jti`, `max_depth_exceeded`, `malformed_request`, `policy_denied`.
 
 ### Gate (stdio MCP)
 
@@ -567,8 +580,20 @@ echo '{
 
 # Front a local stdio MCP server
 tg gate --policy examples/policy.json --audience agent-runtime --leeway 30 \
+  --revoked /tmp/revoked-jtis.txt --max-uses 1 \
   --audit-jsonl /tmp/decisions.jsonl -- \
   ./my-mcp-server
+```
+
+`--revoked FILE` is a revoked-jti list: one token id per line, `#` comments and blank lines ignored. The gate loads it at start and reloads when the file's mtime changes. `--max-uses N` counts uses per `jti` through the existing `UseStore` (tokens without a `jti` are denied as `missing_jti`). Revocation and replay denials are recorded as `revoked` and `replay_detected`.
+
+### Revoke
+
+Append a jti to a revoked-jti file. The argument may be a raw identifier, a `tg1.` string, or a JSON token (the token must carry a `jti`).
+
+```bash
+tg revoke "$JTI" --file /tmp/revoked-jtis.txt
+tg revoke 'tg1....' --file /tmp/revoked-jtis.txt
 ```
 
 A client `tools/call` looks like:
@@ -606,6 +631,7 @@ Library path (same rules, no I/O) is `toolgate::decide`:
 use toolgate::{decide, GateAction, Verifier};
 
 let action = decide(&line, &verifier, Some(&policy));
+// or decide_with_replay(&line, &verifier, Some(&policy), Some((&mut use_store, 1)))
 match action {
     GateAction::Forward(msg) => { /* write msg to the server */ }
     GateAction::Respond(err) => { /* write err to the client */ }
@@ -619,7 +645,7 @@ match action {
 |--------------|------|-------------------------|
 | `-32700` | Client line is not JSON | omitted |
 | `-32600` | JSON-RPC batch (array); not supported | omitted |
-| `-32040` | `tools/call` missing a token, or the token/policy check failed | existing kinds: `malformed_request`, `invalid_mac`, `expired`, `not_yet_valid`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `constraint_violation`, `revoked`, `missing_jti`, `max_depth_exceeded`, `policy_denied`, … |
+| `-32040` | `tools/call` missing a token, or the token/policy/revocation/replay check failed | existing kinds: `malformed_request`, `invalid_mac`, `expired`, `not_yet_valid`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `constraint_violation`, `revoked`, `replay_detected`, `missing_jti`, `max_depth_exceeded`, `policy_denied`, … |
 
 ### Audit JSONL
 
@@ -793,7 +819,7 @@ let info = check_tools_call(&verifier, &token, &request)?;
 
 `check_tools_call` extracts `params.name` and `params.arguments`. Scalar values become strings (strings as-is, integers in decimal, bools as `true`/`false`) for constraint checks. Nested object or array values are allowed on unconstrained keys for allowlist checking, and rejected as `MalformedRequest` when the key has a constraint. Non-`tools/call` methods and a missing name are also `MalformedRequest`. The helper inspects the request only; it does not dispatch the tool.
 
-[`decide`](#gate-stdio-mcp) is the stdio gate: one client line in, `Forward` / `Respond` / `Drop` out. It uses the same verifier, optional policy, and audit sink.
+[`decide`](#gate-stdio-mcp) is the stdio gate: one client line in, `Forward` / `Respond` / `Drop` out. It uses the same verifier, optional policy, and audit sink. `decide_with_replay` adds a `UseStore` max-uses check after the verifier accepts the call.
 
 ## Limits
 
