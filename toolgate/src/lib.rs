@@ -90,7 +90,7 @@ pub use gate::{
     strip_toolgate_meta, GateAction, JSONRPC_INVALID_REQUEST, JSONRPC_PARSE_ERROR,
     JSONRPC_TOOLGATE_DENIED,
 };
-pub use keyring::Keyring;
+pub use keyring::{parse_keyring_file, Keyring, KeyringFileError};
 #[cfg(feature = "mcp")]
 pub use mcp::{check_tools_call, token_from_meta, token_string_from_meta, CallInfo};
 pub use policy::{Policy, PolicyError, ToolGrant, POLICY_VERSION};

@@ -3,8 +3,11 @@
 //! The `Keyring` type manages multiple signing keys, enabling key rotation
 //! without immediately invalidating existing tokens.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::time::Duration;
+
+use serde::Deserialize;
 
 use crate::clock::{Clock, VerifyTime};
 use crate::constraint::Constraints;
@@ -13,6 +16,86 @@ use crate::token::Token;
 use crate::use_store::UseStore;
 use crate::verifier::Verifier;
 use crate::TokenError;
+
+/// Errors from parsing a JSON keyring file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyringFileError {
+    /// The path could not be read.
+    Io(String),
+    /// The document is not valid JSON or does not match the schema.
+    InvalidJson(String),
+    /// A secret used the `hex:` prefix but was not valid hex.
+    InvalidHex { kid: String, message: String },
+    /// The `keys` object is missing or empty.
+    Empty,
+    /// A key id is the empty string.
+    EmptyKeyId,
+    /// `active` names a key that is not in `keys`.
+    UnknownActive { kid: String },
+}
+
+impl std::fmt::Display for KeyringFileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            KeyringFileError::Io(msg) => write!(f, "failed to read keyring file: {msg}"),
+            KeyringFileError::InvalidJson(msg) => write!(f, "invalid keyring JSON: {msg}"),
+            KeyringFileError::InvalidHex { kid, message } => {
+                write!(f, "invalid hex secret for key '{kid}': {message}")
+            }
+            KeyringFileError::Empty => write!(f, "keyring file contains no keys"),
+            KeyringFileError::EmptyKeyId => write!(f, "key id must not be empty"),
+            KeyringFileError::UnknownActive { kid } => {
+                write!(f, "active key '{kid}' is not in the keyring")
+            }
+        }
+    }
+}
+
+impl std::error::Error for KeyringFileError {}
+
+#[derive(Debug, Deserialize)]
+struct KeyringDocument {
+    keys: BTreeMap<String, String>,
+    #[serde(default)]
+    active: Option<String>,
+}
+
+/// Parse a JSON keyring document: `keys` maps kid → secret, plus optional `active`.
+///
+/// Secrets accept the same `hex:` prefix as `TG_SECRET`. When `active` is
+/// omitted, the first key added (sorted by kid) becomes active.
+pub fn parse_keyring_file(text: &str) -> Result<Keyring, KeyringFileError> {
+    let doc: KeyringDocument =
+        serde_json::from_str(text).map_err(|e| KeyringFileError::InvalidJson(e.to_string()))?;
+    if doc.keys.is_empty() {
+        return Err(KeyringFileError::Empty);
+    }
+
+    let mut keyring = Keyring::new();
+    for (kid, secret) in &doc.keys {
+        if kid.is_empty() {
+            return Err(KeyringFileError::EmptyKeyId);
+        }
+        keyring.add(kid.clone(), decode_keyring_secret(kid, secret)?);
+    }
+    if let Some(active) = doc.active {
+        keyring
+            .set_active(&active)
+            .map_err(|_| KeyringFileError::UnknownActive { kid: active })?;
+    }
+    Ok(keyring)
+}
+
+fn decode_keyring_secret(kid: &str, secret: &str) -> Result<Vec<u8>, KeyringFileError> {
+    if let Some(hex_str) = secret.strip_prefix("hex:") {
+        hex::decode(hex_str).map_err(|e| KeyringFileError::InvalidHex {
+            kid: kid.to_string(),
+            message: e.to_string(),
+        })
+    } else {
+        Ok(secret.as_bytes().to_vec())
+    }
+}
 
 /// A collection of signing keys with rotation support.
 ///
@@ -63,6 +146,19 @@ impl Keyring {
             keys: HashMap::new(),
             active_kid: None,
         }
+    }
+
+    /// Parse a JSON keyring document (see [`parse_keyring_file`]).
+    pub fn from_json(text: &str) -> Result<Self, KeyringFileError> {
+        parse_keyring_file(text)
+    }
+
+    /// Load a JSON keyring file (see [`parse_keyring_file`]).
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, KeyringFileError> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| KeyringFileError::Io(format!("{}: {e}", path.display())))?;
+        parse_keyring_file(&text)
     }
 
     /// Add a key to the keyring.
