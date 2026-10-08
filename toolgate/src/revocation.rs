@@ -237,4 +237,76 @@ mod tests {
         list.clear();
         assert!(list.is_empty());
     }
+
+    fn temp_revoked_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "toolgate-revoked-{}-{}-{}.txt",
+            std::process::id(),
+            name,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    #[test]
+    fn parse_ignores_blank_lines_and_comments() {
+        let list = parse_revoked_jtis("# heading\nabc123\n\n  def456  \n# another\nghi789\n");
+        assert!(list.is_revoked("abc123"));
+        assert!(list.is_revoked("def456"));
+        assert!(list.is_revoked("ghi789"));
+        assert!(!list.is_revoked("# heading"));
+        assert_eq!(list.len(), 3);
+    }
+
+    #[test]
+    fn from_file_reads_jtis() {
+        let path = temp_revoked_path("from-file");
+        fs::write(&path, "# revoked\njti-one\n\njti-two\n").unwrap();
+        let list = RevocationList::from_file(&path).unwrap();
+        assert!(list.is_revoked("jti-one"));
+        assert!(list.is_revoked("jti-two"));
+        assert_eq!(list.len(), 2);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reload_if_changed_picks_up_new_jti() {
+        let path = temp_revoked_path("reload");
+        fs::write(&path, "keep-me\n").unwrap();
+        let mut file = RevocationFile::load(&path).unwrap();
+        assert!(file.list().is_revoked("keep-me"));
+        assert!(!file.list().is_revoked("later"));
+        assert!(!file.reload_if_changed().unwrap());
+
+        fs::write(&path, "keep-me\nlater\n").unwrap();
+        let newer = file
+            .mtime
+            .unwrap()
+            .checked_add(std::time::Duration::from_secs(2))
+            .unwrap();
+        let handle = fs::File::options().write(true).open(&path).unwrap();
+        handle.set_modified(newer).unwrap();
+        drop(handle);
+
+        assert!(file.reload_if_changed().unwrap());
+        assert!(file.list().is_revoked("keep-me"));
+        assert!(file.list().is_revoked("later"));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn append_revoked_jti_creates_and_appends() {
+        let path = temp_revoked_path("append");
+        let _ = fs::remove_file(&path);
+        append_revoked_jti(&path, "first").unwrap();
+        append_revoked_jti(&path, "second").unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text, "first\nsecond\n");
+        let list = RevocationList::from_file(&path).unwrap();
+        assert!(list.is_revoked("first"));
+        assert!(list.is_revoked("second"));
+        let _ = fs::remove_file(&path);
+    }
 }
