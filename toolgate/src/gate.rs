@@ -241,13 +241,14 @@ mod tests {
     use crate::audit::{MemoryAuditSink, Outcome};
     use crate::constraint::Constraint;
     use crate::keyring::Keyring;
-    use crate::policy::Policy;
+    use crate::policy::{Policy, PolicyFile};
     use crate::revocation::RevocationList;
     use crate::token::Token;
     use crate::use_store::MemoryUseStore;
     use crate::Verifier;
     use serde_json::json;
     use std::collections::BTreeMap;
+    use std::fs;
 
     const SECRET: &[u8] = b"test-secret-key-32-bytes-long!!";
     const NOW: u64 = 1_999_999_999;
@@ -815,5 +816,94 @@ mod tests {
         assert_eq!(response["id"], 5);
         assert_eq!(response["error"]["code"], JSONRPC_TOOLGATE_DENIED);
         assert_eq!(response["error"]["data"]["error_kind"], "unknown_key_id");
+    }
+
+    fn temp_policy_path(name: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "toolgate-gate-policy-{}-{}-{}.json",
+            std::process::id(),
+            name,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn bump_mtime(path: &std::path::Path) {
+        let meta = fs::metadata(path).unwrap();
+        let newer = meta
+            .modified()
+            .unwrap()
+            .checked_add(std::time::Duration::from_secs(2))
+            .unwrap();
+        let handle = fs::File::options().write(true).open(path).unwrap();
+        handle.set_modified(newer).unwrap();
+    }
+
+    #[test]
+    fn policy_tightening_takes_effect_after_reload() {
+        let path = temp_policy_path("tighten");
+        fs::write(
+            &path,
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 3600,
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["path"],
+                    "constraints": {
+                        "path": {"type": "prefix", "value": "/tmp/"}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        let mut policy_file = PolicyFile::load(&path).unwrap();
+
+        let mut constraints = BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2_000_000_000,
+            None,
+            None,
+            Some(constraints),
+        );
+        let line = tools_call(
+            Some(json!(12)),
+            "read_file",
+            json!({"path": "/tmp/a.txt"}),
+            Some(tg1_token(&token)),
+        );
+        let verifier = verifier();
+        let forwarded = forwarded(decide(&line, &verifier, Some(policy_file.policy())));
+        assert_eq!(forwarded["method"], "tools/call");
+
+        fs::write(
+            &path,
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 3600,
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["path"],
+                    "constraints": {
+                        "path": {"type": "prefix", "value": "/tmp/secure/"}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        bump_mtime(&path);
+        assert!(policy_file.reload_if_changed());
+
+        let response = error_of(decide(&line, &verifier, Some(policy_file.policy())));
+        assert_eq!(response["id"], 12);
+        assert_eq!(response["error"]["code"], JSONRPC_TOOLGATE_DENIED);
+        assert_eq!(response["error"]["data"]["error_kind"], "policy_denied");
+        let _ = fs::remove_file(&path);
     }
 }
