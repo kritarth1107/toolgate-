@@ -2,12 +2,15 @@ use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use toolgate::{
-    check_tools_call, AuditSink, Constraints, Decision, JsonlAuditSink, MemoryAuditSink, Policy,
-    Redaction, RevocationList, Token, TokenStringError, Verifier,
+    check_tools_call, decide, AuditSink, Constraints, Decision, GateAction, JsonlAuditSink,
+    MemoryAuditSink, Policy, Redaction, RevocationList, Token, TokenStringError, Verifier,
 };
 
 #[derive(Parser)]
@@ -597,9 +600,90 @@ fn handle_gate(
     if audit.target.is_some() {
         verifier = verifier.audit(&sink).redaction(&audit.redaction);
     }
+    let code = run_gate_pump(server, |line| {
+        let action = decide(line, &verifier, policy.as_ref());
+        if audit.target.is_some() {
+            emit_audit(audit, &sink)?;
+            sink.clear();
+        }
+        Ok(action)
+    })?;
+
+    if code != 0 {
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
+fn run_gate_pump(
+    mut server: Vec<String>,
+    mut on_line: impl FnMut(&str) -> Result<GateAction, Box<dyn std::error::Error>>,
+) -> Result<i32, Box<dyn std::error::Error>> {
     if server.is_empty() {
         return Err("server command is required (pass it after --)".into());
     }
-    let _ = (verifier, policy, sink);
-    Err(format!("stdio pump not started for server '{}'", server[0]).into())
+    let program = server.remove(0);
+    let mut child = Command::new(&program)
+        .args(&server)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .map_err(|e| format!("failed to spawn {program}: {e}"))?;
+
+    let mut child_stdin = child.stdin.take().ok_or("child stdin is not piped")?;
+    let mut child_stdout = child.stdout.take().ok_or("child stdout is not piped")?;
+    let client_stdout = Arc::new(Mutex::new(io::stdout()));
+    let thread_stdout = client_stdout.clone();
+
+    let out_thread = thread::spawn(move || -> io::Result<()> {
+        let mut buf = [0u8; 8192];
+        loop {
+            let n = match child_stdout.read(&mut buf) {
+                Ok(n) => n,
+                Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                Err(err) => return Err(err),
+            };
+            if n == 0 {
+                break;
+            }
+            let mut out = thread_stdout
+                .lock()
+                .map_err(|_| io::Error::other("client stdout lock poisoned"))?;
+            out.write_all(&buf[..n])?;
+            out.flush()?;
+        }
+        Ok(())
+    });
+
+    let stdin = io::stdin();
+    for line in stdin.lock().lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        match on_line(&line)? {
+            GateAction::Forward(msg) => {
+                if writeln!(child_stdin, "{msg}").is_err() || child_stdin.flush().is_err() {
+                    break;
+                }
+            }
+            GateAction::Respond(value) => {
+                let mut out = client_stdout
+                    .lock()
+                    .map_err(|_| "client stdout lock poisoned")?;
+                writeln!(out, "{}", serde_json::to_string(&value)?)?;
+                out.flush()?;
+            }
+            GateAction::Drop => {}
+        }
+    }
+    drop(child_stdin);
+
+    if let Err(err) = out_thread.join().unwrap_or(Ok(())) {
+        return Err(err.into());
+    }
+
+    let status = child.wait()?;
+    Ok(status.code().unwrap_or(1))
 }
