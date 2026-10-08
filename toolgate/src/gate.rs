@@ -6,7 +6,8 @@ use serde_json::{json, Map, Value};
 
 use crate::mcp::{extract_tools_call, has_constraint, token_from_meta};
 use crate::policy::Policy;
-use crate::token::TokenError;
+use crate::token::{Token, TokenError};
+use crate::use_store::{UseResult, UseStore};
 use crate::verifier::Verifier;
 
 /// JSON-RPC 2.0 parse error (`error.code`).
@@ -76,6 +77,22 @@ pub fn denied_response(id: Value, err: &TokenError) -> Value {
 /// as [`Verifier`]. An attached [`crate::AuditSink`] records exactly one
 /// [`crate::Decision`] per `tools/call`.
 pub fn decide(line: &str, verifier: &Verifier<'_>, policy: Option<&Policy>) -> GateAction {
+    decide_with_replay(line, verifier, policy, None)
+}
+
+/// [`decide`] plus an optional per-token use limit through [`UseStore`].
+///
+/// `replay` is `(store, max_uses)`. Tokens without a `jti` fail with
+/// [`TokenError::MissingJti`]. A second call after the limit is
+/// [`TokenError::ReplayDetected`]. The use is consumed only after the
+/// verifier (and optional policy) accept the call, and the sink still
+/// records exactly one decision.
+pub fn decide_with_replay(
+    line: &str,
+    verifier: &Verifier<'_>,
+    policy: Option<&Policy>,
+    replay: Option<(&mut dyn UseStore, u64)>,
+) -> GateAction {
     let value: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(_) => return GateAction::Respond(parse_error_response()),
@@ -95,7 +112,22 @@ pub fn decide(line: &str, verifier: &Verifier<'_>, policy: Option<&Policy>) -> G
     }
 
     let id = value.get("id").cloned();
-    decide_tools_call(value, id, verifier, policy)
+    decide_tools_call(value, id, verifier, policy, replay)
+}
+
+fn consume_use(token: &Token, store: &mut dyn UseStore, max_uses: u64) -> Result<(), TokenError> {
+    match token.jti.as_deref() {
+        Some(jti) => {
+            if store.try_use(jti, max_uses) == UseResult::Exceeded {
+                Err(TokenError::ReplayDetected {
+                    jti: jti.to_string(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+        None => Err(TokenError::MissingJti),
+    }
 }
 
 fn decide_tools_call(
@@ -103,6 +135,7 @@ fn decide_tools_call(
     id: Option<Value>,
     verifier: &Verifier<'_>,
     policy: Option<&Policy>,
+    mut replay: Option<(&mut dyn UseStore, u64)>,
 ) -> GateAction {
     let tool_hint = value
         .get("params")
@@ -144,21 +177,32 @@ fn decide_tools_call(
     }
 
     let keys: Vec<&str> = extracted.arg_keys.iter().map(String::as_str).collect();
-    let result = match policy {
-        Some(policy) => verifier.verify_extracted_call_against_policy(
+    let mut result = match policy {
+        Some(policy) => verifier.authorize_extracted_call_against_policy(
             &token,
             policy,
             &extracted.tool_name,
             &keys,
             &extracted.arguments,
         ),
-        None => verifier.verify_extracted_call(
+        None => verifier.authorize_extracted_call(
             &token,
             &extracted.tool_name,
             &keys,
             &extracted.arguments,
         ),
     };
+    if result.is_ok() {
+        if let Some((store, max_uses)) = replay.as_mut() {
+            result = consume_use(&token, *store, *max_uses);
+        }
+    }
+    verifier.record(
+        &token,
+        Some(extracted.tool_name.as_str()),
+        Some(&extracted.arguments),
+        &result,
+    );
 
     match result {
         Ok(()) => GateAction::Forward(strip_toolgate_meta(&value).to_string()),

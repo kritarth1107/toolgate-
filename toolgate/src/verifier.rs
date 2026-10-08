@@ -206,10 +206,36 @@ impl<'a> Verifier<'a> {
         result
     }
 
-    /// Check tool name, argument keys, and constraints, then record one decision.
+    /// Check tool name, argument keys, and constraints without recording.
     ///
     /// `arg_keys` may include keys whose values are omitted from `args` (for
     /// example nested MCP values used only for allowlist checking).
+    pub(crate) fn authorize_extracted_call(
+        &self,
+        token: &Token,
+        tool: &str,
+        arg_keys: &[&str],
+        args: &BTreeMap<String, String>,
+    ) -> Result<(), TokenError> {
+        self.verify_inner(token)
+            .and_then(|_| token.check_call_keys(tool, arg_keys))
+            .and_then(|_| token.check_arg_constraints(args))
+    }
+
+    /// Like [`Self::authorize_extracted_call`], also confirming `token` is within `policy`.
+    pub(crate) fn authorize_extracted_call_against_policy(
+        &self,
+        token: &Token,
+        policy: &Policy,
+        tool: &str,
+        arg_keys: &[&str],
+        args: &BTreeMap<String, String>,
+    ) -> Result<(), TokenError> {
+        self.authorize_extracted_call(token, tool, arg_keys, args)
+            .and_then(|_| policy.authorize_token(token))
+    }
+
+    /// Check tool name, argument keys, and constraints, then record one decision.
     pub(crate) fn verify_extracted_call(
         &self,
         token: &Token,
@@ -217,10 +243,7 @@ impl<'a> Verifier<'a> {
         arg_keys: &[&str],
         args: &BTreeMap<String, String>,
     ) -> Result<(), TokenError> {
-        let result = self
-            .verify_inner(token)
-            .and_then(|_| token.check_call_keys(tool, arg_keys))
-            .and_then(|_| token.check_arg_constraints(args));
+        let result = self.authorize_extracted_call(token, tool, arg_keys, args);
         self.record(token, Some(tool), Some(args), &result);
         result
     }
@@ -234,11 +257,8 @@ impl<'a> Verifier<'a> {
         arg_keys: &[&str],
         args: &BTreeMap<String, String>,
     ) -> Result<(), TokenError> {
-        let result = self
-            .verify_inner(token)
-            .and_then(|_| token.check_call_keys(tool, arg_keys))
-            .and_then(|_| token.check_arg_constraints(args))
-            .and_then(|_| policy.authorize_token(token));
+        let result =
+            self.authorize_extracted_call_against_policy(token, policy, tool, arg_keys, args);
         self.record(token, Some(tool), Some(args), &result);
         result
     }
