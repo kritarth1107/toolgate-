@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-10-08
+
+### Added
+- **Stdio MCP gate** (behind the existing `mcp` feature): a local, I/O-free decision function plus `tg gate`
+  - `decide(line, &Verifier, Option<&Policy>)` → `GateAction::{Forward, Respond, Drop}`
+  - Non-`tools/call` messages (initialize, `tools/list`, notifications, responses) pass through unchanged
+  - `tools/call` must carry a token at `params._meta.toolgate` (`tg1.` string or JSON token), verified through `Verifier` and an optional `Policy`
+  - Allowed calls are forwarded with `_meta.toolgate` stripped so the downstream server never sees the token
+  - Denied or token-less calls get a JSON-RPC error with the same `id`, code `-32040`, and `data.error_kind` matching existing `TokenError::kind()` values
+  - Malformed JSON is JSON-RPC parse error `-32700`; batch arrays are rejected with `-32600`
+  - Denied `tools/call` notifications (no `id`) are dropped, not answered
+  - An attached `AuditSink` records exactly one `Decision` per `tools/call`
+- **CLI**: `tg gate [--policy FILE] [--audience A] [--leeway SECS] [--audit-jsonl TARGET] -- <server> [args...]`
+  - Secret from `TG_SECRET` (supports `hex:`); never argv
+  - Spawns the server, pumps client stdin → gate → child stdin, child stdout → client stdout unchanged, child stderr inherited
+  - Exits with the child's status; std threads only (no async runtime)
+- **Helpers**: `token_from_meta` (string or JSON token), JSON-RPC error constructors, `strip_toolgate_meta`
+
+### Notes
+- The gate is line-oriented stdio only: no HTTP/SSE, no batching, no validation of server responses
+- Shared-secret model is unchanged
+
 ## [0.9.0] - 2026-10-07
 
 ### Added
