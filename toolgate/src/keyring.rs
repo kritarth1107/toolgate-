@@ -4,8 +4,10 @@
 //! without immediately invalidating existing tokens.
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::Path;
-use std::time::Duration;
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 
@@ -95,6 +97,75 @@ fn decode_keyring_secret(kid: &str, secret: &str) -> Result<Vec<u8>, KeyringFile
     } else {
         Ok(secret.as_bytes().to_vec())
     }
+}
+
+/// File-backed [`Keyring`] that reloads when the file's mtime changes.
+///
+/// The gate loads this at start and calls [`KeyringFile::reload_if_changed`]
+/// before each decision. A parse/validate failure keeps the previous good
+/// version and writes one warning line to stderr. No watcher thread or extra
+/// crate is required.
+#[derive(Debug, Clone)]
+pub struct KeyringFile {
+    path: PathBuf,
+    keyring: Keyring,
+    mtime: Option<SystemTime>,
+}
+
+impl KeyringFile {
+    /// Read `path` and remember its modification time.
+    pub fn load(path: impl Into<PathBuf>) -> Result<Self, KeyringFileError> {
+        let path = path.into();
+        let mtime = file_mtime(&path);
+        let keyring = Keyring::from_file(&path)?;
+        Ok(KeyringFile {
+            path,
+            keyring,
+            mtime,
+        })
+    }
+
+    /// Path of the keyring file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Current in-memory keyring.
+    pub fn keyring(&self) -> &Keyring {
+        &self.keyring
+    }
+
+    /// Re-read the file when its modification time differs from the last load.
+    ///
+    /// Returns `true` when the keyring was replaced. A failed parse keeps the
+    /// previous keyring, records the new mtime so the warning is not repeated,
+    /// and writes one line to stderr.
+    pub fn reload_if_changed(&mut self) -> bool {
+        let mtime = file_mtime(&self.path);
+        if mtime == self.mtime {
+            return false;
+        }
+        match Keyring::from_file(&self.path) {
+            Ok(keyring) => {
+                self.keyring = keyring;
+                self.mtime = mtime;
+                true
+            }
+            Err(err) => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "warning: failed to reload keyring file {}: {err}; keeping previous version",
+                    self.path.display()
+                );
+                self.mtime = mtime;
+                false
+            }
+        }
+    }
+}
+
+fn file_mtime(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).and_then(|meta| meta.modified()).ok()
 }
 
 /// A collection of signing keys with rotation support.
