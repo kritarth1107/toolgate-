@@ -10,9 +10,9 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use toolgate::{
     append_revoked_jti, check_tools_call, decide, decide_with_replay, AuditSink, Constraints,
-    Decision, GateAction, JsonlAuditSink, KeyringFile, MemoryAuditSink, MemoryUseStore, Policy,
-    PolicyFile, Redaction, RevocationFile, RevocationList, Token, TokenStringError, UseStore,
-    Verifier,
+    Decision, FileUseStore, GateAction, JsonlAuditSink, KeyringFile, MemoryAuditSink,
+    MemoryUseStore, Policy, PolicyFile, Redaction, RevocationFile, RevocationList, Token,
+    TokenStringError, UseStore, Verifier,
 };
 
 #[derive(Parser)]
@@ -78,6 +78,9 @@ enum Commands {
         /// Maximum uses per token jti
         #[arg(long, value_name = "N")]
         max_uses: Option<u64>,
+        /// File-backed use-count log (requires --max-uses)
+        #[arg(long, value_name = "FILE")]
+        use_store: Option<PathBuf>,
         /// Downstream MCP server command (pass it after `--`)
         #[arg(
             required = true,
@@ -314,6 +317,7 @@ fn main() {
             leeway,
             revoked,
             max_uses,
+            use_store,
             server,
         } => handle_gate(
             GateOpts {
@@ -323,6 +327,7 @@ fn main() {
                 leeway,
                 revoked,
                 max_uses,
+                use_store,
                 server,
             },
             &audit,
@@ -643,6 +648,7 @@ struct GateOpts {
     leeway: Option<u64>,
     revoked: Option<PathBuf>,
     max_uses: Option<u64>,
+    use_store: Option<PathBuf>,
     server: Vec<String>,
 }
 
@@ -671,11 +677,18 @@ fn handle_gate(opts: GateOpts, audit: &AuditOpts) -> Result<(), Box<dyn std::err
     if let Some(0) = opts.max_uses {
         return Err("--max-uses must be greater than 0".into());
     }
+    if opts.use_store.is_some() && opts.max_uses.is_none() {
+        return Err("--use-store requires --max-uses".into());
+    }
     let mut revoked_file = match opts.revoked {
         Some(path) => Some(RevocationFile::load(path)?),
         None => None,
     };
-    let mut use_store = MemoryUseStore::new();
+    let mut memory_store = MemoryUseStore::new();
+    let mut file_store = match opts.use_store {
+        Some(path) => Some(FileUseStore::open(path)?),
+        None => None,
+    };
     let leeway = Duration::from_secs(opts.leeway.unwrap_or(0));
     let sink = MemoryAuditSink::new();
     let code = run_gate_pump(opts.server, |line| {
@@ -705,12 +718,13 @@ fn handle_gate(opts: GateOpts, audit: &AuditOpts) -> Result<(), Box<dyn std::err
         }
         let policy = policy_file.as_ref().map(|file| file.policy());
         let action = match opts.max_uses {
-            Some(n) => decide_with_replay(
-                line,
-                &verifier,
-                policy,
-                Some((&mut use_store as &mut dyn UseStore, n)),
-            ),
+            Some(n) => {
+                let store: &mut dyn UseStore = match file_store.as_mut() {
+                    Some(store) => store,
+                    None => &mut memory_store,
+                };
+                decide_with_replay(line, &verifier, policy, Some((store, n)))
+            }
             None => decide(line, &verifier, policy),
         };
         if audit.target.is_some() {

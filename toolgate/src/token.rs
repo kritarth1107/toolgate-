@@ -542,7 +542,8 @@ impl Token {
         // Check and consume use
         match &self.jti {
             Some(jti) => {
-                if use_store.try_use(jti, max_uses) == UseResult::Exceeded {
+                if use_store.try_use_with_expiry(jti, max_uses, self.expiry) == UseResult::Exceeded
+                {
                     return Err(TokenError::ReplayDetected { jti: jti.clone() });
                 }
             }
@@ -578,7 +579,8 @@ impl Token {
                 }
 
                 // Then check and consume use
-                if use_store.try_use(jti, max_uses) == UseResult::Exceeded {
+                if use_store.try_use_with_expiry(jti, max_uses, self.expiry) == UseResult::Exceeded
+                {
                     return Err(TokenError::ReplayDetected { jti: jti.clone() });
                 }
             }

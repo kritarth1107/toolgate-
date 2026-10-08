@@ -118,7 +118,7 @@ pub fn decide_with_replay(
 fn consume_use(token: &Token, store: &mut dyn UseStore, max_uses: u64) -> Result<(), TokenError> {
     match token.jti.as_deref() {
         Some(jti) => {
-            if store.try_use(jti, max_uses) == UseResult::Exceeded {
+            if store.try_use_with_expiry(jti, max_uses, token.expiry) == UseResult::Exceeded {
                 Err(TokenError::ReplayDetected {
                     jti: jti.to_string(),
                 })
