@@ -9,8 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use toolgate::{
-    check_tools_call, decide, AuditSink, Constraints, Decision, GateAction, JsonlAuditSink,
-    MemoryAuditSink, Policy, Redaction, RevocationList, Token, TokenStringError, Verifier,
+    check_tools_call, decide, decide_with_replay, AuditSink, Constraints, Decision, GateAction,
+    JsonlAuditSink, MemoryAuditSink, MemoryUseStore, Policy, Redaction, RevocationFile,
+    RevocationList, Token, TokenStringError, UseStore, Verifier,
 };
 
 #[derive(Parser)]
@@ -67,6 +68,12 @@ enum Commands {
         /// Clock-skew leeway in seconds
         #[arg(long, value_name = "SECS")]
         leeway: Option<u64>,
+        /// Revoked-jti file (one id per line; reloaded when the file changes)
+        #[arg(long, value_name = "FILE")]
+        revoked: Option<PathBuf>,
+        /// Maximum uses per token jti
+        #[arg(long, value_name = "N")]
+        max_uses: Option<u64>,
         /// Downstream MCP server command (pass it after `--`)
         #[arg(
             required = true,
@@ -292,8 +299,10 @@ fn main() {
             policy,
             audience,
             leeway,
+            revoked,
+            max_uses,
             server,
-        } => handle_gate(policy, audience, leeway, server, &audit),
+        } => handle_gate(policy, audience, leeway, revoked, max_uses, server, &audit),
     };
 
     if let Err(e) = result {
@@ -580,6 +589,8 @@ fn handle_gate(
     policy_path: Option<PathBuf>,
     audience: Option<String>,
     leeway: Option<u64>,
+    revoked_path: Option<PathBuf>,
+    max_uses: Option<u64>,
     server: Vec<String>,
     audit: &AuditOpts,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -591,17 +602,39 @@ fn handle_gate(
         Some(path) => Some(load_policy(&path)?),
         None => None,
     };
+    if let Some(0) = max_uses {
+        return Err("--max-uses must be greater than 0".into());
+    }
+    let mut revoked_file = match revoked_path {
+        Some(path) => Some(RevocationFile::load(path)?),
+        None => None,
+    };
+    let mut use_store = MemoryUseStore::new();
     let leeway = Duration::from_secs(leeway.unwrap_or(0));
     let sink = MemoryAuditSink::new();
-    let mut verifier = Verifier::new(&secret).leeway(leeway);
-    if let Some(ref audience) = audience {
-        verifier = verifier.audience(audience);
-    }
-    if audit.target.is_some() {
-        verifier = verifier.audit(&sink).redaction(&audit.redaction);
-    }
     let code = run_gate_pump(server, |line| {
-        let action = decide(line, &verifier, policy.as_ref());
+        if let Some(file) = revoked_file.as_mut() {
+            file.reload_if_changed()?;
+        }
+        let mut verifier = Verifier::new(&secret).leeway(leeway);
+        if let Some(ref audience) = audience {
+            verifier = verifier.audience(audience);
+        }
+        if let Some(ref file) = revoked_file {
+            verifier = verifier.revocation(file.list());
+        }
+        if audit.target.is_some() {
+            verifier = verifier.audit(&sink).redaction(&audit.redaction);
+        }
+        let action = match max_uses {
+            Some(n) => decide_with_replay(
+                line,
+                &verifier,
+                policy.as_ref(),
+                Some((&mut use_store as &mut dyn UseStore, n)),
+            ),
+            None => decide(line, &verifier, policy.as_ref()),
+        };
         if audit.target.is_some() {
             emit_audit(audit, &sink)?;
             sink.clear();
