@@ -7,7 +7,7 @@ use serde_json::{json, Map, Value};
 use crate::mcp::{extract_tools_call, has_constraint, token_from_meta};
 use crate::policy::Policy;
 use crate::token::{Token, TokenError};
-use crate::use_store::{UseResult, UseStore};
+use crate::use_store::UseStore;
 use crate::verifier::Verifier;
 
 /// JSON-RPC 2.0 parse error (`error.code`).
@@ -117,15 +117,11 @@ pub fn decide_with_replay(
 
 fn consume_use(token: &Token, store: &mut dyn UseStore, max_uses: u64) -> Result<(), TokenError> {
     match token.jti.as_deref() {
-        Some(jti) => {
-            if store.try_use_with_expiry(jti, max_uses, token.expiry) == UseResult::Exceeded {
-                Err(TokenError::ReplayDetected {
-                    jti: jti.to_string(),
-                })
-            } else {
-                Ok(())
-            }
-        }
+        Some(jti) => TokenError::from_use_result(
+            jti,
+            store.try_use_with_expiry(jti, max_uses, token.expiry),
+            store.last_error(),
+        ),
         None => Err(TokenError::MissingJti),
     }
 }
@@ -244,7 +240,7 @@ mod tests {
     use crate::policy::{Policy, PolicyFile};
     use crate::revocation::RevocationList;
     use crate::token::Token;
-    use crate::use_store::MemoryUseStore;
+    use crate::use_store::{MemoryUseStore, UseResult, UseStore};
     use crate::Verifier;
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -604,6 +600,53 @@ mod tests {
         assert_eq!(response["id"], 10);
         assert_eq!(response["error"]["data"]["error_kind"], "replay_detected");
         assert_eq!(response["error"]["code"], JSONRPC_TOOLGATE_DENIED);
+    }
+
+    struct FailingUseStore;
+
+    impl UseStore for FailingUseStore {
+        fn try_use(&mut self, _jti: &str, _max_uses: u64) -> UseResult {
+            UseResult::StoreError
+        }
+
+        fn get_count(&self, _jti: &str) -> u64 {
+            0
+        }
+
+        fn reset(&mut self, _jti: &str) {}
+
+        fn last_error(&self) -> Option<&str> {
+            Some("disk full")
+        }
+    }
+
+    #[test]
+    fn use_store_write_failure_denies_and_audits() {
+        let token = jti_token();
+        let line = tools_call(
+            Some(json!(12)),
+            "read_file",
+            json!({"path": "/tmp/a.txt"}),
+            Some(tg1_token(&token)),
+        );
+        let sink = MemoryAuditSink::new();
+        let verifier = Verifier::new(SECRET).at(NOW).audit(&sink);
+        let mut store = FailingUseStore;
+        let response = error_of(decide_with_replay(
+            &line,
+            &verifier,
+            None,
+            Some((&mut store, 1)),
+        ));
+        assert_eq!(response["id"], 12);
+        assert_eq!(response["error"]["data"]["error_kind"], "use_store_failed");
+        assert_eq!(response["error"]["code"], JSONRPC_TOOLGATE_DENIED);
+        assert_eq!(sink.len(), 1);
+        assert_eq!(sink.decisions()[0].outcome, Outcome::Deny);
+        assert_eq!(
+            sink.decisions()[0].error_kind.as_deref(),
+            Some("use_store_failed")
+        );
     }
 
     #[test]

@@ -20,6 +20,8 @@ pub enum UseResult {
     Accepted,
     /// The token has exceeded its maximum uses.
     Exceeded,
+    /// The store could not persist the use. Callers must deny (never fail open).
+    StoreError,
 }
 
 /// Trait for tracking token usage counts.
@@ -50,6 +52,11 @@ pub trait UseStore {
 
     /// Reset the use count for a token (e.g., for testing).
     fn reset(&mut self, jti: &str);
+
+    /// Reason for the most recent [`UseResult::StoreError`], if any.
+    fn last_error(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// One accepted use recorded by a [`FileUseStore`].
@@ -143,6 +150,7 @@ pub struct FileUseStore {
     file: Option<File>,
     counts: HashMap<String, u64>,
     records: Vec<UseRecord>,
+    last_error: Option<String>,
 }
 
 impl std::fmt::Debug for FileUseStore {
@@ -164,6 +172,7 @@ impl FileUseStore {
             file: None,
             counts: HashMap::new(),
             records: Vec::new(),
+            last_error: None,
         }
     }
 
@@ -197,6 +206,7 @@ impl FileUseStore {
             file: Some(file),
             counts: HashMap::new(),
             records,
+            last_error: None,
         };
         store.rebuild_counts();
         Ok(store)
@@ -259,9 +269,11 @@ impl FileUseStore {
         };
         // Persist before the in-memory count moves so a write failure cannot
         // accept a use that will vanish on the next restart.
-        if self.persist(&record).is_err() {
-            return UseResult::Exceeded;
+        if let Err(err) = self.persist(&record) {
+            self.last_error = Some(err.to_string());
+            return UseResult::StoreError;
         }
+        self.last_error = None;
         *self.counts.entry(jti.to_string()).or_insert(0) += 1;
         self.records.push(record);
         UseResult::Accepted
@@ -284,6 +296,10 @@ impl UseStore for FileUseStore {
     fn reset(&mut self, jti: &str) {
         self.counts.remove(jti);
         self.records.retain(|record| record.jti != jti);
+    }
+
+    fn last_error(&self) -> Option<&str> {
+        self.last_error.as_deref()
     }
 }
 

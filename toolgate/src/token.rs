@@ -97,6 +97,10 @@ pub enum TokenError {
     PolicyDenied {
         reason: String,
     },
+    /// The use store could not persist an accepted use (never fail open).
+    UseStoreFailed {
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for TokenError {
@@ -133,6 +137,7 @@ impl std::fmt::Display for TokenError {
             }
             TokenError::MalformedRequest => write!(f, "malformed request"),
             TokenError::PolicyDenied { reason } => write!(f, "denied by policy: {reason}"),
+            TokenError::UseStoreFailed { reason } => write!(f, "use store failed: {reason}"),
         }
     }
 }
@@ -160,6 +165,23 @@ impl TokenError {
             TokenError::MaxDepthExceeded { .. } => "max_depth_exceeded",
             TokenError::MalformedRequest => "malformed_request",
             TokenError::PolicyDenied { .. } => "policy_denied",
+            TokenError::UseStoreFailed { .. } => "use_store_failed",
+        }
+    }
+
+    pub(crate) fn from_use_result(
+        jti: &str,
+        result: UseResult,
+        reason: Option<&str>,
+    ) -> Result<(), TokenError> {
+        match result {
+            UseResult::Accepted => Ok(()),
+            UseResult::Exceeded => Err(TokenError::ReplayDetected {
+                jti: jti.to_string(),
+            }),
+            UseResult::StoreError => Err(TokenError::UseStoreFailed {
+                reason: reason.unwrap_or("failed to persist token use").to_string(),
+            }),
         }
     }
 }
@@ -542,10 +564,11 @@ impl Token {
         // Check and consume use
         match &self.jti {
             Some(jti) => {
-                if use_store.try_use_with_expiry(jti, max_uses, self.expiry) == UseResult::Exceeded
-                {
-                    return Err(TokenError::ReplayDetected { jti: jti.clone() });
-                }
+                TokenError::from_use_result(
+                    jti,
+                    use_store.try_use_with_expiry(jti, max_uses, self.expiry),
+                    use_store.last_error(),
+                )?;
             }
             None => {
                 return Err(TokenError::MissingJti);
@@ -579,10 +602,11 @@ impl Token {
                 }
 
                 // Then check and consume use
-                if use_store.try_use_with_expiry(jti, max_uses, self.expiry) == UseResult::Exceeded
-                {
-                    return Err(TokenError::ReplayDetected { jti: jti.clone() });
-                }
+                TokenError::from_use_result(
+                    jti,
+                    use_store.try_use_with_expiry(jti, max_uses, self.expiry),
+                    use_store.last_error(),
+                )?;
             }
             None => {
                 return Err(TokenError::MissingJti);
