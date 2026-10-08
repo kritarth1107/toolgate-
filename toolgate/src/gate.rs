@@ -528,6 +528,121 @@ mod tests {
         assert_eq!(response["jsonrpc"], "2.0");
     }
 
+    fn jti_token() -> Token {
+        Token::mint_with_jti(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2_000_000_000,
+            None,
+            None,
+            None,
+            true,
+        )
+    }
+
+    #[test]
+    fn revoked_jti_is_denied() {
+        let token = jti_token();
+        let mut list = RevocationList::new();
+        list.revoke(token.jti.clone().unwrap());
+        let verifier = Verifier::new(SECRET).at(NOW).revocation(&list);
+        let line = tools_call(
+            Some(json!(8)),
+            "read_file",
+            json!({"path": "/tmp/a.txt"}),
+            Some(tg1_token(&token)),
+        );
+        let response = error_of(decide(&line, &verifier, None));
+        assert_eq!(response["id"], 8);
+        assert_eq!(response["error"]["code"], JSONRPC_TOOLGATE_DENIED);
+        assert_eq!(response["error"]["data"]["error_kind"], "revoked");
+    }
+
+    #[test]
+    fn revocation_list_requires_jti() {
+        let token = basic_token();
+        let list = RevocationList::new();
+        let verifier = Verifier::new(SECRET).at(NOW).revocation(&list);
+        let line = tools_call(
+            Some(json!(9)),
+            "read_file",
+            json!({"path": "/tmp/a.txt"}),
+            Some(tg1_token(&token)),
+        );
+        let response = error_of(decide(&line, &verifier, None));
+        assert_eq!(response["error"]["data"]["error_kind"], "missing_jti");
+    }
+
+    #[test]
+    fn max_uses_allows_then_denies_replay() {
+        let token = jti_token();
+        let line = tools_call(
+            Some(json!(10)),
+            "read_file",
+            json!({"path": "/tmp/a.txt"}),
+            Some(tg1_token(&token)),
+        );
+        let mut store = MemoryUseStore::new();
+        let forwarded = forwarded(decide_with_replay(
+            &line,
+            &verifier(),
+            None,
+            Some((&mut store, 1)),
+        ));
+        assert_eq!(forwarded["method"], "tools/call");
+        assert!(forwarded["params"].get("_meta").is_none());
+
+        let response = error_of(decide_with_replay(
+            &line,
+            &verifier(),
+            None,
+            Some((&mut store, 1)),
+        ));
+        assert_eq!(response["id"], 10);
+        assert_eq!(response["error"]["data"]["error_kind"], "replay_detected");
+        assert_eq!(response["error"]["code"], JSONRPC_TOOLGATE_DENIED);
+    }
+
+    #[test]
+    fn max_uses_requires_jti() {
+        let token = basic_token();
+        let line = tools_call(
+            Some(json!(11)),
+            "read_file",
+            json!({"path": "/tmp/a.txt"}),
+            Some(tg1_token(&token)),
+        );
+        let mut store = MemoryUseStore::new();
+        let response = error_of(decide_with_replay(
+            &line,
+            &verifier(),
+            None,
+            Some((&mut store, 2)),
+        ));
+        assert_eq!(response["error"]["data"]["error_kind"], "missing_jti");
+    }
+
+    #[test]
+    fn replay_notification_is_dropped() {
+        let token = jti_token();
+        let line = tools_call(
+            None,
+            "read_file",
+            json!({"path": "/tmp/a.txt"}),
+            Some(tg1_token(&token)),
+        );
+        let mut store = MemoryUseStore::new();
+        assert!(matches!(
+            decide_with_replay(&line, &verifier(), None, Some((&mut store, 1))),
+            GateAction::Forward(_)
+        ));
+        assert_eq!(
+            decide_with_replay(&line, &verifier(), None, Some((&mut store, 1))),
+            GateAction::Drop
+        );
+    }
+
     #[test]
     fn audit_records_revoked_and_replay_kinds() {
         let token = Token::mint_with_jti(
