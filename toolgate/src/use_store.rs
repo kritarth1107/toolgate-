@@ -439,4 +439,154 @@ mod tests {
         let store = MemoryUseStore::new();
         assert_eq!(store.get_count("unknown"), 0);
     }
+
+    fn temp_use_store_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "toolgate-use-store-{}-{}-{}.jsonl",
+            std::process::id(),
+            name,
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn write_log(path: &Path, body: &str) {
+        fs::write(path, body).unwrap();
+    }
+
+    #[test]
+    fn open_rebuilds_counts_from_existing_records() {
+        let path = temp_use_store_path("rebuild");
+        write_log(
+            &path,
+            concat!(
+                r#"{"jti":"alpha","expiry":2000000000}"#,
+                "\n",
+                r#"{"jti":"alpha","expiry":2000000000}"#,
+                "\n",
+                r#"{"jti":"beta","expiry":2000000000}"#,
+                "\n"
+            ),
+        );
+        let store = FileUseStore::open_at(&path, 1_999_999_999).unwrap();
+        assert_eq!(store.get_count("alpha"), 2);
+        assert_eq!(store.get_count("beta"), 1);
+        assert_eq!(store.get_count("missing"), 0);
+        assert_eq!(store.records().len(), 3);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn append_persists_and_survives_reopen() {
+        let path = temp_use_store_path("append");
+        let _ = fs::remove_file(&path);
+        let mut store = FileUseStore::open_at(&path, 1_000).unwrap();
+        assert_eq!(
+            store.try_use_with_expiry("once", 2, 2_000_000_000),
+            UseResult::Accepted
+        );
+        assert_eq!(
+            store.try_use_with_expiry("once", 2, 2_000_000_000),
+            UseResult::Accepted
+        );
+        assert_eq!(
+            store.try_use_with_expiry("once", 2, 2_000_000_000),
+            UseResult::Exceeded
+        );
+        drop(store);
+
+        let reopened = FileUseStore::open_at(&path, 1_000).unwrap();
+        assert_eq!(reopened.get_count("once"), 2);
+        let text = fs::read_to_string(&path).unwrap();
+        assert_eq!(text.lines().count(), 2);
+        assert!(text.contains(r#""jti":"once""#));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn torn_trailing_line_is_skipped() {
+        let path = temp_use_store_path("torn");
+        write_log(
+            &path,
+            concat!(
+                r#"{"jti":"keep","expiry":2000000000}"#,
+                "\n",
+                r#"{"jti":"keep","expiry":2000000000"#,
+            ),
+        );
+        let store = FileUseStore::open_at(&path, 1_000).unwrap();
+        assert_eq!(store.get_count("keep"), 1);
+        assert_eq!(store.records().len(), 1);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn garbage_trailing_line_is_skipped() {
+        let path = temp_use_store_path("garbage-tail");
+        write_log(
+            &path,
+            concat!(r#"{"jti":"keep","expiry":2000000000}"#, "\nnot-json\n"),
+        );
+        let store = FileUseStore::open_at(&path, 1_000).unwrap();
+        assert_eq!(store.get_count("keep"), 1);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn corrupt_middle_line_fails_open() {
+        let path = temp_use_store_path("corrupt-mid");
+        write_log(
+            &path,
+            concat!(
+                r#"{"jti":"keep","expiry":2000000000}"#,
+                "\nnot-json\n",
+                r#"{"jti":"later","expiry":2000000000}"#,
+                "\n"
+            ),
+        );
+        let err = FileUseStore::open_at(&path, 1_000).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn open_compacts_expired_records() {
+        let path = temp_use_store_path("compact");
+        write_log(
+            &path,
+            concat!(
+                r#"{"jti":"old","expiry":100}"#,
+                "\n",
+                r#"{"jti":"live","expiry":2000000000}"#,
+                "\n",
+                r#"{"jti":"old","expiry":100}"#,
+                "\n"
+            ),
+        );
+        let store = FileUseStore::open_at(&path, 101).unwrap();
+        assert_eq!(store.get_count("old"), 0);
+        assert_eq!(store.get_count("live"), 1);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("\"old\""));
+        assert!(text.contains("\"live\""));
+        let _ = fs::remove_file(format!("{}.tmp", path.display()));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn append_failure_is_store_error_and_does_not_count() {
+        let path = temp_use_store_path("write-fail");
+        let mut store = FileUseStore::open_at(&path, 1_000).unwrap();
+        // An already-open File replaced with /dev/full fails writes (ENOSPC).
+        store.file = Some(File::create("/dev/full").unwrap());
+        assert_eq!(
+            store.try_use_with_expiry("jti", 1, 2_000_000_000),
+            UseResult::StoreError
+        );
+        assert_eq!(store.get_count("jti"), 0);
+        assert!(store.last_error().is_some());
+        let _ = fs::remove_file(&path);
+    }
 }
