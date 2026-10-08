@@ -93,7 +93,7 @@ pub use gate::{
 pub use keyring::{parse_keyring_file, Keyring, KeyringFile, KeyringFileError};
 #[cfg(feature = "mcp")]
 pub use mcp::{check_tools_call, token_from_meta, token_string_from_meta, CallInfo};
-pub use policy::{Policy, PolicyError, ToolGrant, POLICY_VERSION};
+pub use policy::{Policy, PolicyError, PolicyFile, PolicyFileError, ToolGrant, POLICY_VERSION};
 pub use revocation::{append_revoked_jti, parse_revoked_jtis, RevocationFile, RevocationList};
 pub use token::{Token, TokenError};
 pub use token_string::{TokenStringError, MAX_TOKEN_STRING_LEN, TOKEN_STRING_PREFIX};

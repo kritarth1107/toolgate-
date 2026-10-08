@@ -6,6 +6,10 @@
 //! [`Constraint`](crate::Constraint)s in the same serde form used on tokens.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use crate::constraint::Constraints;
 use crate::keyring::Keyring;
@@ -136,6 +140,39 @@ impl std::fmt::Display for PolicyError {
 }
 
 impl std::error::Error for PolicyError {}
+
+/// Errors from loading a file-backed [`Policy`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyFileError {
+    /// The path could not be read.
+    Io(String),
+    /// The document failed to parse or validate.
+    Policy(PolicyError),
+}
+
+impl std::fmt::Display for PolicyFileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PolicyFileError::Io(msg) => write!(f, "failed to read policy file: {msg}"),
+            PolicyFileError::Policy(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl std::error::Error for PolicyFileError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            PolicyFileError::Policy(err) => Some(err),
+            PolicyFileError::Io(_) => None,
+        }
+    }
+}
+
+impl From<PolicyError> for PolicyFileError {
+    fn from(err: PolicyError) -> Self {
+        PolicyFileError::Policy(err)
+    }
+}
 
 impl Policy {
     /// Parse a policy from a JSON document. Does not validate semantic rules.
@@ -384,6 +421,85 @@ impl Policy {
     ) -> Result<(), TokenError> {
         verifier.verify_call_with_args_against_policy(token, self, tool, args)
     }
+
+    /// Load and validate a policy JSON file.
+    pub fn from_file(path: impl AsRef<Path>) -> Result<Self, PolicyFileError> {
+        let path = path.as_ref();
+        let text = fs::read_to_string(path)
+            .map_err(|e| PolicyFileError::Io(format!("{}: {e}", path.display())))?;
+        let policy = Self::from_json(&text)?;
+        policy.validate()?;
+        Ok(policy)
+    }
+}
+
+/// File-backed [`Policy`] that reloads when the file's mtime changes.
+///
+/// The gate loads this at start and calls [`PolicyFile::reload_if_changed`]
+/// before each decision. A parse/validate failure keeps the previous good
+/// version and writes one warning line to stderr. No watcher thread or extra
+/// crate is required.
+#[derive(Debug, Clone)]
+pub struct PolicyFile {
+    path: PathBuf,
+    policy: Policy,
+    mtime: Option<SystemTime>,
+}
+
+impl PolicyFile {
+    /// Read `path`, validate, and remember its modification time.
+    pub fn load(path: impl Into<PathBuf>) -> Result<Self, PolicyFileError> {
+        let path = path.into();
+        let mtime = file_mtime(&path);
+        let policy = Policy::from_file(&path)?;
+        Ok(PolicyFile {
+            path,
+            policy,
+            mtime,
+        })
+    }
+
+    /// Path of the policy file.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Current in-memory policy.
+    pub fn policy(&self) -> &Policy {
+        &self.policy
+    }
+
+    /// Re-read the file when its modification time differs from the last load.
+    ///
+    /// Returns `true` when the policy was replaced. A failed parse keeps the
+    /// previous policy, records the new mtime so the warning is not repeated,
+    /// and writes one line to stderr.
+    pub fn reload_if_changed(&mut self) -> bool {
+        let mtime = file_mtime(&self.path);
+        if mtime == self.mtime {
+            return false;
+        }
+        match Policy::from_file(&self.path) {
+            Ok(policy) => {
+                self.policy = policy;
+                self.mtime = mtime;
+                true
+            }
+            Err(err) => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "warning: failed to reload policy file {}: {err}; keeping previous version",
+                    self.path.display()
+                );
+                self.mtime = mtime;
+                false
+            }
+        }
+    }
+}
+
+fn file_mtime(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).and_then(|meta| meta.modified()).ok()
 }
 
 struct ResolvedGrant<'a> {
