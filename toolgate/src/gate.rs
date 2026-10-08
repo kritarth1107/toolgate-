@@ -99,9 +99,27 @@ pub fn decide(line: &str, verifier: &Verifier<'_>, _policy: Option<&Policy>) -> 
     };
 
     match check_tools_call(verifier, &token, &value) {
-        Ok(_) => GateAction::Forward(line.to_string()),
+        Ok(_) => GateAction::Forward(strip_toolgate_meta(&value).to_string()),
         Err(err) => deny_action(id, &err),
     }
+}
+
+/// Remove `params._meta.toolgate` so the downstream server never sees the token.
+///
+/// An empty `_meta` object is removed as well.
+pub fn strip_toolgate_meta(request: &Value) -> Value {
+    let mut stripped = request.clone();
+    let Some(params) = stripped.get_mut("params").and_then(Value::as_object_mut) else {
+        return stripped;
+    };
+    let Some(meta) = params.get_mut("_meta").and_then(Value::as_object_mut) else {
+        return stripped;
+    };
+    meta.remove("toolgate");
+    if meta.is_empty() {
+        params.remove("_meta");
+    }
+    stripped
 }
 
 fn deny_action(id: Option<Value>, err: &TokenError) -> GateAction {

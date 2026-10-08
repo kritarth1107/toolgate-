@@ -86,7 +86,7 @@ pub use clock::{Clock, FixedClock, InstantClock, SystemClock, VerifyTime};
 pub use constraint::{Constraint, Constraints};
 #[cfg(feature = "mcp")]
 pub use gate::{
-    decide, denied_response, jsonrpc_error, parse_error_response, GateAction,
+    decide, denied_response, jsonrpc_error, parse_error_response, strip_toolgate_meta, GateAction,
     JSONRPC_INVALID_REQUEST, JSONRPC_PARSE_ERROR, JSONRPC_TOOLGATE_DENIED,
 };
 pub use keyring::Keyring;
