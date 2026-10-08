@@ -194,7 +194,343 @@ fn deny_action(id: Option<Value>, err: &TokenError) -> GateAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::audit::{MemoryAuditSink, Outcome};
+    use crate::constraint::Constraint;
+    use crate::policy::Policy;
+    use crate::token::Token;
+    use crate::Verifier;
     use serde_json::json;
+    use std::collections::BTreeMap;
+
+    const SECRET: &[u8] = b"test-secret-key-32-bytes-long!!";
+    const NOW: u64 = 1_999_999_999;
+
+    fn verifier() -> Verifier<'static> {
+        Verifier::new(SECRET).at(NOW)
+    }
+
+    fn constrained_token() -> Token {
+        let mut constraints = BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+        constraints.insert(
+            "limit".to_string(),
+            Constraint::IntRange { min: 1, max: 100 },
+        );
+        Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into()],
+            2_000_000_000,
+            None,
+            None,
+            Some(constraints),
+        )
+    }
+
+    fn basic_token() -> Token {
+        Token::mint(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into()],
+            2_000_000_000,
+        )
+    }
+
+    fn tools_call(id: Option<Value>, name: &str, arguments: Value, token: Option<Value>) -> String {
+        let mut params = json!({
+            "name": name,
+            "arguments": arguments,
+        });
+        if let Some(token) = token {
+            params["_meta"] = json!({ "toolgate": token });
+        }
+        let mut msg = json!({
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": params,
+        });
+        if let Some(id) = id {
+            msg["id"] = id;
+        }
+        msg.to_string()
+    }
+
+    fn tg1_token(token: &Token) -> Value {
+        json!(token.to_token_string())
+    }
+
+    fn json_token(token: &Token) -> Value {
+        serde_json::to_value(token).unwrap()
+    }
+
+    fn sample_policy() -> Policy {
+        Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 3600,
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["path", "limit"],
+                    "constraints": {
+                        "path": {"type": "prefix", "value": "/tmp/"},
+                        "limit": {"type": "int_range", "value": {"min": 1, "max": 100}}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap()
+    }
+
+    fn forwarded(action: GateAction) -> Value {
+        match action {
+            GateAction::Forward(text) => serde_json::from_str(&text).unwrap(),
+            other => panic!("expected Forward, got {other:?}"),
+        }
+    }
+
+    fn error_of(action: GateAction) -> Value {
+        match action {
+            GateAction::Respond(value) => value,
+            other => panic!("expected Respond, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pass_through_non_tools_call() {
+        let initialize = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#;
+        assert_eq!(
+            decide(initialize, &verifier(), None),
+            GateAction::Forward(initialize.to_string())
+        );
+
+        let list = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+        assert_eq!(
+            decide(list, &verifier(), None),
+            GateAction::Forward(list.to_string())
+        );
+
+        let note = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+        assert_eq!(
+            decide(note, &verifier(), None),
+            GateAction::Forward(note.to_string())
+        );
+
+        let response = r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#;
+        assert_eq!(
+            decide(response, &verifier(), None),
+            GateAction::Forward(response.to_string())
+        );
+    }
+
+    #[test]
+    fn allow_and_strip_tg1_token() {
+        let token = constrained_token();
+        let line = tools_call(
+            Some(json!(1)),
+            "read_file",
+            json!({"path": "/tmp/a.txt", "limit": 10}),
+            Some(tg1_token(&token)),
+        );
+        let action = decide(&line, &verifier(), None);
+        let text = action_text(&action);
+        let forwarded = forwarded(action);
+        assert_eq!(forwarded["method"], "tools/call");
+        assert_eq!(forwarded["params"]["name"], "read_file");
+        assert_eq!(forwarded["params"]["arguments"]["path"], "/tmp/a.txt");
+        assert!(forwarded["params"].get("_meta").is_none());
+        assert!(!text.contains("toolgate"));
+        assert!(!text.contains("tg1."));
+    }
+
+    #[test]
+    fn allow_and_strip_json_token() {
+        let token = constrained_token();
+        let line = tools_call(
+            Some(json!(1)),
+            "read_file",
+            json!({"path": "/tmp/a.txt", "limit": 10}),
+            Some(json_token(&token)),
+        );
+        let action = decide(&line, &verifier(), None);
+        let text = action_text(&action);
+        let forwarded = forwarded(action);
+        assert!(forwarded["params"].get("_meta").is_none());
+        assert!(!text.contains("toolgate"));
+    }
+
+    #[test]
+    fn strip_keeps_other_meta_fields() {
+        let token = basic_token();
+        let line = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": "read_file",
+                "arguments": {"path": "/tmp/a.txt"},
+                "_meta": {
+                    "toolgate": token.to_token_string(),
+                    "progressToken": "p1"
+                }
+            }
+        })
+        .to_string();
+        let forwarded = forwarded(decide(&line, &verifier(), None));
+        assert!(forwarded["params"]["_meta"].get("toolgate").is_none());
+        assert_eq!(forwarded["params"]["_meta"]["progressToken"], "p1");
+    }
+
+    #[test]
+    fn missing_token_is_denied() {
+        let line = tools_call(
+            Some(json!(7)),
+            "read_file",
+            json!({"path": "/tmp/a.txt"}),
+            None,
+        );
+        let response = error_of(decide(&line, &verifier(), None));
+        assert_eq!(response["id"], 7);
+        assert_eq!(response["error"]["code"], JSONRPC_TOOLGATE_DENIED);
+        assert_eq!(response["error"]["data"]["error_kind"], "malformed_request");
+    }
+
+    #[test]
+    fn bad_mac_is_denied() {
+        let token = basic_token();
+        let other = Verifier::new(b"other-secret-key-32-bytes-long!").at(NOW);
+        let line = tools_call(
+            Some(json!("abc")),
+            "read_file",
+            json!({"path": "/tmp/a.txt"}),
+            Some(tg1_token(&token)),
+        );
+        let response = error_of(decide(&line, &other, None));
+        assert_eq!(response["id"], "abc");
+        assert_eq!(response["error"]["data"]["error_kind"], "invalid_mac");
+        assert_eq!(response["error"]["code"], JSONRPC_TOOLGATE_DENIED);
+    }
+
+    #[test]
+    fn tool_mismatch_is_denied() {
+        let token = basic_token();
+        let line = tools_call(
+            Some(json!(2)),
+            "write_file",
+            json!({"path": "/tmp/a.txt"}),
+            Some(tg1_token(&token)),
+        );
+        let response = error_of(decide(&line, &verifier(), None));
+        assert_eq!(response["error"]["data"]["error_kind"], "tool_mismatch");
+        assert_eq!(response["id"], 2);
+    }
+
+    #[test]
+    fn constraint_violation_is_denied() {
+        let token = constrained_token();
+        let line = tools_call(
+            Some(json!(3)),
+            "read_file",
+            json!({"path": "/etc/passwd", "limit": 10}),
+            Some(tg1_token(&token)),
+        );
+        let response = error_of(decide(&line, &verifier(), None));
+        assert_eq!(
+            response["error"]["data"]["error_kind"],
+            "constraint_violation"
+        );
+    }
+
+    #[test]
+    fn policy_deny() {
+        let token = Token::mint(SECRET, "write_file", vec!["path".into()], 2_000_000_000);
+        let policy = sample_policy();
+        let line = tools_call(
+            Some(json!(4)),
+            "write_file",
+            json!({"path": "/tmp/a.txt"}),
+            Some(tg1_token(&token)),
+        );
+        let response = error_of(decide(&line, &verifier(), Some(&policy)));
+        assert_eq!(response["error"]["data"]["error_kind"], "policy_denied");
+        assert_eq!(response["id"], 4);
+    }
+
+    #[test]
+    fn notification_drop() {
+        let line = tools_call(None, "read_file", json!({"path": "/tmp/a.txt"}), None);
+        assert_eq!(decide(&line, &verifier(), None), GateAction::Drop);
+    }
+
+    #[test]
+    fn parse_error() {
+        let response = error_of(decide("{not-json", &verifier(), None));
+        assert_eq!(response["id"], Value::Null);
+        assert_eq!(response["error"]["code"], JSONRPC_PARSE_ERROR);
+        assert!(response["error"].get("data").is_none());
+    }
+
+    #[test]
+    fn id_preserved_on_deny() {
+        let line = tools_call(
+            Some(json!("req-9")),
+            "read_file",
+            json!({"path": "/tmp/a.txt"}),
+            None,
+        );
+        let response = error_of(decide(&line, &verifier(), None));
+        assert_eq!(response["id"], "req-9");
+        assert_eq!(response["jsonrpc"], "2.0");
+    }
+
+    #[test]
+    fn audit_one_decision_per_tools_call() {
+        let token = constrained_token();
+        let sink = MemoryAuditSink::new();
+        let verifier = Verifier::new(SECRET).at(NOW).audit(&sink);
+
+        let allowed = tools_call(
+            Some(json!(1)),
+            "read_file",
+            json!({"path": "/tmp/a.txt", "limit": 10}),
+            Some(tg1_token(&token)),
+        );
+        assert!(matches!(
+            decide(&allowed, &verifier, None),
+            GateAction::Forward(_)
+        ));
+        assert_eq!(sink.len(), 1);
+        assert_eq!(sink.decisions()[0].outcome, Outcome::Allow);
+
+        let denied = tools_call(
+            Some(json!(2)),
+            "read_file",
+            json!({"path": "/tmp/a.txt"}),
+            None,
+        );
+        decide(&denied, &verifier, None);
+        assert_eq!(sink.len(), 2);
+        assert_eq!(sink.decisions()[1].outcome, Outcome::Deny);
+        assert_eq!(
+            sink.decisions()[1].error_kind.as_deref(),
+            Some("malformed_request")
+        );
+
+        let note = tools_call(None, "read_file", json!({"path": "/tmp/a.txt"}), None);
+        decide(&note, &verifier, None);
+        assert_eq!(sink.len(), 3);
+
+        let pass = r#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
+        decide(pass, &verifier, None);
+        assert_eq!(sink.len(), 3);
+    }
+
+    #[test]
+    fn batch_array_is_invalid_request() {
+        let line = r#"[{"jsonrpc":"2.0","id":1,"method":"tools/list"}]"#;
+        let response = error_of(decide(line, &verifier(), None));
+        assert_eq!(response["error"]["code"], JSONRPC_INVALID_REQUEST);
+        assert_eq!(response["id"], Value::Null);
+    }
 
     #[test]
     fn jsonrpc_error_shape() {
@@ -202,14 +538,13 @@ mod tests {
         assert_eq!(value["error"]["code"], JSONRPC_TOOLGATE_DENIED);
         assert_eq!(value["error"]["data"]["error_kind"], "expired");
         assert_eq!(value["id"], 1);
-        assert_eq!(value["jsonrpc"], "2.0");
     }
 
-    #[test]
-    fn parse_error_has_null_id_and_no_kind() {
-        let value = parse_error_response();
-        assert_eq!(value["id"], Value::Null);
-        assert_eq!(value["error"]["code"], JSONRPC_PARSE_ERROR);
-        assert!(value["error"].get("data").is_none());
+    fn action_text(action: &GateAction) -> String {
+        match action {
+            GateAction::Forward(text) => text.clone(),
+            GateAction::Respond(value) => value.to_string(),
+            GateAction::Drop => String::new(),
+        }
     }
 }

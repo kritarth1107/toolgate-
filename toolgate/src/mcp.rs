@@ -316,6 +316,29 @@ mod tests {
     }
 
     #[test]
+    fn token_from_meta_reads_tg1_and_json_token() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+        let compact = token.to_token_string();
+        let as_string = json!({
+            "params": {"_meta": {"toolgate": compact}}
+        });
+        let parsed = token_from_meta(&as_string).unwrap().unwrap();
+        assert_eq!(parsed.tool_name, "read_file");
+
+        let as_object = json!({
+            "params": {"_meta": {"toolgate": token}}
+        });
+        let parsed = token_from_meta(&as_object).unwrap().unwrap();
+        assert_eq!(parsed, token);
+
+        assert!(token_from_meta(&json!({"params": {}})).is_none());
+        assert!(matches!(
+            token_from_meta(&json!({"params": {"_meta": {"toolgate": 1}}})),
+            Some(Err(TokenError::MalformedRequest))
+        ));
+    }
+
+    #[test]
     fn check_tools_call_converts_bool_scalars() {
         let token = Token::mint(SECRET, "toggle", vec!["flag".into()], 2000000000);
         let request = tools_call("toggle", json!({"flag": true}));
