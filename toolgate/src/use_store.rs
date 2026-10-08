@@ -6,7 +6,7 @@
 //! [`FileUseStore`] is the durable, file-backed implementation.
 
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -104,6 +104,7 @@ pub fn parse_use_log(text: &str) -> io::Result<Vec<UseRecord>> {
 /// Persistence (load, append, compaction) is layered on this type.
 pub struct FileUseStore {
     path: PathBuf,
+    file: Option<File>,
     counts: HashMap<String, u64>,
     records: Vec<UseRecord>,
 }
@@ -124,6 +125,7 @@ impl FileUseStore {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         FileUseStore {
             path: path.into(),
+            file: None,
             counts: HashMap::new(),
             records: Vec::new(),
         }
@@ -141,13 +143,28 @@ impl FileUseStore {
             Err(err) => return Err(err),
         };
         let records = parse_use_log(&text)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
         let mut store = FileUseStore {
             path,
+            file: Some(file),
             counts: HashMap::new(),
             records,
         };
         store.rebuild_counts();
         Ok(store)
+    }
+
+    fn persist(&mut self, record: &UseRecord) -> io::Result<()> {
+        let Some(file) = self.file.as_mut() else {
+            return Ok(());
+        };
+        let mut line = serde_json::to_string(record)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        line.push('\n');
+        file.write_all(line.as_bytes())?;
+        file.flush()?;
+        file.sync_all()?;
+        Ok(())
     }
 
     fn rebuild_counts(&mut self) {
@@ -184,17 +201,22 @@ impl FileUseStore {
     }
 
     fn accept(&mut self, jti: &str, max_uses: u64, expiry: u64) -> UseResult {
-        let count = self.counts.entry(jti.to_string()).or_insert(0);
-        if *count >= max_uses {
-            UseResult::Exceeded
-        } else {
-            *count += 1;
-            self.records.push(UseRecord {
-                jti: jti.to_string(),
-                expiry,
-            });
-            UseResult::Accepted
+        let count = self.counts.get(jti).copied().unwrap_or(0);
+        if count >= max_uses {
+            return UseResult::Exceeded;
         }
+        let record = UseRecord {
+            jti: jti.to_string(),
+            expiry,
+        };
+        // Persist before the in-memory count moves so a write failure cannot
+        // accept a use that will vanish on the next restart.
+        if self.persist(&record).is_err() {
+            return UseResult::Exceeded;
+        }
+        *self.counts.entry(jti.to_string()).or_insert(0) += 1;
+        self.records.push(record);
+        UseResult::Accepted
     }
 }
 
