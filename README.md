@@ -547,6 +547,80 @@ echo '{
 
 Error kinds: `invalid_mac`, `expired`, `not_yet_valid`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `constraint_violation`, `revoked`, `missing_jti`, `max_depth_exceeded`, `malformed_request`, `policy_denied`.
 
+### Gate (stdio MCP)
+
+`tg gate` sits in front of a local stdio MCP server. It reads newline-delimited JSON-RPC from the client, forwards everything that is not `tools/call`, and checks `tools/call` against a token at `params._meta.toolgate` (`tg1.` string or JSON token). Allowed calls are forwarded with `_meta.toolgate` stripped so the child never sees the secret. Denied calls are answered by the gate with a JSON-RPC error (same `id`, stable `error.code`, `data.error_kind`). Denied notifications (no `id`) are dropped.
+
+The shared secret comes from `TG_SECRET` (the existing `hex:` form is accepted). It is never taken from argv.
+
+```bash
+export TG_SECRET=my-shared-secret
+
+# Mint a compact token for the client to place in params._meta.toolgate
+echo '{
+  "secret": "my-shared-secret",
+  "tool_name": "read_file",
+  "arg_keys": ["path", "limit"],
+  "expiry": 2000000000
+}' | tg mint | jq '{token}' | tg encode
+# {"token":"tg1...."}
+
+# Front a local stdio MCP server
+tg gate --policy examples/policy.json --audience agent-runtime --leeway 30 \
+  --audit-jsonl /tmp/decisions.jsonl -- \
+  ./my-mcp-server
+```
+
+A client `tools/call` looks like:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "read_file",
+    "arguments": {"path": "/tmp/a.txt", "limit": 10},
+    "_meta": {"toolgate": "tg1...."}
+  }
+}
+```
+
+The child receives the same request with `_meta.toolgate` removed. A missing or invalid token is not forwarded; the client gets:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32040,
+    "message": "malformed request",
+    "data": {"error_kind": "malformed_request"}
+  }
+}
+```
+
+Library path (same rules, no I/O) is `toolgate::decide`:
+
+```rust
+use toolgate::{decide, GateAction, Verifier};
+
+let action = decide(&line, &verifier, Some(&policy));
+match action {
+    GateAction::Forward(msg) => { /* write msg to the server */ }
+    GateAction::Respond(err) => { /* write err to the client */ }
+    GateAction::Drop => {}
+}
+```
+
+#### JSON-RPC error codes
+
+| `error.code` | When | `error.data.error_kind` |
+|--------------|------|-------------------------|
+| `-32700` | Client line is not JSON | omitted |
+| `-32600` | JSON-RPC batch (array); not supported | omitted |
+| `-32040` | `tools/call` missing a token, or the token/policy check failed | existing kinds: `malformed_request`, `invalid_mac`, `expired`, `not_yet_valid`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `constraint_violation`, `revoked`, `missing_jti`, `max_depth_exceeded`, `policy_denied`, … |
+
 ### Audit JSONL
 
 `tg check`, `tg check-call`, and `tg check-mcp` accept `--audit-jsonl TARGET` to write one `Decision` per line after the command JSON. `TARGET` is `stdout`, `stderr`, or a file path (created/appended). Argument values are redacted by default. Pass `--audit-redact-keys path,token` to redact only those keys.
@@ -710,19 +784,23 @@ Verifier::new(secret).audit(&sink).redaction(&redaction);
 The `mcp` feature (on by default, pulls `serde_json`) checks a JSON-RPC `tools/call` request against a token:
 
 ```rust
-use toolgate::{check_tools_call, token_string_from_meta, Verifier};
+use toolgate::{check_tools_call, token_from_meta, token_string_from_meta, Verifier};
 
-let compact = token_string_from_meta(&request); // params._meta.toolgate, if present
+let compact = token_string_from_meta(&request); // params._meta.toolgate, if a string
+let token = token_from_meta(&request);          // tg1. string or JSON token object
 let info = check_tools_call(&verifier, &token, &request)?;
 ```
 
 `check_tools_call` extracts `params.name` and `params.arguments`. Scalar values become strings (strings as-is, integers in decimal, bools as `true`/`false`) for constraint checks. Nested object or array values are allowed on unconstrained keys for allowlist checking, and rejected as `MalformedRequest` when the key has a constraint. Non-`tools/call` methods and a missing name are also `MalformedRequest`. The helper inspects the request only; it does not dispatch the tool.
 
+[`decide`](#gate-stdio-mcp) is the stdio gate: one client line in, `Forward` / `Respond` / `Drop` out. It uses the same verifier, optional policy, and audit sink.
+
 ## Limits
 
-- **Shared secret**: This is a symmetric-key system. All parties that mint or verify tokens share the same secret.
+- **Shared secret**: This is a symmetric-key system. All parties that mint or verify tokens share the same secret. The stdio gate reads that secret from `TG_SECRET`; the model is unchanged.
 - **Not a public-key system**: Tokens cannot be verified without the secret.
-- **Not a full MCP gateway**: This library only handles token issuance and verification. The MCP helper inspects a `tools/call` request and does not dispatch tools, validate transport, or implement a server.
+- **Line-oriented stdio gate only**: `tg gate` / `decide` sit in front of a local child process. They inspect newline-delimited JSON-RPC (one object per line). There is no HTTP or SSE transport. JSON-RPC batch arrays are rejected (`-32600`). Server responses are copied through and not validated. JSON strings must not contain raw newlines.
+- **Not a hosted gateway**: The gate does not dispatch tools, open a network listener, or run as a service. `check_tools_call` still only inspects a request.
 - **Nonce is random, not sequential**: Each mint/attenuate generates a fresh random nonce.
 
 ## Version History
