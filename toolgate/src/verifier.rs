@@ -248,21 +248,6 @@ impl<'a> Verifier<'a> {
         result
     }
 
-    /// Like [`Self::verify_extracted_call`], also confirming `token` is within `policy`.
-    pub(crate) fn verify_extracted_call_against_policy(
-        &self,
-        token: &Token,
-        policy: &Policy,
-        tool: &str,
-        arg_keys: &[&str],
-        args: &BTreeMap<String, String>,
-    ) -> Result<(), TokenError> {
-        let result =
-            self.authorize_extracted_call_against_policy(token, policy, tool, arg_keys, args);
-        self.record(token, Some(tool), Some(args), &result);
-        result
-    }
-
     /// Record a deny when no usable token was present (missing or unparseable).
     pub fn record_unauthenticated(
         &self,
