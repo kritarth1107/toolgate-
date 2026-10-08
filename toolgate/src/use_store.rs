@@ -2,9 +2,13 @@
 //!
 //! The `UseStore` trait defines an interface for tracking how many times a token
 //! has been used. Implementations can enforce single-use or max-uses policies
-//! to prevent token replay attacks.
+//! to prevent token replay attacks. [`MemoryUseStore`] keeps counts in process;
+//! [`FileUseStore`] is the durable, file-backed implementation.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
 
 /// Result of attempting to consume a token use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,11 +33,123 @@ pub trait UseStore {
     /// token can be used. A value of 1 means single-use.
     fn try_use(&mut self, jti: &str, max_uses: u64) -> UseResult;
 
+    /// Record a use together with the token expiry (unix seconds).
+    ///
+    /// Persistent stores keep `expiry` so expired entries can be dropped later.
+    /// The default implementation ignores expiry and calls [`UseStore::try_use`].
+    fn try_use_with_expiry(&mut self, jti: &str, max_uses: u64, expiry: u64) -> UseResult {
+        let _ = expiry;
+        self.try_use(jti, max_uses)
+    }
+
     /// Get the current use count for a token.
     fn get_count(&self, jti: &str) -> u64;
 
     /// Reset the use count for a token (e.g., for testing).
     fn reset(&mut self, jti: &str);
+}
+
+/// One accepted use recorded by a [`FileUseStore`].
+///
+/// The log is JSONL: one of these objects per line. `expiry` is the token's
+/// unix-second expiry so a later open can drop records that can no longer
+/// be presented.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UseRecord {
+    pub jti: String,
+    pub expiry: u64,
+}
+
+/// File-backed [`UseStore`].
+///
+/// Counts are keyed by `jti`. Each accepted use is represented as a
+/// [`UseRecord`] so a durable log can rebuild the same counts after a restart.
+/// Persistence (load, append, compaction) is layered on this type.
+pub struct FileUseStore {
+    path: PathBuf,
+    counts: HashMap<String, u64>,
+    records: Vec<UseRecord>,
+}
+
+impl std::fmt::Debug for FileUseStore {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FileUseStore")
+            .field("path", &self.path)
+            .field("tracked", &self.counts.len())
+            .finish()
+    }
+}
+
+impl FileUseStore {
+    /// Create an empty store associated with `path`.
+    ///
+    /// The file is not read or created until a later open/append step.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        FileUseStore {
+            path: path.into(),
+            counts: HashMap::new(),
+            records: Vec::new(),
+        }
+    }
+
+    /// Path this store will persist to.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Accepted-use records currently held in memory.
+    pub fn records(&self) -> &[UseRecord] {
+        &self.records
+    }
+
+    /// Number of distinct tracked token ids.
+    pub fn len(&self) -> usize {
+        self.counts.len()
+    }
+
+    /// Whether any token id is tracked.
+    pub fn is_empty(&self) -> bool {
+        self.counts.is_empty()
+    }
+
+    /// Drop every in-memory count and record.
+    pub fn clear(&mut self) {
+        self.counts.clear();
+        self.records.clear();
+    }
+
+    fn accept(&mut self, jti: &str, max_uses: u64, expiry: u64) -> UseResult {
+        let count = self.counts.entry(jti.to_string()).or_insert(0);
+        if *count >= max_uses {
+            UseResult::Exceeded
+        } else {
+            *count += 1;
+            self.records.push(UseRecord {
+                jti: jti.to_string(),
+                expiry,
+            });
+            UseResult::Accepted
+        }
+    }
+}
+
+impl UseStore for FileUseStore {
+    fn try_use(&mut self, jti: &str, max_uses: u64) -> UseResult {
+        self.try_use_with_expiry(jti, max_uses, u64::MAX)
+    }
+
+    fn try_use_with_expiry(&mut self, jti: &str, max_uses: u64, expiry: u64) -> UseResult {
+        self.accept(jti, max_uses, expiry)
+    }
+
+    fn get_count(&self, jti: &str) -> u64 {
+        *self.counts.get(jti).unwrap_or(&0)
+    }
+
+    fn reset(&mut self, jti: &str) {
+        self.counts.remove(jti);
+        self.records.retain(|record| record.jti != jti);
+    }
 }
 
 /// In-memory implementation of `UseStore`.
