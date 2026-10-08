@@ -227,7 +227,7 @@ impl Keyring {
     /// Load a JSON keyring file (see [`parse_keyring_file`]).
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, KeyringFileError> {
         let path = path.as_ref();
-        let text = std::fs::read_to_string(path)
+        let text = fs::read_to_string(path)
             .map_err(|e| KeyringFileError::Io(format!("{}: {e}", path.display())))?;
         parse_keyring_file(&text)
     }
@@ -858,5 +858,129 @@ mod tests {
 
         let time = VerifyTime::unix_with_leeway(1010, Duration::from_secs(15));
         assert!(keyring.verify_at(&token, &time, None).is_ok());
+    }
+
+    #[test]
+    fn parse_keyring_file_loads_keys_and_active() {
+        let keyring = parse_keyring_file(
+            r#"{
+                "keys": {
+                    "key-a": "secret-a-32-bytes-long!!!!!!!!",
+                    "key-b": "secret-b-32-bytes-long!!!!!!!!"
+                },
+                "active": "key-b"
+            }"#,
+        )
+        .unwrap();
+        assert!(keyring.contains_key("key-a"));
+        assert!(keyring.contains_key("key-b"));
+        assert_eq!(keyring.active_kid(), Some("key-b"));
+        assert_eq!(
+            keyring.get_secret("key-a"),
+            Some(b"secret-a-32-bytes-long!!!!!!!!".as_slice())
+        );
+    }
+
+    #[test]
+    fn parse_keyring_file_decodes_hex_prefix() {
+        let keyring = parse_keyring_file(
+            r#"{
+                "keys": {
+                    "hex-key": "hex:7365637265742d686578"
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            keyring.get_secret("hex-key"),
+            Some(b"secret-hex".as_slice())
+        );
+        assert_eq!(keyring.active_kid(), Some("hex-key"));
+    }
+
+    #[test]
+    fn parse_keyring_file_omitted_active_uses_first_key() {
+        let keyring = parse_keyring_file(
+            r#"{
+                "keys": {
+                    "key-z": "secret-z",
+                    "key-a": "secret-a"
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(keyring.active_kid(), Some("key-a"));
+    }
+
+    #[test]
+    fn parse_keyring_file_rejects_empty_keys() {
+        let err = parse_keyring_file(r#"{"keys":{}}"#).unwrap_err();
+        assert_eq!(err, KeyringFileError::Empty);
+    }
+
+    #[test]
+    fn parse_keyring_file_rejects_unknown_active() {
+        let err = parse_keyring_file(
+            r#"{
+                "keys": {"key-a": "secret-a"},
+                "active": "missing"
+            }"#,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            KeyringFileError::UnknownActive {
+                kid: "missing".into()
+            }
+        );
+    }
+
+    #[test]
+    fn parse_keyring_file_rejects_invalid_hex() {
+        let err = parse_keyring_file(
+            r#"{
+                "keys": {"key-a": "hex:zz"}
+            }"#,
+        )
+        .unwrap_err();
+        assert!(matches!(err, KeyringFileError::InvalidHex { kid, .. } if kid == "key-a"));
+    }
+
+    #[test]
+    fn parse_keyring_file_rejects_invalid_json() {
+        let err = parse_keyring_file("{not-json").unwrap_err();
+        assert!(matches!(err, KeyringFileError::InvalidJson(_)));
+    }
+
+    #[test]
+    fn parse_keyring_file_rejects_empty_kid() {
+        let err = parse_keyring_file(r#"{"keys":{"":"secret"}}"#).unwrap_err();
+        assert_eq!(err, KeyringFileError::EmptyKeyId);
+    }
+
+    #[test]
+    fn from_file_reads_keyring_json() {
+        let path = std::env::temp_dir().join(format!(
+            "toolgate-keyring-{}-{}-{}.json",
+            std::process::id(),
+            "from-file",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(
+            &path,
+            r#"{"keys":{"key-1":"plain-secret","key-2":"hex:616263"},"active":"key-2"}"#,
+        )
+        .unwrap();
+        let keyring = Keyring::from_file(&path).unwrap();
+        assert_eq!(keyring.active_kid(), Some("key-2"));
+        assert_eq!(
+            keyring.get_secret("key-1"),
+            Some(b"plain-secret".as_slice())
+        );
+        assert_eq!(keyring.get_secret("key-2"), Some(b"abc".as_slice()));
+        let _ = fs::remove_file(&path);
     }
 }
