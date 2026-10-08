@@ -10,8 +10,8 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use toolgate::{
     append_revoked_jti, check_tools_call, decide, decide_with_replay, AuditSink, Constraints,
-    Decision, GateAction, JsonlAuditSink, MemoryAuditSink, MemoryUseStore, Policy, Redaction,
-    RevocationFile, RevocationList, Token, TokenStringError, UseStore, Verifier,
+    Decision, GateAction, JsonlAuditSink, KeyringFile, MemoryAuditSink, MemoryUseStore, Policy,
+    Redaction, RevocationFile, RevocationList, Token, TokenStringError, UseStore, Verifier,
 };
 
 #[derive(Parser)]
@@ -62,6 +62,9 @@ enum Commands {
         /// Policy file applied to every tools/call
         #[arg(long, value_name = "FILE")]
         policy: Option<PathBuf>,
+        /// JSON keyring file (kid → secret; reloaded when the file changes)
+        #[arg(long, value_name = "FILE")]
+        keyring: Option<PathBuf>,
         /// Expected token audience
         #[arg(long, value_name = "A")]
         audience: Option<String>,
@@ -305,12 +308,24 @@ fn main() {
         },
         Commands::Gate {
             policy,
+            keyring,
             audience,
             leeway,
             revoked,
             max_uses,
             server,
-        } => handle_gate(policy, audience, leeway, revoked, max_uses, server, &audit),
+        } => handle_gate(
+            GateOpts {
+                policy,
+                keyring,
+                audience,
+                leeway,
+                revoked,
+                max_uses,
+                server,
+            },
+            &audit,
+        ),
         Commands::Revoke { token_or_jti, file } => handle_revoke(token_or_jti, file),
     };
 
@@ -620,39 +635,62 @@ fn jti_from_token_or_id(input: &str) -> Result<String, Box<dyn std::error::Error
 
 const TG_SECRET_ENV: &str = "TG_SECRET";
 
-fn handle_gate(
-    policy_path: Option<PathBuf>,
+struct GateOpts {
+    policy: Option<PathBuf>,
+    keyring: Option<PathBuf>,
     audience: Option<String>,
     leeway: Option<u64>,
-    revoked_path: Option<PathBuf>,
+    revoked: Option<PathBuf>,
     max_uses: Option<u64>,
     server: Vec<String>,
-    audit: &AuditOpts,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let secret_raw = std::env::var(TG_SECRET_ENV).map_err(|_| {
-        format!("{TG_SECRET_ENV} is required (do not pass the secret on the command line)")
-    })?;
-    let secret = decode_secret(&secret_raw);
-    let policy = match policy_path {
+}
+
+fn handle_gate(opts: GateOpts, audit: &AuditOpts) -> Result<(), Box<dyn std::error::Error>> {
+    let secret_env = std::env::var(TG_SECRET_ENV).ok();
+    let (secret, mut keyring_file) = match (secret_env, opts.keyring) {
+        (Some(_), Some(_)) => {
+            return Err(
+                "TG_SECRET and --keyring cannot be used together (do not pass the secret on the command line)"
+                    .into(),
+            );
+        }
+        (None, None) => {
+            return Err(format!(
+                "{TG_SECRET_ENV} or --keyring is required (do not pass the secret on the command line)"
+            )
+            .into());
+        }
+        (Some(raw), None) => (decode_secret(&raw), None),
+        (None, Some(path)) => (Vec::new(), Some(KeyringFile::load(path)?)),
+    };
+    let policy = match opts.policy {
         Some(path) => Some(load_policy(&path)?),
         None => None,
     };
-    if let Some(0) = max_uses {
+    if let Some(0) = opts.max_uses {
         return Err("--max-uses must be greater than 0".into());
     }
-    let mut revoked_file = match revoked_path {
+    let mut revoked_file = match opts.revoked {
         Some(path) => Some(RevocationFile::load(path)?),
         None => None,
     };
     let mut use_store = MemoryUseStore::new();
-    let leeway = Duration::from_secs(leeway.unwrap_or(0));
+    let leeway = Duration::from_secs(opts.leeway.unwrap_or(0));
     let sink = MemoryAuditSink::new();
-    let code = run_gate_pump(server, |line| {
+    let code = run_gate_pump(opts.server, |line| {
         if let Some(file) = revoked_file.as_mut() {
             file.reload_if_changed()?;
         }
-        let mut verifier = Verifier::new(&secret).leeway(leeway);
-        if let Some(ref audience) = audience {
+        if let Some(file) = keyring_file.as_mut() {
+            file.reload_if_changed();
+        }
+        let mut verifier = match keyring_file.as_ref() {
+            Some(file) => Verifier::new(&secret)
+                .keyring(file.keyring())
+                .leeway(leeway),
+            None => Verifier::new(&secret).leeway(leeway),
+        };
+        if let Some(ref audience) = opts.audience {
             verifier = verifier.audience(audience);
         }
         if let Some(ref file) = revoked_file {
@@ -661,7 +699,7 @@ fn handle_gate(
         if audit.target.is_some() {
             verifier = verifier.audit(&sink).redaction(&audit.redaction);
         }
-        let action = match max_uses {
+        let action = match opts.max_uses {
             Some(n) => decide_with_replay(
                 line,
                 &verifier,
