@@ -4,6 +4,10 @@
 //! has been used. Implementations can enforce single-use or max-uses policies
 //! to prevent token replay attacks. [`MemoryUseStore`] keeps counts in process;
 //! [`FileUseStore`] is the durable, file-backed implementation.
+//!
+//! [`FileUseStore`] takes an exclusive advisory lock on a sibling `.lock` file
+//! around open/rebuild and each append so two processes cannot interleave
+//! those critical sections. The lock is not held for the lifetime of the store.
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -140,11 +144,65 @@ fn rewrite_use_log(path: &Path, records: &[UseRecord]) -> io::Result<File> {
     OpenOptions::new().create(true).append(true).open(path)
 }
 
+/// Sibling lock path for a use-store JSONL file (`<path>.lock`).
+///
+/// The lock lives next to the log so rewrite/rename of the JSONL inode
+/// does not drop the flock.
+fn use_store_lock_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".lock");
+    PathBuf::from(name)
+}
+
+/// Exclusive advisory lock for one [`FileUseStore`] critical section.
+///
+/// `flock(LOCK_EX)` waits while another process holds the lock. Drop
+/// releases it. Acquisition or I/O failure is returned — never ignored.
+struct UseStoreLock {
+    _file: File,
+}
+
+impl UseStoreLock {
+    fn acquire(path: &Path) -> io::Result<Self> {
+        let lock_path = use_store_lock_path(path);
+        let file = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        flock_exclusive(&file)?;
+        Ok(UseStoreLock { _file: file })
+    }
+}
+
+#[cfg(unix)]
+fn flock_exclusive(file: &File) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn flock_exclusive(_file: &File) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "FileUseStore advisory locks require flock (unix)",
+    ))
+}
+
 /// File-backed [`UseStore`].
 ///
 /// Counts are keyed by `jti`. Each accepted use is represented as a
 /// [`UseRecord`] so a durable log can rebuild the same counts after a restart.
 /// Persistence (load, append, compaction) is layered on this type.
+///
+/// Open/rebuild and each append take an exclusive advisory lock on
+/// `<path>.lock` (via `flock`). Contended callers wait. A lock or I/O
+/// error fails the operation — the store never fails open.
 pub struct FileUseStore {
     path: PathBuf,
     file: Option<File>,
@@ -187,8 +245,12 @@ impl FileUseStore {
     }
 
     /// [`FileUseStore::open`] using an explicit unix timestamp for compaction.
+    ///
+    /// Holds the exclusive sibling lock for the duration of the read,
+    /// optional rewrite, and file reopen.
     pub fn open_at(path: impl Into<PathBuf>, now: u64) -> io::Result<Self> {
         let path = path.into();
+        let _lock = UseStoreLock::acquire(&path)?;
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
@@ -213,6 +275,7 @@ impl FileUseStore {
     }
 
     fn persist(&mut self, record: &UseRecord) -> io::Result<()> {
+        let _lock = UseStoreLock::acquire(&self.path)?;
         let Some(file) = self.file.as_mut() else {
             return Ok(());
         };
