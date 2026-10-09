@@ -17,7 +17,7 @@
 //! | audience | u16 length + UTF-8 bytes (0 = none) |
 //! | kid | u16 length + UTF-8 bytes (0 = none) |
 //! | constraints_count | u16 (0 = none) |
-//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen) |
+//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches) |
 //! | jti | u16 length + UTF-8 bytes (0 = none) |
 //! | nbf_flag | u8 (v5 only; 0 = none, 1 = present) |
 //! | nbf | u64 (v5 only, if nbf_flag = 1) |
@@ -115,8 +115,9 @@ fn encode_constraint_to_wire(buf: &mut Vec<u8>, key: &str, constraint: &Constrai
             buf.push(7); // type = MinLen
             buf.extend_from_slice(&(*min as u64).to_be_bytes());
         }
-        Constraint::Matches(_) => {
-            panic!("matches wire encoding is not implemented yet")
+        Constraint::Matches(pattern) => {
+            buf.push(8); // type = Matches
+            encode_len_prefixed(buf, pattern);
         }
     }
 }
@@ -211,6 +212,14 @@ fn decode_constraint_from_wire(
             // MinLen
             let min = u64::from_be_bytes(read_bytes(pos, 8)?.try_into().unwrap()) as usize;
             Constraint::MinLen(min)
+        }
+        8 => {
+            // Matches
+            let pattern_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
+            let pattern_bytes = read_bytes(pos, pattern_len)?;
+            let pattern =
+                String::from_utf8(pattern_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
+            Constraint::Matches(pattern)
         }
         _ => return Err(WireError::UnexpectedEof), // Invalid constraint type
     };
@@ -812,6 +821,31 @@ mod tests {
             SECRET,
             "search",
             vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn wire_roundtrip_constraint_matches() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("name".to_string(), Constraint::Matches("*.txt".to_string()));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["name".into()],
             2000000000,
             None,
             None,

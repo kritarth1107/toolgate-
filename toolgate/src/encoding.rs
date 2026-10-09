@@ -20,7 +20,7 @@
 //! - constraints_count: u16
 //! - for each constraint (sorted by key):
 //!   - key: u16 length + UTF-8 bytes
-//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen)
+//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches)
 //!   - constraint_data: type-specific encoding
 //!
 //! Format v5 (backward-compatible extension):
@@ -45,6 +45,7 @@
 //! - Suffix: u16 length + UTF-8 bytes
 //! - Contains: u16 length + UTF-8 bytes
 //! - MinLen: u64
+//! - Matches: u16 length + UTF-8 bytes
 //!
 //! The v5 format appends jti after constraints. Tokens without jti
 //! encode identically to v4. Tokens without constraints and without jti
@@ -312,8 +313,9 @@ fn encode_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
             buf.push(7); // type = MinLen
             buf.extend_from_slice(&(*min as u64).to_be_bytes());
         }
-        Constraint::Matches(_) => {
-            panic!("matches canonical encoding is not implemented yet")
+        Constraint::Matches(pattern) => {
+            buf.push(8); // type = Matches
+            encode_len_prefixed(buf, pattern);
         }
     }
 }
@@ -641,6 +643,22 @@ mod tests {
     }
 
     #[test]
+    fn encoding_constraint_matches() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("name".to_string(), Constraint::Matches("*.txt".to_string()));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'n', b'a', b'm', b'e', // key "name"
+            0x08, // type = Matches
+            0x00, 0x05, b'*', b'.', b't', b'x', b't', // pattern "*.txt"
+        ]));
+    }
+
+    #[test]
     fn encoding_without_minlen_identical_to_prior() {
         // Tokens that do not use MinLen must keep the 0.16.0 bytes.
         use std::collections::BTreeMap;
@@ -659,6 +677,22 @@ mod tests {
             0x00, 0x04, b'p', b'a', b't', b'h', // key "path"
             0x06, // type = Contains
             0x00, 0x03, b't', b'm', b'p', // needle "tmp"
+        ]));
+    }
+
+    #[test]
+    fn encoding_without_matches_identical_to_prior() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("q".to_string(), Constraint::MinLen(8));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x01, b'q', // key "q"
+            0x07, // type = MinLen
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, // u64 8
         ]));
     }
 
