@@ -687,6 +687,14 @@ fn jti_from_token_or_id(input: &str) -> Result<String, Box<dyn std::error::Error
 }
 
 const TG_SECRET_ENV: &str = "TG_SECRET";
+const TG_POLICY_ENV: &str = "TG_POLICY";
+const TG_KEYRING_ENV: &str = "TG_KEYRING";
+const TG_REVOKED_ENV: &str = "TG_REVOKED";
+const TG_USE_STORE_ENV: &str = "TG_USE_STORE";
+const TG_MAX_USES_ENV: &str = "TG_MAX_USES";
+const TG_AUDIENCE_ENV: &str = "TG_AUDIENCE";
+const TG_LEEWAY_ENV: &str = "TG_LEEWAY";
+const TG_AUDIT_JSONL_ENV: &str = "TG_AUDIT_JSONL";
 
 struct GateOpts {
     policy: Option<PathBuf>,
@@ -699,18 +707,95 @@ struct GateOpts {
     server: Vec<String>,
 }
 
+/// Missing or empty env vars are treated as unset.
+fn env_nonempty(name: &str) -> Option<String> {
+    match std::env::var(name) {
+        Ok(value) if !value.is_empty() => Some(value),
+        _ => None,
+    }
+}
+
+fn flag_or_env_path(flag: Option<PathBuf>, env_name: &str) -> Option<PathBuf> {
+    flag.or_else(|| env_nonempty(env_name).map(PathBuf::from))
+}
+
+fn flag_or_env_string(flag: Option<String>, env_name: &str) -> Option<String> {
+    flag.or_else(|| env_nonempty(env_name))
+}
+
+fn resolve_positive_int_env(
+    flag: Option<u64>,
+    env_name: &str,
+) -> Result<Option<u64>, Box<dyn std::error::Error>> {
+    if let Some(n) = flag {
+        return Ok(Some(n));
+    }
+    match env_nonempty(env_name) {
+        None => Ok(None),
+        Some(raw) => {
+            let n: u64 = raw
+                .parse()
+                .map_err(|_| format!("invalid {env_name}: {raw:?} (must be a positive integer)"))?;
+            if n == 0 {
+                return Err(format!("{env_name} must be a positive integer").into());
+            }
+            Ok(Some(n))
+        }
+    }
+}
+
+fn resolve_seconds_env(
+    flag: Option<u64>,
+    env_name: &str,
+) -> Result<Option<u64>, Box<dyn std::error::Error>> {
+    if let Some(n) = flag {
+        return Ok(Some(n));
+    }
+    match env_nonempty(env_name) {
+        None => Ok(None),
+        Some(raw) => {
+            let n: u64 = raw.parse().map_err(|_| {
+                format!("invalid {env_name}: {raw:?} (must be a number of seconds)")
+            })?;
+            Ok(Some(n))
+        }
+    }
+}
+
+fn resolve_gate_opts(opts: GateOpts) -> Result<GateOpts, Box<dyn std::error::Error>> {
+    Ok(GateOpts {
+        policy: flag_or_env_path(opts.policy, TG_POLICY_ENV),
+        keyring: flag_or_env_path(opts.keyring, TG_KEYRING_ENV),
+        audience: flag_or_env_string(opts.audience, TG_AUDIENCE_ENV),
+        leeway: resolve_seconds_env(opts.leeway, TG_LEEWAY_ENV)?,
+        revoked: flag_or_env_path(opts.revoked, TG_REVOKED_ENV),
+        max_uses: resolve_positive_int_env(opts.max_uses, TG_MAX_USES_ENV)?,
+        use_store: flag_or_env_path(opts.use_store, TG_USE_STORE_ENV),
+        server: opts.server,
+    })
+}
+
+fn resolve_gate_audit(audit: &AuditOpts) -> AuditOpts {
+    AuditOpts {
+        target: flag_or_env_string(audit.target.clone(), TG_AUDIT_JSONL_ENV),
+        redaction: audit.redaction.clone(),
+    }
+}
+
 fn handle_gate(opts: GateOpts, audit: &AuditOpts) -> Result<(), Box<dyn std::error::Error>> {
+    let opts = resolve_gate_opts(opts)?;
+    let audit = resolve_gate_audit(audit);
     let secret_env = std::env::var(TG_SECRET_ENV).ok();
     let (secret, mut keyring_file) = match (secret_env, opts.keyring) {
         (Some(_), Some(_)) => {
             return Err(
-                "TG_SECRET and --keyring cannot be used together (do not pass the secret on the command line)"
+                "TG_SECRET and --keyring / TG_KEYRING cannot be used together (do not pass the secret on the command line)"
                     .into(),
             );
         }
         (None, None) => {
             return Err(format!(
-                "{TG_SECRET_ENV} or --keyring is required (do not pass the secret on the command line)"
+                "{TG_SECRET_ENV} or --keyring / {TG_KEYRING_ENV} is required (do not pass the secret on the command line)"
             )
             .into());
         }
@@ -725,7 +810,7 @@ fn handle_gate(opts: GateOpts, audit: &AuditOpts) -> Result<(), Box<dyn std::err
         return Err("--max-uses must be greater than 0".into());
     }
     if opts.use_store.is_some() && opts.max_uses.is_none() {
-        return Err("--use-store requires --max-uses".into());
+        return Err("--use-store / TG_USE_STORE requires --max-uses or TG_MAX_USES".into());
     }
     let mut revoked_file = match opts.revoked {
         Some(path) => Some(RevocationFile::load(path)?),
@@ -775,7 +860,7 @@ fn handle_gate(opts: GateOpts, audit: &AuditOpts) -> Result<(), Box<dyn std::err
             None => decide(line, &verifier, policy),
         };
         if audit.target.is_some() {
-            emit_audit(audit, &sink)?;
+            emit_audit(&audit, &sink)?;
             sink.clear();
         }
         Ok(action)
