@@ -669,6 +669,35 @@ mod tests {
     }
 
     #[test]
+    fn json_minlen() {
+        let c = Constraint::MinLen(8);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"min_len\""));
+        assert!(json.contains("\"value\":8"));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint = serde_json::from_str(r#"{"type":"min_len","value":0}"#).unwrap();
+        assert_eq!(from_cli, Constraint::MinLen(0));
+    }
+
+    #[test]
+    fn json_matches() {
+        let c = Constraint::Matches("pat*tern".to_string());
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"matches\""));
+        assert!(json.contains("\"value\":\"pat*tern\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"matches","value":"*.txt"}"#).unwrap();
+        assert_eq!(from_cli, Constraint::Matches("*.txt".to_string()));
+    }
+
+    #[test]
     fn json_constraints_map() {
         let mut constraints: Constraints = BTreeMap::new();
         constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));

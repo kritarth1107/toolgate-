@@ -74,7 +74,7 @@ pub enum PolicyError {
     DuplicateTool { name: String },
     /// A constraint is attached to a key that is not in the grant's allowlist.
     ConstraintKeyNotAllowed { tool: String, key: String },
-    /// A suffix or contains constraint has an empty needle.
+    /// A suffix, contains, or matches constraint has an empty pattern.
     EmptyConstraintPattern { tool: String, key: String },
     /// A TTL (default or per-grant) is present and zero.
     ZeroTtl {
@@ -115,7 +115,7 @@ impl std::fmt::Display for PolicyError {
             PolicyError::EmptyConstraintPattern { tool, key } => {
                 write!(
                     f,
-                    "empty suffix/contains constraint for '{key}' on tool '{tool}' is rejected"
+                    "empty suffix/contains/matches constraint for '{key}' on tool '{tool}' is rejected"
                 )
             }
             PolicyError::ZeroTtl { tool: Some(tool) } => {
@@ -679,6 +679,57 @@ mod tests {
             Err(PolicyError::EmptyConstraintPattern {
                 tool: "read_file".into(),
                 key: "path".into()
+            })
+        );
+    }
+
+    #[test]
+    fn from_json_parses_min_len_and_matches() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 60,
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["name", "query"],
+                    "constraints": {
+                        "name": {"type": "matches", "value": "*.txt"},
+                        "query": {"type": "min_len", "value": 3}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        policy.validate().unwrap();
+        let grant = policy.grant("read_file").unwrap();
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("name"),
+            Some(&Constraint::Matches("*.txt".into()))
+        );
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("query"),
+            Some(&Constraint::MinLen(3))
+        );
+    }
+
+    #[test]
+    fn validate_empty_matches_is_rejected() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["name"],
+                    "constraints": {"name": {"type": "matches", "value": ""}}
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.validate(),
+            Err(PolicyError::EmptyConstraintPattern {
+                tool: "read_file".into(),
+                key: "name".into()
             })
         );
     }

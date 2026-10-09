@@ -1818,3 +1818,163 @@ fn attenuate_rejects_empty_suffix_and_contains() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+fn mint_minlen_matches_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["name", "query"],
+            "expiry": 2000000000,
+            "constraints": {
+                "name": {"type": "matches", "value": "*.txt"},
+                "query": {"type": "min_len", "value": 3}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+#[test]
+fn mint_accepts_min_len_and_matches_constraints() {
+    let token = mint_minlen_matches_token();
+    assert_eq!(token["constraints"]["name"]["type"], "matches");
+    assert_eq!(token["constraints"]["name"]["value"], "*.txt");
+    assert_eq!(token["constraints"]["query"]["type"], "min_len");
+    assert_eq!(token["constraints"]["query"]["value"], 3);
+}
+
+#[test]
+fn check_call_enforces_min_len_and_matches() {
+    let token = mint_minlen_matches_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"name": "notes.txt", "query": "abc"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied_glob = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"name": "notes.pdf", "query": "abc"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied_glob.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied_glob.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+
+    let denied_len = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"name": "notes.txt", "query": "ab"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied_len.get("authorized"), Some(&Value::Bool(false)));
+}
+
+#[test]
+fn attenuate_can_raise_min_len_and_replace_matches_with_exact() {
+    let token = mint_minlen_matches_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "name": {"type": "exact", "value": "notes.txt"},
+                "query": {"type": "min_len", "value": 8}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(attenuated["constraints"]["name"]["type"], "exact");
+    assert_eq!(attenuated["constraints"]["name"]["value"], "notes.txt");
+    assert_eq!(attenuated["constraints"]["query"]["value"], 8);
+}
+
+#[test]
+fn attenuate_rejects_looser_min_len_and_changed_matches() {
+    let token = mint_minlen_matches_token();
+    let min_len = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"query": {"type": "min_len", "value": 1}}
+        }),
+    );
+    assert!(!min_len.status.success());
+    assert!(
+        String::from_utf8_lossy(&min_len.stderr).contains("attenuation"),
+        "looser min_len should fail closed: {}",
+        String::from_utf8_lossy(&min_len.stderr)
+    );
+
+    let matches = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"name": {"type": "matches", "value": "notes.txt"}}
+        }),
+    );
+    assert!(!matches.status.success());
+}
+
+#[test]
+fn mint_rejects_empty_matches() {
+    let out = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["name"],
+            "expiry": 2000000000,
+            "constraints": {"name": {"type": "matches", "value": ""}}
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("empty suffix/contains/matches"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn attenuate_rejects_empty_matches() {
+    let token = mint_minlen_matches_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"name": {"type": "matches", "value": ""}}
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("empty suffix/contains/matches"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
