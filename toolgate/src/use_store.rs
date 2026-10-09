@@ -64,6 +64,22 @@ pub trait UseStore {
     }
 }
 
+/// Snapshot of a [`FileUseStore`] log.
+///
+/// `expired_records` is counted against `now` (unix seconds) using the
+/// same rule as compaction: a record is expired when `now > expiry`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UseStoreStats {
+    /// Distinct `jti` values currently tracked.
+    pub unique_jtis: usize,
+    /// Number of accepted-use records in the log.
+    pub total_records: usize,
+    /// Records whose token expiry is already in the past.
+    pub expired_records: usize,
+    /// Path of the JSONL log.
+    pub path: PathBuf,
+}
+
 /// One accepted use recorded by a [`FileUseStore`].
 ///
 /// The log is JSONL: one of these objects per line. `expiry` is the token's
@@ -275,6 +291,49 @@ impl FileUseStore {
         };
         store.rebuild_counts();
         Ok(store)
+    }
+
+    /// Load `path` without compacting expired records.
+    ///
+    /// Use this to inspect a log (for [`FileUseStore::stats`]) without
+    /// rewriting it. [`open`] still drops expired records on start.
+    pub fn inspect(path: impl Into<PathBuf>) -> io::Result<Self> {
+        let path = path.into();
+        let _lock = UseStoreLock::acquire(&path)?;
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(err) => return Err(err),
+        };
+        let records = parse_use_log(&text)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let mut store = FileUseStore {
+            path,
+            file: Some(file),
+            counts: HashMap::new(),
+            records,
+            last_error: None,
+        };
+        store.rebuild_counts();
+        Ok(store)
+    }
+
+    /// Counts unique jtis, total records, and how many are expired at `now`.
+    ///
+    /// Does not rewrite the log. Call [`FileUseStore::inspect`] first if
+    /// the in-memory set should include records that [`open`] would drop.
+    pub fn stats(&self, now: u64) -> UseStoreStats {
+        let expired_records = self
+            .records
+            .iter()
+            .filter(|record| now > record.expiry)
+            .count();
+        UseStoreStats {
+            unique_jtis: self.counts.len(),
+            total_records: self.records.len(),
+            expired_records,
+            path: self.path.clone(),
+        }
     }
 
     /// Caller must hold [`UseStoreLock`] for `self.path`.

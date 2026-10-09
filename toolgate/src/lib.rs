@@ -99,6 +99,7 @@ pub use token::{Token, TokenError};
 pub use token_string::{TokenStringError, MAX_TOKEN_STRING_LEN, TOKEN_STRING_PREFIX};
 pub use use_store::{
     parse_use_log, parse_use_record, FileUseStore, MemoryUseStore, UseRecord, UseResult, UseStore,
+    UseStoreStats,
 };
 pub use verifier::Verifier;
 pub use wire::WireError;
