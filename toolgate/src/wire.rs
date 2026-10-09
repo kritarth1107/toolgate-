@@ -111,6 +111,9 @@ fn encode_constraint_to_wire(buf: &mut Vec<u8>, key: &str, constraint: &Constrai
             buf.push(6); // type = Contains
             encode_len_prefixed(buf, needle);
         }
+        Constraint::MinLen(_) => {
+            panic!("min_len wire encoding is not implemented yet")
+        }
     }
 }
 

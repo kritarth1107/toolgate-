@@ -307,6 +307,9 @@ fn encode_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
             buf.push(6); // type = Contains
             encode_len_prefixed(buf, needle);
         }
+        Constraint::MinLen(_) => {
+            panic!("min_len canonical encoding is not implemented yet")
+        }
     }
 }
 

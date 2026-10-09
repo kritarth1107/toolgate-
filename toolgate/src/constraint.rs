@@ -29,6 +29,11 @@ pub enum Constraint {
     Suffix(String),
     /// Value must contain the given UTF-8 substring.
     Contains(String),
+    /// Value must have at least this many bytes (UTF-8 length).
+    ///
+    /// `MinLen(0)` is valid and accepts every value, including the empty string.
+    #[serde(rename = "min_len")]
+    MinLen(usize),
 }
 
 impl Constraint {
@@ -49,6 +54,7 @@ impl Constraint {
             // Empty suffix/contains would match every string; fail closed.
             Constraint::Suffix(suffix) => !suffix.is_empty() && value.ends_with(suffix),
             Constraint::Contains(needle) => !needle.is_empty() && value.contains(needle),
+            Constraint::MinLen(min) => value.len() >= *min,
         }
     }
 
@@ -240,6 +246,31 @@ mod tests {
         assert!(c.check("hi"));
         assert!(c.check(""));
         assert!(!c.check("hello!"));
+    }
+
+    #[test]
+    fn minlen_check() {
+        let c = Constraint::MinLen(5);
+        assert!(c.check("hello"));
+        assert!(c.check("hello!"));
+        assert!(!c.check("hi"));
+        assert!(!c.check(""));
+    }
+
+    #[test]
+    fn minlen_zero_allows_empty() {
+        let c = Constraint::MinLen(0);
+        assert!(c.check(""));
+        assert!(c.check("x"));
+        assert!(c.check("hello"));
+    }
+
+    #[test]
+    fn minlen_uses_byte_length() {
+        // "é" is one Unicode scalar and two UTF-8 bytes.
+        let c = Constraint::MinLen(2);
+        assert!(c.check("é"));
+        assert!(!Constraint::MinLen(3).check("é"));
     }
 
     #[test]
