@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.0] - 2026-10-09
+
+### Added
+- **`Constraint::Suffix(String)`**: value must end with the given suffix
+- **`Constraint::Contains(String)`**: value must contain the given UTF-8 substring
+- CLI JSON forms `{"type":"suffix","value":"..."}` and `{"type":"contains","value":"..."}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6
+- Tokens without the new types still encode identically to 0.15.0
+
+### Notes
+- Attenuation only tightens: a new suffix must end with the old suffix, and a new contains needle must contain the old needle
+- Exact may replace Suffix or Contains when the exact value satisfies the previous constraint
+- Empty suffix/contains needles are rejected at mint/validate and never match a value (fail closed)
+
 ## [0.15.0] - 2026-10-09
 
 ### Added
