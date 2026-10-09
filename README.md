@@ -25,7 +25,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-toolgate = "0.15"
+toolgate = "0.16"
 ```
 
 Or install the CLI:
@@ -942,6 +942,7 @@ let info = check_tools_call(&verifier, &token, &request)?;
 
 ## Version History
 
+- **0.16.0**: `Constraint::Suffix` and `Constraint::Contains`, with fail-closed empty needles and tighten-only attenuation
 - **0.15.0**: `tg gate` falls back to `TG_POLICY`, `TG_KEYRING`, `TG_REVOKED`, `TG_USE_STORE`, `TG_MAX_USES`, `TG_AUDIENCE`, `TG_LEEWAY`, and `TG_AUDIT_JSONL` when the matching flag is omitted
 - **0.14.0**: Concurrent-safe `FileUseStore` (advisory lock), `stats` / `prune_expired`, `tg use-store stats|prune`
 - **0.13.0**: Persistent use-count store (`FileUseStore`, `tg gate --use-store`)
