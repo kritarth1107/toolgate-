@@ -1659,3 +1659,162 @@ fn gate_keyring_env_verifies_without_flag() {
     let _ = fs::remove_file(&log);
     let _ = fs::remove_file(&script);
 }
+
+fn mint_suffix_contains_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["name", "path"],
+            "expiry": 2000000000,
+            "constraints": {
+                "name": {"type": "suffix", "value": ".txt"},
+                "path": {"type": "contains", "value": "tmp"}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+#[test]
+fn mint_accepts_suffix_and_contains_constraints() {
+    let token = mint_suffix_contains_token();
+    assert_eq!(token["constraints"]["name"]["type"], "suffix");
+    assert_eq!(token["constraints"]["name"]["value"], ".txt");
+    assert_eq!(token["constraints"]["path"]["type"], "contains");
+    assert_eq!(token["constraints"]["path"]["value"], "tmp");
+}
+
+#[test]
+fn check_call_enforces_suffix_and_contains() {
+    let token = mint_suffix_contains_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"name": "notes.txt", "path": "/var/tmp/out"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"name": "notes.pdf", "path": "/var/tmp/out"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn attenuate_can_tighten_suffix_and_contains() {
+    let token = mint_suffix_contains_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "name": {"type": "suffix", "value": ".bak.txt"},
+                "path": {"type": "contains", "value": "tmp/public"}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(attenuated["constraints"]["name"]["value"], ".bak.txt");
+    assert_eq!(attenuated["constraints"]["path"]["value"], "tmp/public");
+}
+
+#[test]
+fn attenuate_rejects_looser_suffix_and_contains() {
+    let token = mint_suffix_contains_token();
+    let suffix = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"name": {"type": "suffix", "value": ".t"}}
+        }),
+    );
+    assert!(!suffix.status.success());
+    assert!(
+        String::from_utf8_lossy(&suffix.stderr).contains("attenuation"),
+        "looser suffix should fail closed: {}",
+        String::from_utf8_lossy(&suffix.stderr)
+    );
+
+    let contains = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"path": {"type": "contains", "value": "tm"}}
+        }),
+    );
+    assert!(!contains.status.success());
+}
+
+#[test]
+fn mint_rejects_empty_suffix_and_contains() {
+    let suffix = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["name"],
+            "expiry": 2000000000,
+            "constraints": {"name": {"type": "suffix", "value": ""}}
+        }),
+    );
+    assert!(!suffix.status.success());
+    assert!(
+        String::from_utf8_lossy(&suffix.stderr).contains("empty suffix/contains"),
+        "{}",
+        String::from_utf8_lossy(&suffix.stderr)
+    );
+
+    let contains = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["path"],
+            "expiry": 2000000000,
+            "constraints": {"path": {"type": "contains", "value": ""}}
+        }),
+    );
+    assert!(!contains.status.success());
+}
+
+#[test]
+fn attenuate_rejects_empty_suffix_and_contains() {
+    let token = mint_suffix_contains_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"name": {"type": "suffix", "value": ""}}
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("empty suffix/contains"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
