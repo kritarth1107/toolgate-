@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0] - 2026-10-09
+
+### Added
+- **Concurrent-safe FileUseStore**: exclusive advisory lock (`flock`) on a sibling `<path>.lock`
+  - Held only for open/rebuild, each accepted use (reload, check, append, `fsync`), and `prune_expired`
+  - Contended callers wait; lock or I/O errors deny the call (`UseResult::StoreError` / `use_store_failed`)
+- **Inspect and compact APIs**: `FileUseStore::inspect`, `FileUseStore::stats` (`UseStoreStats`), `FileUseStore::prune_expired` (`PruneReport`)
+  - `stats` reports unique jtis, total records, expired records, and path without rewriting
+  - `prune_expired` rewrites the log without expired records under the same lock (callable without restart)
+- **CLI**: `tg use-store stats FILE` and `tg use-store prune FILE`
+  - JSON on stdout; nonzero exit if the file is missing or the operation fails
+  - `tg gate --use-store` is unchanged
+
+### Notes
+- Shared-secret model is unchanged
+- The lock is local `flock`, not a distributed lock
+- Open still compacts expired records once at start; `prune_expired` makes that explicit on a live store
+
 ## [0.13.0] - 2026-10-08
 
 ### Added

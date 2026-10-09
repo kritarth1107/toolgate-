@@ -905,6 +905,7 @@ let info = check_tools_call(&verifier, &token, &request)?;
 
 ## Version History
 
+- **0.14.0**: Concurrent-safe `FileUseStore` (advisory lock), `stats` / `prune_expired`, `tg use-store stats|prune`
 - **0.13.0**: Persistent use-count store (`FileUseStore`, `tg gate --use-store`)
 - **0.12.0**: Gate keyring files and policy/keyring hot-reload (`tg gate --keyring`, `KeyringFile`, `PolicyFile`)
 - **0.11.0**: Gate revocation and replay (`tg gate --revoked` / `--max-uses`, `tg revoke`, `RevocationFile`, `decide_with_replay`)
