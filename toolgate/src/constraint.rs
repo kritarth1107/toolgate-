@@ -79,6 +79,16 @@ impl Constraint {
                 }
             }
 
+            // Exact is subset of Suffix if the value ends with the suffix
+            (Constraint::Exact(a), Constraint::Suffix(suffix)) => {
+                !suffix.is_empty() && a.ends_with(suffix)
+            }
+
+            // Exact is subset of Contains if the value contains the needle
+            (Constraint::Exact(a), Constraint::Contains(needle)) => {
+                !needle.is_empty() && a.contains(needle)
+            }
+
             // OneOf is subset of OneOf if new set is subset of old set
             (Constraint::OneOf(new), Constraint::OneOf(old)) => new.iter().all(|v| old.contains(v)),
 
@@ -103,8 +113,23 @@ impl Constraint {
                 })
             }
 
+            // OneOf is subset of Suffix if every allowed value ends with the suffix
+            (Constraint::OneOf(values), Constraint::Suffix(suffix)) => {
+                !suffix.is_empty() && values.iter().all(|v| v.ends_with(suffix))
+            }
+
+            // OneOf is subset of Contains if every allowed value contains the needle
+            (Constraint::OneOf(values), Constraint::Contains(needle)) => {
+                !needle.is_empty() && values.iter().all(|v| v.contains(needle))
+            }
+
             // Prefix is subset of Prefix if new prefix starts with (extends) old prefix
             (Constraint::Prefix(new), Constraint::Prefix(old)) => new.starts_with(old),
+
+            // Prefix is subset of Contains if every value with that prefix contains the needle
+            (Constraint::Prefix(prefix), Constraint::Contains(needle)) => {
+                !needle.is_empty() && prefix.contains(needle)
+            }
 
             // Prefix is subset of MaxLen if... well, prefix doesn't constrain length
             // Any prefix could have values exceeding max, so this is NOT a subset
@@ -147,7 +172,22 @@ impl Constraint {
             (Constraint::IntRange { .. }, Constraint::OneOf(_)) => false,
             (Constraint::IntRange { .. }, Constraint::Prefix(_)) => false,
 
-            // Suffix/Contains attenuation rules are added separately.
+            // Suffix is subset of Suffix if new suffix ends with (extends) old suffix
+            (Constraint::Suffix(new), Constraint::Suffix(old)) => {
+                !new.is_empty() && !old.is_empty() && new.ends_with(old)
+            }
+
+            // Suffix is subset of Contains if every value with that suffix contains the needle
+            (Constraint::Suffix(suffix), Constraint::Contains(needle)) => {
+                !needle.is_empty() && suffix.contains(needle)
+            }
+
+            // Contains is subset of Contains if new needle contains (specializes) old needle
+            (Constraint::Contains(new), Constraint::Contains(old)) => {
+                !new.is_empty() && !old.is_empty() && new.contains(old)
+            }
+
+            // Remaining cross-type pairs cannot be shown to be subsets
             _ => false,
         }
     }
