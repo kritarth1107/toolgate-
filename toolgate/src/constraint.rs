@@ -84,6 +84,9 @@ impl Constraint {
             // Exact is subset of MaxLen if the value length is within bounds
             (Constraint::Exact(a), Constraint::MaxLen(max)) => a.len() <= *max,
 
+            // Exact is subset of MinLen if the value length meets the minimum
+            (Constraint::Exact(a), Constraint::MinLen(min)) => a.len() >= *min,
+
             // Exact is subset of IntRange if the value parses and is in range
             (Constraint::Exact(a), Constraint::IntRange { min, max }) => {
                 if let Ok(n) = a.parse::<i64>() {
@@ -114,6 +117,11 @@ impl Constraint {
             // OneOf is subset of MaxLen if all values are within bounds
             (Constraint::OneOf(values), Constraint::MaxLen(max)) => {
                 values.iter().all(|v| v.len() <= *max)
+            }
+
+            // OneOf is subset of MinLen if all values meet the minimum
+            (Constraint::OneOf(values), Constraint::MinLen(min)) => {
+                values.iter().all(|v| v.len() >= *min)
             }
 
             // OneOf is subset of IntRange if all values parse and are in range
@@ -151,6 +159,9 @@ impl Constraint {
 
             // MaxLen is subset of MaxLen if new max <= old max
             (Constraint::MaxLen(new), Constraint::MaxLen(old)) => new <= old,
+
+            // MinLen is subset of MinLen if new min >= old min (raise only)
+            (Constraint::MinLen(new), Constraint::MinLen(old)) => new >= old,
 
             // MaxLen is NOT a subset of Prefix (can have values not starting with prefix)
             (Constraint::MaxLen(_), Constraint::Prefix(_)) => false,
@@ -413,6 +424,25 @@ mod tests {
         let large = Constraint::MaxLen(10);
         assert!(small.is_subset_of(&large));
         assert!(!large.is_subset_of(&small));
+    }
+
+    #[test]
+    fn minlen_subset_of_minlen() {
+        let higher = Constraint::MinLen(8);
+        let lower = Constraint::MinLen(3);
+        assert!(higher.is_subset_of(&lower));
+        assert!(!lower.is_subset_of(&higher));
+        assert!(Constraint::MinLen(0).is_subset_of(&Constraint::MinLen(0)));
+    }
+
+    #[test]
+    fn exact_subset_of_minlen() {
+        let exact = Constraint::Exact("hello".to_string());
+        assert!(exact.is_subset_of(&Constraint::MinLen(5)));
+        assert!(exact.is_subset_of(&Constraint::MinLen(0)));
+        assert!(!exact.is_subset_of(&Constraint::MinLen(6)));
+        assert!(Constraint::Exact(String::new()).is_subset_of(&Constraint::MinLen(0)));
+        assert!(!Constraint::Exact(String::new()).is_subset_of(&Constraint::MinLen(1)));
     }
 
     #[test]
