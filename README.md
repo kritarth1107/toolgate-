@@ -25,7 +25,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-toolgate = "0.13"
+toolgate = "0.14"
 ```
 
 Or install the CLI:
