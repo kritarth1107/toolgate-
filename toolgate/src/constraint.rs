@@ -364,6 +364,36 @@ mod tests {
     }
 
     #[test]
+    fn json_suffix() {
+        let c = Constraint::Suffix(".txt".to_string());
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"suffix\""));
+        assert!(json.contains("\"value\":\".txt\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"suffix","value":".log"}"#).unwrap();
+        assert_eq!(from_cli, Constraint::Suffix(".log".to_string()));
+    }
+
+    #[test]
+    fn json_contains() {
+        let c = Constraint::Contains("secret".to_string());
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"contains\""));
+        assert!(json.contains("\"value\":\"secret\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"contains","value":"tmp"}"#).unwrap();
+        assert_eq!(from_cli, Constraint::Contains("tmp".to_string()));
+    }
+
+    #[test]
     fn json_constraints_map() {
         let mut constraints: Constraints = BTreeMap::new();
         constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
