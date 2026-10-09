@@ -585,6 +585,38 @@ mod tests {
     }
 
     #[test]
+    fn encoding_constraint_suffix() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("name".to_string(), Constraint::Suffix(".txt".to_string()));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'n', b'a', b'm', b'e', // key "name"
+            0x05, // type = Suffix
+            0x00, 0x04, b'.', b't', b'x', b't', // suffix ".txt"
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_contains() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::Contains("tmp".to_string()));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'p', b'a', b't', b'h', // key "path"
+            0x06, // type = Contains
+            0x00, 0x03, b't', b'm', b'p', // needle "tmp"
+        ]));
+    }
+
+    #[test]
     fn encoding_multiple_constraints_sorted() {
         use std::collections::BTreeMap;
         let mut constraints: Constraints = BTreeMap::new();
