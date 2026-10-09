@@ -786,4 +786,164 @@ mod tests {
         let _ = fs::set_permissions(&path, perms);
         let _ = fs::remove_file(&path);
     }
+
+    #[test]
+    fn lock_protected_concurrent_appends_keep_every_use() {
+        let path = temp_use_store_path("concurrent");
+        let _ = fs::remove_file(&path);
+        let mut handles = Vec::new();
+        for _ in 0..8 {
+            let path = path.clone();
+            handles.push(std::thread::spawn(move || {
+                let mut store = FileUseStore::open_at(&path, 1_000).unwrap();
+                store.try_use_with_expiry("shared", 100, 2_000_000_000)
+            }));
+        }
+        let results: Vec<UseResult> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert!(results.iter().all(|r| *r == UseResult::Accepted));
+        let reopened = FileUseStore::open_at(&path, 1_000).unwrap();
+        assert_eq!(reopened.get_count("shared"), 8);
+        assert_eq!(reopened.records().len(), 8);
+        let _ = fs::remove_file(use_store_lock_path(&path));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn lock_failure_on_accept_is_store_error() {
+        let path = temp_use_store_path("lock-fail");
+        let mut store = FileUseStore::open_at(&path, 1_000).unwrap();
+        let lock_path = use_store_lock_path(&path);
+        let _ = fs::remove_file(&lock_path);
+        fs::create_dir(&lock_path).unwrap();
+        assert_eq!(
+            store.try_use_with_expiry("jti", 1, 2_000_000_000),
+            UseResult::StoreError
+        );
+        assert_eq!(store.get_count("jti"), 0);
+        assert!(store.last_error().is_some());
+        let _ = fs::remove_dir(&lock_path);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn open_fails_when_lock_file_cannot_be_acquired() {
+        let path = temp_use_store_path("open-lock-fail");
+        let lock_path = use_store_lock_path(&path);
+        fs::create_dir(&lock_path).unwrap();
+        let err = FileUseStore::open_at(&path, 1_000).unwrap_err();
+        assert_ne!(err.kind(), io::ErrorKind::NotFound);
+        let _ = fs::remove_dir(&lock_path);
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn contended_lock_waits_then_proceeds() {
+        let path = temp_use_store_path("lock-wait");
+        let _ = fs::remove_file(&path);
+        let held = UseStoreLock::acquire(&path).unwrap();
+        let path_clone = path.clone();
+        let handle = std::thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let mut store = FileUseStore::open_at(&path_clone, 1_000).unwrap();
+            let result = store.try_use_with_expiry("waited", 1, 2_000_000_000);
+            (started.elapsed(), result)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(120));
+        drop(held);
+        let (elapsed, result) = handle.join().unwrap();
+        assert_eq!(result, UseResult::Accepted);
+        assert!(
+            elapsed >= std::time::Duration::from_millis(80),
+            "contended lock returned too quickly: {elapsed:?}"
+        );
+        let _ = fs::remove_file(use_store_lock_path(&path));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn stats_counts_unique_total_and_expired() {
+        let path = temp_use_store_path("stats");
+        write_log(
+            &path,
+            concat!(
+                r#"{"jti":"old","expiry":100}"#,
+                "\n",
+                r#"{"jti":"old","expiry":100}"#,
+                "\n",
+                r#"{"jti":"live","expiry":2000000000}"#,
+                "\n"
+            ),
+        );
+        let store = FileUseStore::inspect(&path).unwrap();
+        let stats = store.stats(101);
+        assert_eq!(stats.unique_jtis, 2);
+        assert_eq!(stats.total_records, 3);
+        assert_eq!(stats.expired_records, 2);
+        assert_eq!(stats.path, path);
+        assert_eq!(store.stats(50).expired_records, 0);
+        let _ = fs::remove_file(use_store_lock_path(&path));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn prune_expired_rewrites_log_and_clears_jti() {
+        let path = temp_use_store_path("prune");
+        write_log(
+            &path,
+            concat!(
+                r#"{"jti":"reuse","expiry":100}"#,
+                "\n",
+                r#"{"jti":"live","expiry":2000000000}"#,
+                "\n"
+            ),
+        );
+        let mut store = FileUseStore::inspect(&path).unwrap();
+        assert_eq!(store.get_count("reuse"), 1);
+        assert_eq!(
+            store.try_use_with_expiry("reuse", 1, 100),
+            UseResult::Exceeded
+        );
+
+        let report = store.prune_expired(101).unwrap();
+        assert_eq!(report.removed, 1);
+        assert_eq!(report.remaining, 1);
+        assert_eq!(report.path, path);
+        assert_eq!(store.get_count("reuse"), 0);
+        assert_eq!(store.get_count("live"), 1);
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("reuse"));
+        assert!(text.contains("live"));
+
+        // After expiry GC, a later single-use check for that jti succeeds.
+        assert_eq!(
+            store.try_use_with_expiry("reuse", 1, 2_000_000_000),
+            UseResult::Accepted
+        );
+        assert_eq!(store.get_count("reuse"), 1);
+        let _ = fs::remove_file(use_store_lock_path(&path));
+        let _ = fs::remove_file(format!("{}.tmp", path.display()));
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn prune_expired_on_new_store_compacts_without_prior_open() {
+        let path = temp_use_store_path("prune-new");
+        write_log(
+            &path,
+            concat!(
+                r#"{"jti":"old","expiry":1}"#,
+                "\n",
+                r#"{"jti":"keep","expiry":4000000000}"#,
+                "\n"
+            ),
+        );
+        let mut store = FileUseStore::new(&path);
+        let report = store.prune_expired(2).unwrap();
+        assert_eq!(report.removed, 1);
+        assert_eq!(report.remaining, 1);
+        assert_eq!(store.get_count("old"), 0);
+        assert_eq!(store.get_count("keep"), 1);
+        let _ = fs::remove_file(use_store_lock_path(&path));
+        let _ = fs::remove_file(&path);
+    }
 }
