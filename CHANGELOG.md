@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0] - 2026-10-10
+
+### Added
+- **`Constraint::MinLen(usize)`**: value byte length must be at least N (`MinLen(0)` is valid and accepts the empty string)
+- **`Constraint::Matches(String)`**: simple glob over Unicode scalars (`*` any sequence, `?` exactly one scalar; all other characters are literal)
+- CLI JSON forms `{"type":"min_len","value":N}` and `{"type":"matches","value":"..."}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6, MinLen=7, Matches=8
+- Tokens without the new types still encode identically to 0.16.0
+
+### Notes
+- Attenuation only tightens: a new MinLen must be ≥ the old minimum; Matches may only stay the same pattern
+- Exact may replace MinLen when the exact value's length meets the previous min, and may replace Matches when the exact value satisfies the previous glob
+- Empty Matches patterns are rejected at mint/validate and never match a value (fail closed)
+
 ## [0.16.0] - 2026-10-09
 
 ### Added
