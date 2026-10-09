@@ -7,7 +7,7 @@ A small, fast Rust library for issuing macaroon-style capability tokens for tool
 toolgate issues capability tokens that bind:
 - **Tool name**: which tool the token authorizes
 - **Argument keys**: an allowlist of permitted argument names
-- **Argument constraints** (optional): restrict argument values (prefix, suffix, contains, exact, one-of, max length, int range)
+- **Argument constraints** (optional): restrict argument values (prefix, suffix, contains, exact, one-of, min/max length, int range, simple glob)
 - **Expiry**: unix timestamp when the token becomes invalid
 - **Not-before (`nbf`)** (optional): unix timestamp before which the token is rejected
 - **Audience** (optional): restrict token to a specific client/service
@@ -170,12 +170,14 @@ constraints.insert("note".to_string(), Constraint::Contains("draft".to_string())
 constraints.insert("mode".to_string(), Constraint::OneOf(vec!["read".into(), "list".into()]));
 constraints.insert("limit".to_string(), Constraint::IntRange { min: 1, max: 100 });
 constraints.insert("query".to_string(), Constraint::MaxLen(256));
+constraints.insert("label".to_string(), Constraint::MinLen(3));
+constraints.insert("file".to_string(), Constraint::Matches("*.txt".to_string()));
 
 // Mint token with constraints
 let token = Token::mint_full(
     secret,
     "file_op",
-    vec!["path".into(), "name".into(), "note".into(), "mode".into(), "limit".into(), "query".into()],
+    vec!["path".into(), "name".into(), "note".into(), "mode".into(), "limit".into(), "query".into(), "label".into(), "file".into()],
     2000000000,
     None,  // audience
     None,  // kid
@@ -189,6 +191,8 @@ args.insert("name".to_string(), "test.txt".to_string());
 args.insert("note".to_string(), "draft-notes".to_string());
 args.insert("mode".to_string(), "read".to_string());
 args.insert("limit".to_string(), "50".to_string());
+args.insert("label".to_string(), "abc".to_string());
+args.insert("file".to_string(), "notes.txt".to_string());
 
 token.verify_call_with_args(
     secret,
@@ -209,9 +213,13 @@ token.verify_call_with_args(
 | `Suffix(String)` | Value must end with the suffix | `Suffix(".txt".into())` |
 | `Contains(String)` | Value must contain the UTF-8 substring | `Contains("tmp".into())` |
 | `MaxLen(usize)` | Value must have at most N bytes | `MaxLen(256)` |
+| `MinLen(usize)` | Value must have at least N bytes | `MinLen(3)` |
+| `Matches(String)` | Value must match a simple `*` / `?` glob over Unicode scalars | `Matches("*.txt".into())` |
 | `IntRange { min, max }` | Value must parse as integer in range | `IntRange { min: 1, max: 100 }` |
 
-JSON forms match the Rust names: `{"type":"suffix","value":".txt"}` and `{"type":"contains","value":"tmp"}`. Empty suffix or contains needles are rejected at mint/validate and never match a value.
+JSON forms match the Rust names: `{"type":"min_len","value":3}` and `{"type":"matches","value":"*.txt"}`. `MinLen(0)` is valid and accepts the empty string. Empty suffix, contains, or matches patterns are rejected at mint/validate and never match a value.
+
+`Matches` is not a regex: only `*` (any sequence, including empty) and `?` (exactly one Unicode scalar) are special. `.` `[` `]` and every other character match literally. There are no character classes, `**` path semantics, or escape sequences.
 
 ### Attenuating Constraints
 
@@ -236,6 +244,8 @@ Valid attenuation rules:
 - **Contains**: new needle must contain the old needle (`tmp` → `tmp/public`)
 - **OneOf**: new set must be a subset of the old set
 - **MaxLen**: new max must be ≤ old max
+- **MinLen**: new min must be ≥ old min
+- **Matches**: new pattern must equal the old pattern; tighten by replacing with Exact
 - **IntRange**: new range must be within old range
 - **Exact**: can replace any constraint if the exact value satisfies it
 
@@ -482,12 +492,13 @@ The `tg` binary accepts JSON on stdin and outputs JSON.
 echo '{
   "secret": "my-secret",
   "tool_name": "read_file",
-  "arg_keys": ["path", "limit"],
+  "arg_keys": ["path", "limit", "name"],
   "expiry": 2000000000,
   "audience": "client-123",
   "constraints": {
     "path": {"type": "prefix", "value": "/tmp/"},
-    "limit": {"type": "int_range", "value": {"min": 1, "max": 100}}
+    "limit": {"type": "int_range", "value": {"min": 1, "max": 100}},
+    "name": {"type": "matches", "value": "*.txt"}
   },
   "generate_jti": true,
   "nbf": 1699990000,
@@ -796,6 +807,8 @@ Constraint type encoding:
 - `4` IntRange: i64 min + i64 max
 - `5` Suffix: u16 length + UTF-8 suffix
 - `6` Contains: u16 length + UTF-8 needle
+- `7` MinLen: u64 min
+- `8` Matches: u16 length + UTF-8 pattern
 
 **Example without constraints, jti, nbf, or depth** (identical to v5/v4/v3):
 
