@@ -105,6 +105,9 @@ fn encode_constraint_to_wire(buf: &mut Vec<u8>, key: &str, constraint: &Constrai
             buf.extend_from_slice(&min.to_be_bytes());
             buf.extend_from_slice(&max.to_be_bytes());
         }
+        Constraint::Suffix(_) | Constraint::Contains(_) => {
+            panic!("suffix/contains wire encoding is not implemented yet")
+        }
     }
 }
 

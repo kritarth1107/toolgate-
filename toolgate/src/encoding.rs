@@ -299,6 +299,9 @@ fn encode_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
             buf.extend_from_slice(&min.to_be_bytes());
             buf.extend_from_slice(&max.to_be_bytes());
         }
+        Constraint::Suffix(_) | Constraint::Contains(_) => {
+            panic!("suffix/contains canonical encoding is not implemented yet")
+        }
     }
 }
 

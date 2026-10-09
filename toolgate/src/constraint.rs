@@ -25,6 +25,10 @@ pub enum Constraint {
     /// Value must be a parseable integer in the given range (inclusive).
     #[serde(rename = "int_range")]
     IntRange { min: i64, max: i64 },
+    /// Value must end with the given suffix.
+    Suffix(String),
+    /// Value must contain the given UTF-8 substring.
+    Contains(String),
 }
 
 impl Constraint {
@@ -42,6 +46,9 @@ impl Constraint {
                     false
                 }
             }
+            // Empty suffix/contains would match every string; fail closed.
+            Constraint::Suffix(suffix) => !suffix.is_empty() && value.ends_with(suffix),
+            Constraint::Contains(needle) => !needle.is_empty() && value.contains(needle),
         }
     }
 
@@ -139,6 +146,9 @@ impl Constraint {
             (Constraint::IntRange { .. }, Constraint::Exact(_)) => false,
             (Constraint::IntRange { .. }, Constraint::OneOf(_)) => false,
             (Constraint::IntRange { .. }, Constraint::Prefix(_)) => false,
+
+            // Suffix/Contains attenuation rules are added separately.
+            _ => false,
         }
     }
 }
