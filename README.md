@@ -7,7 +7,7 @@ A small, fast Rust library for issuing macaroon-style capability tokens for tool
 toolgate issues capability tokens that bind:
 - **Tool name**: which tool the token authorizes
 - **Argument keys**: an allowlist of permitted argument names
-- **Argument constraints** (optional): restrict argument values (prefix, exact, one-of, max length, int range)
+- **Argument constraints** (optional): restrict argument values (prefix, suffix, contains, exact, one-of, max length, int range)
 - **Expiry**: unix timestamp when the token becomes invalid
 - **Not-before (`nbf`)** (optional): unix timestamp before which the token is rejected
 - **Audience** (optional): restrict token to a specific client/service
@@ -165,6 +165,8 @@ let secret = b"your-256-bit-secret-key-here!!";
 // Create constraints
 let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
 constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+constraints.insert("name".to_string(), Constraint::Suffix(".txt".to_string()));
+constraints.insert("note".to_string(), Constraint::Contains("draft".to_string()));
 constraints.insert("mode".to_string(), Constraint::OneOf(vec!["read".into(), "list".into()]));
 constraints.insert("limit".to_string(), Constraint::IntRange { min: 1, max: 100 });
 constraints.insert("query".to_string(), Constraint::MaxLen(256));
@@ -173,7 +175,7 @@ constraints.insert("query".to_string(), Constraint::MaxLen(256));
 let token = Token::mint_full(
     secret,
     "file_op",
-    vec!["path".into(), "mode".into(), "limit".into(), "query".into()],
+    vec!["path".into(), "name".into(), "note".into(), "mode".into(), "limit".into(), "query".into()],
     2000000000,
     None,  // audience
     None,  // kid
@@ -183,6 +185,8 @@ let token = Token::mint_full(
 // Verify with actual argument values
 let mut args = BTreeMap::new();
 args.insert("path".to_string(), "/tmp/test.txt".to_string());
+args.insert("name".to_string(), "test.txt".to_string());
+args.insert("note".to_string(), "draft-notes".to_string());
 args.insert("mode".to_string(), "read".to_string());
 args.insert("limit".to_string(), "50".to_string());
 
@@ -202,8 +206,12 @@ token.verify_call_with_args(
 | `Exact(String)` | Value must match exactly | `Exact("read".into())` |
 | `OneOf(Vec<String>)` | Value must be one of the allowed values | `OneOf(vec!["read".into(), "write".into()])` |
 | `Prefix(String)` | Value must start with the prefix | `Prefix("/tmp/".into())` |
+| `Suffix(String)` | Value must end with the suffix | `Suffix(".txt".into())` |
+| `Contains(String)` | Value must contain the UTF-8 substring | `Contains("tmp".into())` |
 | `MaxLen(usize)` | Value must have at most N bytes | `MaxLen(256)` |
 | `IntRange { min, max }` | Value must parse as integer in range | `IntRange { min: 1, max: 100 }` |
+
+JSON forms match the Rust names: `{"type":"suffix","value":".txt"}` and `{"type":"contains","value":"tmp"}`. Empty suffix or contains needles are rejected at mint/validate and never match a value.
 
 ### Attenuating Constraints
 
@@ -224,6 +232,8 @@ let attenuated = token.attenuate_with_constraints(
 
 Valid attenuation rules:
 - **Prefix**: new prefix must extend the old one (`/tmp/` → `/tmp/sub/`)
+- **Suffix**: new suffix must end with the old suffix (`.txt` → `.bak.txt`)
+- **Contains**: new needle must contain the old needle (`tmp` → `tmp/public`)
 - **OneOf**: new set must be a subset of the old set
 - **MaxLen**: new max must be ≤ old max
 - **IntRange**: new range must be within old range
@@ -784,6 +794,8 @@ Constraint type encoding:
 - `2` Prefix: u16 length + UTF-8 prefix
 - `3` MaxLen: u64 max
 - `4` IntRange: i64 min + i64 max
+- `5` Suffix: u16 length + UTF-8 suffix
+- `6` Contains: u16 length + UTF-8 needle
 
 **Example without constraints, jti, nbf, or depth** (identical to v5/v4/v3):
 
