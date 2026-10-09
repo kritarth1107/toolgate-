@@ -34,6 +34,12 @@ pub enum Constraint {
     /// `MinLen(0)` is valid and accepts every value, including the empty string.
     #[serde(rename = "min_len")]
     MinLen(usize),
+    /// Value must match a simple glob over Unicode scalars.
+    ///
+    /// Only `*` (any sequence, including empty) and `?` (exactly one scalar)
+    /// are special. Every other character, including `.` `[` `]`, is literal.
+    /// An empty pattern is rejected at mint/validate and never matches.
+    Matches(String),
 }
 
 impl Constraint {
@@ -55,13 +61,17 @@ impl Constraint {
             Constraint::Suffix(suffix) => !suffix.is_empty() && value.ends_with(suffix),
             Constraint::Contains(needle) => !needle.is_empty() && value.contains(needle),
             Constraint::MinLen(min) => value.len() >= *min,
+            // Empty glob would be a wildcard; fail closed, same as Suffix/Contains.
+            Constraint::Matches(pattern) => !pattern.is_empty() && glob_match(pattern, value),
         }
     }
 
-    /// Empty suffix/contains needles match nothing and must not be treated as wildcards.
+    /// Empty suffix/contains/matches needles match nothing and must not be treated as wildcards.
     pub fn is_empty_pattern(&self) -> bool {
         match self {
-            Constraint::Suffix(value) | Constraint::Contains(value) => value.is_empty(),
+            Constraint::Suffix(value)
+            | Constraint::Contains(value)
+            | Constraint::Matches(value) => value.is_empty(),
             _ => false,
         }
     }
@@ -213,9 +223,41 @@ impl Constraint {
             }
 
             // Remaining cross-type pairs cannot be shown to be subsets
+            // Matches attenuation rules are added separately.
             _ => false,
         }
     }
+}
+
+/// Simple glob over Unicode scalars. `*` matches any sequence (including
+/// empty); `?` matches exactly one scalar; every other pattern character
+/// matches itself. An empty pattern never matches.
+fn glob_match(pattern: &str, value: &str) -> bool {
+    if pattern.is_empty() {
+        return false;
+    }
+    let pat: Vec<char> = pattern.chars().collect();
+    let val: Vec<char> = value.chars().collect();
+    let (n, m) = (pat.len(), val.len());
+    let mut dp = vec![vec![false; m + 1]; n + 1];
+    dp[0][0] = true;
+    for i in 1..=n {
+        if pat[i - 1] == '*' {
+            dp[i][0] = dp[i - 1][0];
+        } else {
+            break;
+        }
+    }
+    for i in 1..=n {
+        for j in 1..=m {
+            dp[i][j] = match pat[i - 1] {
+                '*' => dp[i][j - 1] || dp[i - 1][j],
+                '?' => dp[i - 1][j - 1],
+                c => c == val[j - 1] && dp[i - 1][j - 1],
+            };
+        }
+    }
+    dp[n][m]
 }
 
 /// A map from argument keys to their constraints.
@@ -326,6 +368,64 @@ mod tests {
         assert!(!suffix.check("anything"));
         assert!(!contains.check(""));
         assert!(!contains.check("anything"));
+    }
+
+    #[test]
+    fn matches_star_and_question() {
+        let c = Constraint::Matches("*.txt".to_string());
+        assert!(c.check("notes.txt"));
+        assert!(c.check(".txt"));
+        assert!(c.check("a.txt"));
+        assert!(!c.check("notes.txt.bak"));
+        assert!(!c.check("txt"));
+        assert!(!c.check(""));
+
+        let q = Constraint::Matches("file?.rs".to_string());
+        assert!(q.check("file1.rs"));
+        assert!(q.check("filex.rs"));
+        assert!(!q.check("file.rs"));
+        assert!(!q.check("file12.rs"));
+    }
+
+    #[test]
+    fn matches_literals_are_not_regex() {
+        let dot = Constraint::Matches("a.b".to_string());
+        assert!(dot.check("a.b"));
+        assert!(!dot.check("axb"));
+        assert!(!dot.check("ab"));
+
+        let class = Constraint::Matches("a[bc]".to_string());
+        assert!(class.check("a[bc]"));
+        assert!(!class.check("ab"));
+        assert!(!class.check("ac"));
+    }
+
+    #[test]
+    fn matches_unicode_scalars() {
+        let star = Constraint::Matches("*".to_string());
+        assert!(star.check("日本語"));
+        assert!(star.check(""));
+
+        let one = Constraint::Matches("?".to_string());
+        assert!(one.check("漢"));
+        assert!(one.check("é"));
+        assert!(!one.check(""));
+        assert!(!one.check("漢字"));
+
+        let cafe = Constraint::Matches("caf?".to_string());
+        assert!(cafe.check("café"));
+        assert!(cafe.check("cafe"));
+        assert!(!cafe.check("caf"));
+        assert!(!cafe.check("cafée"));
+    }
+
+    #[test]
+    fn empty_matches_fail_closed() {
+        let empty = Constraint::Matches(String::new());
+        assert!(empty.is_empty_pattern());
+        assert!(!empty.check(""));
+        assert!(!empty.check("anything"));
+        assert!(!empty.check("*"));
     }
 
     #[test]

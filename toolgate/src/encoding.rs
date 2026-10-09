@@ -312,6 +312,9 @@ fn encode_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
             buf.push(7); // type = MinLen
             buf.extend_from_slice(&(*min as u64).to_be_bytes());
         }
+        Constraint::Matches(_) => {
+            panic!("matches canonical encoding is not implemented yet")
+        }
     }
 }
 

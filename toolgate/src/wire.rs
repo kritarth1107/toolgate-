@@ -115,6 +115,9 @@ fn encode_constraint_to_wire(buf: &mut Vec<u8>, key: &str, constraint: &Constrai
             buf.push(7); // type = MinLen
             buf.extend_from_slice(&(*min as u64).to_be_bytes());
         }
+        Constraint::Matches(_) => {
+            panic!("matches wire encoding is not implemented yet")
+        }
     }
 }
 
