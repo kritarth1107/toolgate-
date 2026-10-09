@@ -99,6 +99,20 @@ enum Commands {
         #[arg(long, value_name = "FILE")]
         file: PathBuf,
     },
+    /// Inspect or compact a file-backed use-count log
+    UseStore {
+        #[command(subcommand)]
+        command: UseStoreCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum UseStoreCommands {
+    /// Print JSON stats for a use-store log
+    Stats {
+        /// Path to the JSONL use-store file
+        file: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -333,6 +347,9 @@ fn main() {
             &audit,
         ),
         Commands::Revoke { token_or_jti, file } => handle_revoke(token_or_jti, file),
+        Commands::UseStore { command } => match command {
+            UseStoreCommands::Stats { file } => handle_use_store_stats(file),
+        },
     };
 
     if let Err(e) = result {
@@ -610,6 +627,22 @@ fn write_jsonl<W: Write>(
     for decision in decisions {
         sink.record(decision)?;
     }
+    Ok(())
+}
+
+fn require_use_store_file(file: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    if file.is_file() {
+        Ok(())
+    } else {
+        Err(format!("use-store file not found: {}", file.display()).into())
+    }
+}
+
+fn handle_use_store_stats(file: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    require_use_store_file(&file)?;
+    let store = FileUseStore::inspect(file)?;
+    let stats = store.stats(current_unix_time());
+    println!("{}", serde_json::to_string_pretty(&stats)?);
     Ok(())
 }
 
