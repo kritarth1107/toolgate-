@@ -97,6 +97,9 @@ impl Constraint {
             // Exact is subset of MinLen if the value length meets the minimum
             (Constraint::Exact(a), Constraint::MinLen(min)) => a.len() >= *min,
 
+            // Exact is subset of Matches if the exact value satisfies the glob
+            (Constraint::Exact(a), Constraint::Matches(pattern)) => glob_match(pattern, a),
+
             // Exact is subset of IntRange if the value parses and is in range
             (Constraint::Exact(a), Constraint::IntRange { min, max }) => {
                 if let Ok(n) = a.parse::<i64>() {
@@ -173,6 +176,12 @@ impl Constraint {
             // MinLen is subset of MinLen if new min >= old min (raise only)
             (Constraint::MinLen(new), Constraint::MinLen(old)) => new >= old,
 
+            // Matches→Matches only allows an identical pattern. Narrowing to
+            // Exact is the supported tightening path.
+            (Constraint::Matches(new), Constraint::Matches(old)) => {
+                !new.is_empty() && !old.is_empty() && new == old
+            }
+
             // MaxLen is NOT a subset of Prefix (can have values not starting with prefix)
             (Constraint::MaxLen(_), Constraint::Prefix(_)) => false,
 
@@ -223,7 +232,6 @@ impl Constraint {
             }
 
             // Remaining cross-type pairs cannot be shown to be subsets
-            // Matches attenuation rules are added separately.
             _ => false,
         }
     }
@@ -543,6 +551,26 @@ mod tests {
         assert!(!exact.is_subset_of(&Constraint::MinLen(6)));
         assert!(Constraint::Exact(String::new()).is_subset_of(&Constraint::MinLen(0)));
         assert!(!Constraint::Exact(String::new()).is_subset_of(&Constraint::MinLen(1)));
+    }
+
+    #[test]
+    fn matches_subset_of_matches_only_identical() {
+        let glob = Constraint::Matches("*.txt".to_string());
+        assert!(glob.is_subset_of(&Constraint::Matches("*.txt".to_string())));
+        assert!(!glob.is_subset_of(&Constraint::Matches("*.rs".to_string())));
+        assert!(!glob.is_subset_of(&Constraint::Matches("notes.txt".to_string())));
+        assert!(!Constraint::Matches("notes.txt".to_string()).is_subset_of(&glob));
+        assert!(!Constraint::Matches(String::new()).is_subset_of(&glob));
+        assert!(!glob.is_subset_of(&Constraint::Matches(String::new())));
+    }
+
+    #[test]
+    fn exact_subset_of_matches() {
+        let exact = Constraint::Exact("notes.txt".to_string());
+        assert!(exact.is_subset_of(&Constraint::Matches("*.txt".to_string())));
+        assert!(exact.is_subset_of(&Constraint::Matches("notes.txt".to_string())));
+        assert!(!exact.is_subset_of(&Constraint::Matches("*.rs".to_string())));
+        assert!(!exact.is_subset_of(&Constraint::Matches(String::new())));
     }
 
     #[test]
