@@ -1231,3 +1231,431 @@ fn use_store_stats_and_prune_fail_when_file_missing() {
         "prune stderr={stderr:?}"
     );
 }
+
+fn gate_with_env(args: &[&str], envs: &[(&str, Option<&str>)]) -> std::process::Output {
+    let mut cmd = tg();
+    cmd.args(args);
+    for (key, value) in envs {
+        match value {
+            Some(value) => {
+                cmd.env(key, value);
+            }
+            None => {
+                cmd.env_remove(key);
+            }
+        }
+    }
+    cmd.output().unwrap()
+}
+
+fn spawn_gate_envs(
+    args: &[&str],
+    log: &Path,
+    extra_env: &[(&str, &str)],
+    remove_env: &[&str],
+) -> (std::process::Child, PathBuf) {
+    let script = write_fake_mcp_echo(log);
+    let mut cmd = tg();
+    cmd.args(args)
+        .arg("--")
+        .args(["sh", script.to_str().unwrap()])
+        .env("TG_SECRET", "cli-secret")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for key in remove_env {
+        cmd.env_remove(key);
+    }
+    for (key, value) in extra_env {
+        cmd.env(key, value);
+    }
+    let child = cmd.spawn().expect("spawn tg gate");
+    (child, script)
+}
+
+fn mint_token_with_audience(audience: &str) -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["path", "limit"],
+            "expiry": 2000000000,
+            "audience": audience,
+            "constraints": {
+                "path": {"type": "prefix", "value": "/tmp/"},
+                "limit": {"type": "int_range", "value": {"min": 1, "max": 100}}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+#[test]
+fn gate_rejects_invalid_tg_max_uses() {
+    let output = gate_with_env(
+        &["gate", "--", "cat"],
+        &[
+            ("TG_SECRET", Some("cli-secret")),
+            ("TG_MAX_USES", Some("nope")),
+        ],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TG_MAX_USES") && stderr.contains("nope"),
+        "stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn gate_rejects_zero_tg_max_uses() {
+    let output = gate_with_env(
+        &["gate", "--", "cat"],
+        &[
+            ("TG_SECRET", Some("cli-secret")),
+            ("TG_MAX_USES", Some("0")),
+        ],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TG_MAX_USES") && stderr.contains("positive"),
+        "stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn gate_rejects_invalid_tg_leeway() {
+    let output = gate_with_env(
+        &["gate", "--", "cat"],
+        &[
+            ("TG_SECRET", Some("cli-secret")),
+            ("TG_LEEWAY", Some("not-a-duration")),
+        ],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TG_LEEWAY") && stderr.contains("not-a-duration"),
+        "stderr={stderr:?}"
+    );
+}
+
+#[test]
+fn gate_max_uses_flag_wins_over_invalid_env() {
+    let output = gate_with_env(
+        &["gate", "--max-uses", "1", "--", "cat"],
+        &[
+            ("TG_SECRET", Some("cli-secret")),
+            ("TG_MAX_USES", Some("abc")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "flag should win over invalid TG_MAX_USES: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn gate_leeway_flag_wins_over_invalid_env() {
+    let output = gate_with_env(
+        &["gate", "--leeway", "0", "--", "cat"],
+        &[
+            ("TG_SECRET", Some("cli-secret")),
+            ("TG_LEEWAY", Some("xyz")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "flag should win over invalid TG_LEEWAY: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn gate_rejects_tg_secret_and_tg_keyring() {
+    let keyring = write_temp_keyring(
+        "env-both",
+        r#"{"keys":{"key-a":"cli-secret-a-32-bytes-long!!!!"}}"#,
+    );
+    let output = gate_with_env(
+        &["gate", "--", "cat"],
+        &[
+            ("TG_SECRET", Some("cli-secret")),
+            ("TG_KEYRING", Some(keyring.to_str().unwrap())),
+        ],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TG_SECRET") && stderr.contains("TG_KEYRING"),
+        "stderr={stderr:?}"
+    );
+    let _ = fs::remove_file(&keyring);
+}
+
+#[test]
+fn gate_empty_env_strings_are_unset() {
+    let output = gate_with_env(
+        &["gate", "--", "cat"],
+        &[
+            ("TG_SECRET", Some("cli-secret")),
+            ("TG_KEYRING", Some("")),
+            ("TG_MAX_USES", Some("")),
+            ("TG_LEEWAY", Some("")),
+            ("TG_POLICY", Some("")),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "empty env strings should be ignored: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn gate_use_store_env_requires_max_uses() {
+    let store = unique_temp("use-store-env-only", "jsonl");
+    let output = gate_with_env(
+        &["gate", "--", "cat"],
+        &[
+            ("TG_SECRET", Some("cli-secret")),
+            ("TG_USE_STORE", Some(store.to_str().unwrap())),
+            ("TG_MAX_USES", Some("")),
+        ],
+    );
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("TG_USE_STORE") && stderr.contains("TG_MAX_USES"),
+        "stderr={stderr:?}"
+    );
+    let _ = fs::remove_file(&store);
+}
+
+#[test]
+fn gate_policy_flag_wins_over_missing_env_path() {
+    let missing = unique_temp("missing-policy-env", "json");
+    let _ = fs::remove_file(&missing);
+    let output = gate_with_env(
+        &[
+            "gate",
+            "--policy",
+            example_policy_path().to_str().unwrap(),
+            "--",
+            "cat",
+        ],
+        &[
+            ("TG_SECRET", Some("cli-secret")),
+            ("TG_POLICY", Some(missing.to_str().unwrap())),
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "--policy should win over TG_POLICY: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn gate_max_uses_env_denies_replay() {
+    let token = mint_token_with_jti();
+    let encoded = run_json(&["encode"], &token);
+    let tg1 = encoded["token"].as_str().unwrap();
+
+    let log = unique_temp("fake-mcp-max-uses-env", "log");
+    let _ = fs::remove_file(&log);
+    let (mut child, script) = spawn_gate_envs(&["gate"], &log, &[("TG_MAX_USES", "1")], &[]);
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    writeln!(stdin, "{}", tools_call_line(1, tg1)).unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let forwarded: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(forwarded["method"], "tools/call");
+
+    writeln!(stdin, "{}", tools_call_line(2, tg1)).unwrap();
+    stdin.flush().unwrap();
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    let error: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(error["id"], 2);
+    assert_eq!(error["error"]["data"]["error_kind"], "replay_detected");
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success());
+
+    let _ = fs::remove_file(&log);
+    let _ = fs::remove_file(&script);
+}
+
+#[test]
+fn gate_max_uses_flag_wins_over_stricter_env() {
+    let token = mint_token_with_jti();
+    let encoded = run_json(&["encode"], &token);
+    let tg1 = encoded["token"].as_str().unwrap();
+
+    let log = unique_temp("fake-mcp-max-uses-flag", "log");
+    let _ = fs::remove_file(&log);
+    let (mut child, script) = spawn_gate_envs(
+        &["gate", "--max-uses", "2"],
+        &log,
+        &[("TG_MAX_USES", "1")],
+        &[],
+    );
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    writeln!(stdin, "{}", tools_call_line(1, tg1)).unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let first: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(first["method"], "tools/call");
+
+    writeln!(stdin, "{}", tools_call_line(2, tg1)).unwrap();
+    stdin.flush().unwrap();
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    let second: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(
+        second["method"], "tools/call",
+        "--max-uses 2 should win over TG_MAX_USES=1: {second}"
+    );
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success());
+
+    let _ = fs::remove_file(&log);
+    let _ = fs::remove_file(&script);
+}
+
+#[test]
+fn gate_audience_flag_wins_over_env() {
+    let token = mint_token_with_audience("client-a");
+    let encoded = run_json(&["encode"], &token);
+    let tg1 = encoded["token"].as_str().unwrap();
+
+    let log = unique_temp("fake-mcp-audience-flag", "log");
+    let _ = fs::remove_file(&log);
+    let (mut child, script) = spawn_gate_envs(
+        &["gate", "--audience", "client-a"],
+        &log,
+        &[("TG_AUDIENCE", "other-client")],
+        &[],
+    );
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    writeln!(stdin, "{}", tools_call_line(1, tg1)).unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let forwarded: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(forwarded["method"], "tools/call");
+    assert_eq!(forwarded["id"], 1);
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success());
+
+    let _ = fs::remove_file(&log);
+    let _ = fs::remove_file(&script);
+}
+
+#[test]
+fn gate_audit_jsonl_flag_wins_over_env() {
+    let flag_audit = unique_temp("gate-audit-flag", "jsonl");
+    let env_audit = unique_temp("gate-audit-env", "jsonl");
+    let _ = fs::remove_file(&flag_audit);
+    let _ = fs::remove_file(&env_audit);
+    let log = unique_temp("fake-mcp-audit-flag", "log");
+    let _ = fs::remove_file(&log);
+
+    let (mut child, script) = spawn_gate_envs(
+        &["gate", "--audit-jsonl", flag_audit.to_str().unwrap()],
+        &log,
+        &[("TG_AUDIT_JSONL", env_audit.to_str().unwrap())],
+        &[],
+    );
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    let denied = json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "read_file",
+            "arguments": {"path": "/tmp/a.txt", "limit": 10}
+        }
+    });
+    writeln!(stdin, "{denied}").unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let error: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(error["error"]["data"]["error_kind"], "malformed_request");
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success());
+
+    let flag_text = fs::read_to_string(&flag_audit).unwrap_or_default();
+    assert!(
+        !flag_text.is_empty(),
+        "--audit-jsonl should receive the decision"
+    );
+    assert!(
+        !env_audit.exists() || fs::read_to_string(&env_audit).unwrap().is_empty(),
+        "TG_AUDIT_JSONL should be ignored when --audit-jsonl is set"
+    );
+
+    let _ = fs::remove_file(&flag_audit);
+    let _ = fs::remove_file(&env_audit);
+    let _ = fs::remove_file(&log);
+    let _ = fs::remove_file(&script);
+}
+
+#[test]
+fn gate_keyring_env_verifies_without_flag() {
+    let keyring = write_temp_keyring(
+        "env-keyring",
+        r#"{"keys":{"key-a":"cli-secret-a-32-bytes-long!!!!"}}"#,
+    );
+    let tg1 = mint_kid_token(KEYRING_SECRET_A, "key-a");
+    let log = unique_temp("fake-mcp-keyring-env", "log");
+    let _ = fs::remove_file(&log);
+    let (mut child, script) = spawn_gate_envs(
+        &["gate"],
+        &log,
+        &[("TG_KEYRING", keyring.to_str().unwrap())],
+        &["TG_SECRET"],
+    );
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+    writeln!(stdin, "{}", tools_call_line(1, &tg1)).unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let forwarded: Value = serde_json::from_str(line.trim()).unwrap();
+    assert_eq!(forwarded["method"], "tools/call");
+    assert_eq!(forwarded["id"], 1);
+
+    drop(stdin);
+    let status = child.wait().unwrap();
+    assert!(status.success());
+
+    let _ = fs::remove_file(&keyring);
+    let _ = fs::remove_file(&log);
+    let _ = fs::remove_file(&script);
+}
