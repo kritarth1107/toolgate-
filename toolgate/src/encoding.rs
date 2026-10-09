@@ -20,7 +20,7 @@
 //! - constraints_count: u16
 //! - for each constraint (sorted by key):
 //!   - key: u16 length + UTF-8 bytes
-//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains)
+//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen)
 //!   - constraint_data: type-specific encoding
 //!
 //! Format v5 (backward-compatible extension):
@@ -44,6 +44,7 @@
 //! - IntRange: i64 min + i64 max
 //! - Suffix: u16 length + UTF-8 bytes
 //! - Contains: u16 length + UTF-8 bytes
+//! - MinLen: u64
 //!
 //! The v5 format appends jti after constraints. Tokens without jti
 //! encode identically to v4. Tokens without constraints and without jti
@@ -307,8 +308,9 @@ fn encode_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
             buf.push(6); // type = Contains
             encode_len_prefixed(buf, needle);
         }
-        Constraint::MinLen(_) => {
-            panic!("min_len canonical encoding is not implemented yet")
+        Constraint::MinLen(min) => {
+            buf.push(7); // type = MinLen
+            buf.extend_from_slice(&(*min as u64).to_be_bytes());
         }
     }
 }
@@ -613,6 +615,44 @@ mod tests {
 
         assert!(bytes.ends_with(&[
             0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'p', b'a', b't', b'h', // key "path"
+            0x06, // type = Contains
+            0x00, 0x03, b't', b'm', b'p', // needle "tmp"
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_minlen() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("q".to_string(), Constraint::MinLen(8));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x01, b'q', // key "q"
+            0x07, // type = MinLen
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, // u64 8
+        ]));
+    }
+
+    #[test]
+    fn encoding_without_minlen_identical_to_prior() {
+        // Tokens that do not use MinLen must keep the 0.16.0 bytes.
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("name".to_string(), Constraint::Suffix(".txt".to_string()));
+        constraints.insert("path".to_string(), Constraint::Contains("tmp".to_string()));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        // Sorted by key: "name" then "path"
+        assert!(bytes.ends_with(&[
+            0x00, 0x02, // 2 constraints
+            0x00, 0x04, b'n', b'a', b'm', b'e', // key "name"
+            0x05, // type = Suffix
+            0x00, 0x04, b'.', b't', b'x', b't', // suffix ".txt"
             0x00, 0x04, b'p', b'a', b't', b'h', // key "path"
             0x06, // type = Contains
             0x00, 0x03, b't', b'm', b'p', // needle "tmp"

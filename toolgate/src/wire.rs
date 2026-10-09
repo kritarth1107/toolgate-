@@ -17,7 +17,7 @@
 //! | audience | u16 length + UTF-8 bytes (0 = none) |
 //! | kid | u16 length + UTF-8 bytes (0 = none) |
 //! | constraints_count | u16 (0 = none) |
-//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains) |
+//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen) |
 //! | jti | u16 length + UTF-8 bytes (0 = none) |
 //! | nbf_flag | u8 (v5 only; 0 = none, 1 = present) |
 //! | nbf | u64 (v5 only, if nbf_flag = 1) |
@@ -111,8 +111,9 @@ fn encode_constraint_to_wire(buf: &mut Vec<u8>, key: &str, constraint: &Constrai
             buf.push(6); // type = Contains
             encode_len_prefixed(buf, needle);
         }
-        Constraint::MinLen(_) => {
-            panic!("min_len wire encoding is not implemented yet")
+        Constraint::MinLen(min) => {
+            buf.push(7); // type = MinLen
+            buf.extend_from_slice(&(*min as u64).to_be_bytes());
         }
     }
 }
@@ -202,6 +203,11 @@ fn decode_constraint_from_wire(
             let needle =
                 String::from_utf8(needle_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
             Constraint::Contains(needle)
+        }
+        7 => {
+            // MinLen
+            let min = u64::from_be_bytes(read_bytes(pos, 8)?.try_into().unwrap()) as usize;
+            Constraint::MinLen(min)
         }
         _ => return Err(WireError::UnexpectedEof), // Invalid constraint type
     };
@@ -789,6 +795,42 @@ mod tests {
 
         assert_eq!(decoded.constraints, Some(constraints));
         assert!(decoded.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn wire_roundtrip_constraint_minlen() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::MinLen(8));
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn wire_without_minlen_stays_on_v4() {
+        // Tokens that do not use MinLen or v5 fields stay on the v0.5 layout.
+        let token = Token::mint(SECRET, "read", vec!["a".into()], 1000);
+        let wire = token.to_wire();
+        assert_eq!(wire[0], 4);
+        let decoded = Token::from_wire(&wire).unwrap();
+        assert!(decoded.constraints.is_none());
+        assert!(decoded.verify(SECRET, 999).is_ok());
     }
 
     #[test]
