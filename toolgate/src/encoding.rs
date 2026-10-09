@@ -20,7 +20,7 @@
 //! - constraints_count: u16
 //! - for each constraint (sorted by key):
 //!   - key: u16 length + UTF-8 bytes
-//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange)
+//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains)
 //!   - constraint_data: type-specific encoding
 //!
 //! Format v5 (backward-compatible extension):
@@ -42,6 +42,8 @@
 //! - Prefix: u16 length + UTF-8 bytes
 //! - MaxLen: u64
 //! - IntRange: i64 min + i64 max
+//! - Suffix: u16 length + UTF-8 bytes
+//! - Contains: u16 length + UTF-8 bytes
 //!
 //! The v5 format appends jti after constraints. Tokens without jti
 //! encode identically to v4. Tokens without constraints and without jti
@@ -286,9 +288,7 @@ fn encode_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
         }
         Constraint::Prefix(prefix) => {
             buf.push(2); // type = Prefix
-            let prefix_bytes = prefix.as_bytes();
-            buf.extend_from_slice(&(prefix_bytes.len() as u16).to_be_bytes());
-            buf.extend_from_slice(prefix_bytes);
+            encode_len_prefixed(buf, prefix);
         }
         Constraint::MaxLen(max) => {
             buf.push(3); // type = MaxLen
@@ -299,10 +299,22 @@ fn encode_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
             buf.extend_from_slice(&min.to_be_bytes());
             buf.extend_from_slice(&max.to_be_bytes());
         }
-        Constraint::Suffix(_) | Constraint::Contains(_) => {
-            panic!("suffix/contains canonical encoding is not implemented yet")
+        Constraint::Suffix(suffix) => {
+            buf.push(5); // type = Suffix
+            encode_len_prefixed(buf, suffix);
+        }
+        Constraint::Contains(needle) => {
+            buf.push(6); // type = Contains
+            encode_len_prefixed(buf, needle);
         }
     }
+}
+
+/// Encode a UTF-8 string as u16 length + bytes.
+fn encode_len_prefixed(buf: &mut Vec<u8>, value: &str) {
+    let bytes = value.as_bytes();
+    buf.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+    buf.extend_from_slice(bytes);
 }
 
 #[cfg(test)]
