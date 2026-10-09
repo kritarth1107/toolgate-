@@ -52,6 +52,14 @@ impl Constraint {
         }
     }
 
+    /// Empty suffix/contains needles match nothing and must not be treated as wildcards.
+    pub fn is_empty_pattern(&self) -> bool {
+        match self {
+            Constraint::Suffix(value) | Constraint::Contains(value) => value.is_empty(),
+            _ => false,
+        }
+    }
+
     /// Check if `self` is at least as restrictive as `other`.
     ///
     /// Returns `true` if any value satisfying `self` would also satisfy `other`.

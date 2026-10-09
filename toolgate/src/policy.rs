@@ -74,6 +74,8 @@ pub enum PolicyError {
     DuplicateTool { name: String },
     /// A constraint is attached to a key that is not in the grant's allowlist.
     ConstraintKeyNotAllowed { tool: String, key: String },
+    /// A suffix or contains constraint has an empty needle.
+    EmptyConstraintPattern { tool: String, key: String },
     /// A TTL (default or per-grant) is present and zero.
     ZeroTtl {
         /// `None` when the policy default TTL is zero; otherwise the grant name.
@@ -108,6 +110,12 @@ impl std::fmt::Display for PolicyError {
                 write!(
                     f,
                     "constraint key '{key}' on tool '{tool}' is not in the allowed key list"
+                )
+            }
+            PolicyError::EmptyConstraintPattern { tool, key } => {
+                write!(
+                    f,
+                    "empty suffix/contains constraint for '{key}' on tool '{tool}' is rejected"
                 )
             }
             PolicyError::ZeroTtl { tool: Some(tool) } => {
@@ -211,9 +219,15 @@ impl Policy {
             }
 
             if let Some(constraints) = &grant.constraints {
-                for key in constraints.keys() {
+                for (key, constraint) in constraints {
                     if !grant.arg_keys.iter().any(|k| k == key) {
                         errors.push(PolicyError::ConstraintKeyNotAllowed {
+                            tool: grant.name.clone(),
+                            key: key.clone(),
+                        });
+                    }
+                    if constraint.is_empty_pattern() {
+                        errors.push(PolicyError::EmptyConstraintPattern {
                             tool: grant.name.clone(),
                             key: key.clone(),
                         });
@@ -624,6 +638,47 @@ mod tests {
             Err(PolicyError::ConstraintKeyNotAllowed {
                 tool: "read_file".into(),
                 key: "offset".into()
+            })
+        );
+    }
+
+    #[test]
+    fn validate_empty_suffix_and_contains_are_rejected() {
+        let suffix = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["name"],
+                    "constraints": {"name": {"type": "suffix", "value": ""}}
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            suffix.validate(),
+            Err(PolicyError::EmptyConstraintPattern {
+                tool: "read_file".into(),
+                key: "name".into()
+            })
+        );
+
+        let contains = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["path"],
+                    "constraints": {"path": {"type": "contains", "value": ""}}
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            contains.validate(),
+            Err(PolicyError::EmptyConstraintPattern {
+                tool: "read_file".into(),
+                key: "path".into()
             })
         );
     }

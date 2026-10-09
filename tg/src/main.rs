@@ -376,8 +376,23 @@ fn handle_mint(
     }
 }
 
+fn reject_empty_constraint_patterns(
+    constraints: Option<&Constraints>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(constraints) = constraints else {
+        return Ok(());
+    };
+    for (key, constraint) in constraints {
+        if constraint.is_empty_pattern() {
+            return Err(format!("empty suffix/contains constraint for '{key}' is rejected").into());
+        }
+    }
+    Ok(())
+}
+
 fn handle_mint_from_stdin() -> Result<(), Box<dyn std::error::Error>> {
     let input: MintInput = serde_json::from_str(&read_stdin()?)?;
+    reject_empty_constraint_patterns(input.constraints.as_ref())?;
     let secret = decode_secret(&input.secret);
 
     let token = Token::mint_complete(
@@ -432,6 +447,7 @@ fn handle_policy_lint(file: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
 fn handle_attenuate() -> Result<(), Box<dyn std::error::Error>> {
     let input: AttenuateInput = serde_json::from_str(&read_stdin()?)?;
+    reject_empty_constraint_patterns(input.constraints.as_ref())?;
     let secret = decode_secret(&input.secret);
 
     let attenuated = input.token.attenuate_with_constraints(
