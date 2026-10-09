@@ -1674,10 +1674,7 @@ mod tests {
         );
 
         let mut exact: BTreeMap<String, Constraint> = BTreeMap::new();
-        exact.insert(
-            "query".to_string(),
-            Constraint::Exact("hello".to_string()),
-        );
+        exact.insert("query".to_string(), Constraint::Exact("hello".to_string()));
 
         let attenuated = token
             .attenuate_with_constraints(SECRET, None, None, Some(exact))

@@ -384,9 +384,10 @@ fn reject_empty_constraint_patterns(
     };
     for (key, constraint) in constraints {
         if constraint.is_empty_pattern() {
-            return Err(
-                format!("empty suffix/contains/matches constraint for '{key}' is rejected").into(),
-            );
+            return Err(format!(
+                "empty suffix/contains/matches constraint for '{key}' is rejected"
+            )
+            .into());
         }
     }
     Ok(())
