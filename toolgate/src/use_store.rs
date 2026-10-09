@@ -6,8 +6,9 @@
 //! [`FileUseStore`] is the durable, file-backed implementation.
 //!
 //! [`FileUseStore`] takes an exclusive advisory lock on a sibling `.lock` file
-//! around open/rebuild and each append so two processes cannot interleave
-//! those critical sections. The lock is not held for the lifetime of the store.
+//! around open/rebuild and each accepted use (reload, check, append, `fsync`)
+//! so two processes cannot race counts. The lock is not held for the lifetime
+//! of the store. Lock or I/O errors are [`UseResult::StoreError`].
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -200,9 +201,11 @@ fn flock_exclusive(_file: &File) -> io::Result<()> {
 /// [`UseRecord`] so a durable log can rebuild the same counts after a restart.
 /// Persistence (load, append, compaction) is layered on this type.
 ///
-/// Open/rebuild and each append take an exclusive advisory lock on
-/// `<path>.lock` (via `flock`). Contended callers wait. A lock or I/O
-/// error fails the operation — the store never fails open.
+/// Open/rebuild and each accepted use take an exclusive advisory lock on
+/// `<path>.lock` (via `flock`). The lock is held for the critical section
+/// only: reload, the use check, append, and `fsync`. Contended callers
+/// wait. A lock or I/O error is [`UseResult::StoreError`] — the store
+/// never fails open.
 pub struct FileUseStore {
     path: PathBuf,
     file: Option<File>,
@@ -274,8 +277,8 @@ impl FileUseStore {
         Ok(store)
     }
 
+    /// Caller must hold [`UseStoreLock`] for `self.path`.
     fn persist(&mut self, record: &UseRecord) -> io::Result<()> {
-        let _lock = UseStoreLock::acquire(&self.path)?;
         let Some(file) = self.file.as_mut() else {
             return Ok(());
         };
@@ -285,6 +288,27 @@ impl FileUseStore {
         file.write_all(line.as_bytes())?;
         file.flush()?;
         file.sync_all()?;
+        Ok(())
+    }
+
+    /// Rebuild in-memory counts and the append handle from disk.
+    ///
+    /// Caller must hold [`UseStoreLock`] for `self.path` so a concurrent
+    /// rewrite cannot be observed mid-update.
+    fn reload_unlocked(&mut self) -> io::Result<()> {
+        let text = match fs::read_to_string(&self.path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
+            Err(err) => return Err(err),
+        };
+        self.records = parse_use_log(&text)?;
+        self.rebuild_counts();
+        self.file = Some(
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&self.path)?,
+        );
         Ok(())
     }
 
@@ -322,6 +346,20 @@ impl FileUseStore {
     }
 
     fn accept(&mut self, jti: &str, max_uses: u64, expiry: u64) -> UseResult {
+        // Hold the exclusive lock across reload, the use check, append, and
+        // fsync so two processes cannot race counts. Lock or I/O failure is
+        // StoreError — never fail open.
+        let _lock = match UseStoreLock::acquire(&self.path) {
+            Ok(lock) => lock,
+            Err(err) => {
+                self.last_error = Some(err.to_string());
+                return UseResult::StoreError;
+            }
+        };
+        if let Err(err) = self.reload_unlocked() {
+            self.last_error = Some(err.to_string());
+            return UseResult::StoreError;
+        }
         let count = self.counts.get(jti).copied().unwrap_or(0);
         if count >= max_uses {
             return UseResult::Exceeded;
@@ -642,14 +680,19 @@ mod tests {
     fn append_failure_is_store_error_and_does_not_count() {
         let path = temp_use_store_path("write-fail");
         let mut store = FileUseStore::open_at(&path, 1_000).unwrap();
-        // An already-open File replaced with /dev/full fails writes (ENOSPC).
-        store.file = Some(File::create("/dev/full").unwrap());
+        // Accept reloads and reopens the log under the lock; a read-only
+        // path makes that append open fail (never fail open).
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(true);
+        fs::set_permissions(&path, perms.clone()).unwrap();
         assert_eq!(
             store.try_use_with_expiry("jti", 1, 2_000_000_000),
             UseResult::StoreError
         );
         assert_eq!(store.get_count("jti"), 0);
         assert!(store.last_error().is_some());
+        perms.set_readonly(false);
+        let _ = fs::set_permissions(&path, perms);
         let _ = fs::remove_file(&path);
     }
 }
