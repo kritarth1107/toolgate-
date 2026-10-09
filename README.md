@@ -25,7 +25,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-toolgate = "0.14"
+toolgate = "0.15"
 ```
 
 Or install the CLI:
@@ -617,7 +617,22 @@ Error kinds: `invalid_mac`, `expired`, `not_yet_valid`, `audience_mismatch`, `to
 
 `tg gate` sits in front of a local stdio MCP server. It reads newline-delimited JSON-RPC from the client, forwards everything that is not `tools/call`, and checks `tools/call` against a token at `params._meta.toolgate` (`tg1.` string or JSON token). Allowed calls are forwarded with `_meta.toolgate` stripped so the child never sees the secret. Denied calls are answered by the gate with a JSON-RPC error (same `id`, stable `error.code`, `data.error_kind`). Denied notifications (no `id`) are dropped.
 
-The shared secret comes from `TG_SECRET` (the existing `hex:` form is accepted) **or** from `tg gate --keyring FILE`. Giving both is an error. The secret is never taken from argv.
+The shared secret comes from `TG_SECRET` (the existing `hex:` form is accepted) **or** from `tg gate --keyring FILE` / `TG_KEYRING`. Giving both is an error. The secret is never taken from argv.
+
+When a `tg gate` flag is omitted, the matching environment variable is used. An explicit flag always wins. An empty env string is treated as unset.
+
+| Flag | Env |
+|------|-----|
+| `--policy` | `TG_POLICY` |
+| `--keyring` | `TG_KEYRING` |
+| `--revoked` | `TG_REVOKED` |
+| `--use-store` | `TG_USE_STORE` |
+| `--max-uses` | `TG_MAX_USES` (positive integer; invalid values are a hard error) |
+| `--audience` | `TG_AUDIENCE` |
+| `--leeway` | `TG_LEEWAY` (seconds; invalid values are a hard error) |
+| `--audit-jsonl` | `TG_AUDIT_JSONL` |
+
+`--use-store` / `TG_USE_STORE` still requires `--max-uses` or `TG_MAX_USES`. mtime reload of policy, keyring, and revoked files is unchanged.
 
 ```bash
 export TG_SECRET=my-shared-secret
@@ -637,12 +652,22 @@ tg gate --policy examples/policy.json --audience agent-runtime --leeway 30 \
   --audit-jsonl /tmp/decisions.jsonl -- \
   ./my-mcp-server
 
+# Same options from the environment (flags still override)
+export TG_POLICY=examples/policy.json
+export TG_AUDIENCE=agent-runtime
+export TG_LEEWAY=30
+export TG_REVOKED=/tmp/revoked-jtis.txt
+export TG_MAX_USES=1
+export TG_USE_STORE=/tmp/toolgate-uses.jsonl
+export TG_AUDIT_JSONL=/tmp/decisions.jsonl
+tg gate -- ./my-mcp-server
+
 # Or verify with a keyring file instead of TG_SECRET
 tg gate --keyring /tmp/keyring.json --policy examples/policy.json -- \
   ./my-mcp-server
 ```
 
-`--revoked FILE` is a revoked-jti list: one token id per line, `#` comments and blank lines ignored. The gate loads it at start and reloads when the file's mtime changes. `--max-uses N` counts uses per `jti` through `UseStore` (tokens without a `jti` are denied as `missing_jti`). Without `--use-store` the counts live in `MemoryUseStore` and reset when the process exits. `--use-store FILE` (only valid with `--max-uses`) uses `FileUseStore`: the same append-only log, rebuilt on start, so a single-use token cannot be replayed by restarting the gate. Concurrent `tg gate` processes sharing that file serialize on `<FILE>.lock`. A persist or lock failure denies the call as `use_store_failed` and is recorded in the audit; the gate never fails open. Revocation and replay denials are recorded as `revoked` and `replay_detected`.
+`--revoked FILE` is a revoked-jti list: one token id per line, `#` comments and blank lines ignored. The gate loads it at start and reloads when the file's mtime changes. `--max-uses N` counts uses per `jti` through `UseStore` (tokens without a `jti` are denied as `missing_jti`). Without `--use-store` the counts live in `MemoryUseStore` and reset when the process exits. `--use-store FILE` (only valid with `--max-uses` or `TG_MAX_USES`) uses `FileUseStore`: the same append-only log, rebuilt on start, so a single-use token cannot be replayed by restarting the gate. Concurrent `tg gate` processes sharing that file serialize on `<FILE>.lock`. A persist or lock failure denies the call as `use_store_failed` and is recorded in the audit; the gate never fails open. Revocation and replay denials are recorded as `revoked` and `replay_detected`.
 
 ### Use store
 
@@ -896,7 +921,7 @@ let info = check_tools_call(&verifier, &token, &request)?;
 
 ## Limits
 
-- **Shared secret**: This is a symmetric-key system. All parties that mint or verify tokens share the same secret. The stdio gate reads that secret from `TG_SECRET` or a `--keyring` file; the model is unchanged.
+- **Shared secret**: This is a symmetric-key system. All parties that mint or verify tokens share the same secret. The stdio gate reads that secret from `TG_SECRET` or a `--keyring` / `TG_KEYRING` file; the model is unchanged.
 - **Not a public-key system**: Tokens cannot be verified without the secret.
 - **Line-oriented stdio gate only**: `tg gate` / `decide` sit in front of a local child process. They inspect newline-delimited JSON-RPC (one object per line). There is no HTTP or SSE transport. JSON-RPC batch arrays are rejected (`-32600`). Server responses are copied through and not validated. JSON strings must not contain raw newlines.
 - **Not a hosted gateway**: The gate does not dispatch tools, open a network listener, or run as a service. `check_tools_call` still only inspects a request.
@@ -905,6 +930,7 @@ let info = check_tools_call(&verifier, &token, &request)?;
 
 ## Version History
 
+- **0.15.0**: `tg gate` falls back to `TG_POLICY`, `TG_KEYRING`, `TG_REVOKED`, `TG_USE_STORE`, `TG_MAX_USES`, `TG_AUDIENCE`, `TG_LEEWAY`, and `TG_AUDIT_JSONL` when the matching flag is omitted
 - **0.14.0**: Concurrent-safe `FileUseStore` (advisory lock), `stats` / `prune_expired`, `tg use-store stats|prune`
 - **0.13.0**: Persistent use-count store (`FileUseStore`, `tg gate --use-store`)
 - **0.12.0**: Gate keyring files and policy/keyring hot-reload (`tg gate --keyring`, `KeyringFile`, `PolicyFile`)

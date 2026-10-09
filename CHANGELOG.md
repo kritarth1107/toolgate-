@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-10-09
+
+### Added
+- **Stdio MCP gate env fallbacks**: omitted `tg gate` flags read matching environment variables
+  - `TG_POLICY`, `TG_KEYRING`, `TG_REVOKED`, `TG_USE_STORE`, `TG_MAX_USES`, `TG_AUDIENCE`, `TG_LEEWAY`, `TG_AUDIT_JSONL`
+  - Explicit flags always win; an empty env string is treated as unset
+  - `TG_MAX_USES` must be a positive integer and `TG_LEEWAY` must be seconds; invalid values are a hard error (never fail open)
+  - `--use-store` / `TG_USE_STORE` still requires `--max-uses` or `TG_MAX_USES`
+
+### Notes
+- `TG_SECRET` behavior is unchanged, including mutual exclusion with `--keyring` / `TG_KEYRING`
+- Secrets are still never taken from argv
+- Policy, keyring, and revoked-file mtime reload is unchanged
+
 ## [0.14.0] - 2026-10-09
 
 ### Added
