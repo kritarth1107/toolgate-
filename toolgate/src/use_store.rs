@@ -197,6 +197,7 @@ impl UseStoreLock {
             .create(true)
             .read(true)
             .write(true)
+            .truncate(false)
             .open(&lock_path)?;
         flock_exclusive(&file)?;
         Ok(UseStoreLock { _file: file })
@@ -773,17 +774,22 @@ mod tests {
         let mut store = FileUseStore::open_at(&path, 1_000).unwrap();
         // Accept reloads and reopens the log under the lock; a read-only
         // path makes that append open fail (never fail open).
-        let mut perms = fs::metadata(&path).unwrap().permissions();
-        perms.set_readonly(true);
-        fs::set_permissions(&path, perms.clone()).unwrap();
-        assert_eq!(
-            store.try_use_with_expiry("jti", 1, 2_000_000_000),
-            UseResult::StoreError
-        );
-        assert_eq!(store.get_count("jti"), 0);
-        assert!(store.last_error().is_some());
-        perms.set_readonly(false);
-        let _ = fs::set_permissions(&path, perms);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&path).unwrap().permissions();
+            let original = perms.mode();
+            perms.set_mode(0o444);
+            fs::set_permissions(&path, perms.clone()).unwrap();
+            assert_eq!(
+                store.try_use_with_expiry("jti", 1, 2_000_000_000),
+                UseResult::StoreError
+            );
+            assert_eq!(store.get_count("jti"), 0);
+            assert!(store.last_error().is_some());
+            perms.set_mode(original);
+            let _ = fs::set_permissions(&path, perms);
+        }
         let _ = fs::remove_file(&path);
     }
 
