@@ -17,7 +17,7 @@
 //! | audience | u16 length + UTF-8 bytes (0 = none) |
 //! | kid | u16 length + UTF-8 bytes (0 = none) |
 //! | constraints_count | u16 (0 = none) |
-//! | constraints | for each: key + type + data (same encoding as canonical) |
+//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains) |
 //! | jti | u16 length + UTF-8 bytes (0 = none) |
 //! | nbf_flag | u8 (v5 only; 0 = none, 1 = present) |
 //! | nbf | u64 (v5 only, if nbf_flag = 1) |
@@ -92,9 +92,7 @@ fn encode_constraint_to_wire(buf: &mut Vec<u8>, key: &str, constraint: &Constrai
         }
         Constraint::Prefix(prefix) => {
             buf.push(2); // type = Prefix
-            let prefix_bytes = prefix.as_bytes();
-            buf.extend_from_slice(&(prefix_bytes.len() as u16).to_be_bytes());
-            buf.extend_from_slice(prefix_bytes);
+            encode_len_prefixed(buf, prefix);
         }
         Constraint::MaxLen(max) => {
             buf.push(3); // type = MaxLen
@@ -105,10 +103,21 @@ fn encode_constraint_to_wire(buf: &mut Vec<u8>, key: &str, constraint: &Constrai
             buf.extend_from_slice(&min.to_be_bytes());
             buf.extend_from_slice(&max.to_be_bytes());
         }
-        Constraint::Suffix(_) | Constraint::Contains(_) => {
-            panic!("suffix/contains wire encoding is not implemented yet")
+        Constraint::Suffix(suffix) => {
+            buf.push(5); // type = Suffix
+            encode_len_prefixed(buf, suffix);
+        }
+        Constraint::Contains(needle) => {
+            buf.push(6); // type = Contains
+            encode_len_prefixed(buf, needle);
         }
     }
+}
+
+fn encode_len_prefixed(buf: &mut Vec<u8>, value: &str) {
+    let bytes = value.as_bytes();
+    buf.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+    buf.extend_from_slice(bytes);
 }
 
 /// Decode a single constraint from wire format.
@@ -174,6 +183,22 @@ fn decode_constraint_from_wire(
             let min = i64::from_be_bytes(read_bytes(pos, 8)?.try_into().unwrap());
             let max = i64::from_be_bytes(read_bytes(pos, 8)?.try_into().unwrap());
             Constraint::IntRange { min, max }
+        }
+        5 => {
+            // Suffix
+            let suffix_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
+            let suffix_bytes = read_bytes(pos, suffix_len)?;
+            let suffix =
+                String::from_utf8(suffix_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
+            Constraint::Suffix(suffix)
+        }
+        6 => {
+            // Contains
+            let needle_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
+            let needle_bytes = read_bytes(pos, needle_len)?;
+            let needle =
+                String::from_utf8(needle_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
+            Constraint::Contains(needle)
         }
         _ => return Err(WireError::UnexpectedEof), // Invalid constraint type
     };
