@@ -248,6 +248,37 @@ mod tests {
     }
 
     #[test]
+    fn suffix_check() {
+        let c = Constraint::Suffix(".txt".to_string());
+        assert!(c.check("notes.txt"));
+        assert!(c.check(".txt"));
+        assert!(!c.check("notes.txt.bak"));
+        assert!(!c.check("txt"));
+        assert!(!c.check(""));
+    }
+
+    #[test]
+    fn contains_check() {
+        let c = Constraint::Contains("tmp".to_string());
+        assert!(c.check("/tmp/file"));
+        assert!(c.check("tmp"));
+        assert!(c.check("atmpb"));
+        assert!(!c.check("/var/file"));
+        assert!(!c.check("TMP"));
+        assert!(!c.check(""));
+    }
+
+    #[test]
+    fn empty_suffix_and_contains_fail_closed() {
+        let suffix = Constraint::Suffix(String::new());
+        let contains = Constraint::Contains(String::new());
+        assert!(!suffix.check(""));
+        assert!(!suffix.check("anything"));
+        assert!(!contains.check(""));
+        assert!(!contains.check("anything"));
+    }
+
+    #[test]
     fn exact_subset_of_exact() {
         let a = Constraint::Exact("foo".to_string());
         let b = Constraint::Exact("foo".to_string());
@@ -288,6 +319,53 @@ mod tests {
         let short = Constraint::Prefix("/tmp/".to_string());
         assert!(long.is_subset_of(&short));
         assert!(!short.is_subset_of(&long));
+    }
+
+    #[test]
+    fn exact_subset_of_suffix_and_contains() {
+        let exact = Constraint::Exact("report.txt".to_string());
+        let suffix = Constraint::Suffix(".txt".to_string());
+        let contains = Constraint::Contains("port".to_string());
+        assert!(exact.is_subset_of(&suffix));
+        assert!(exact.is_subset_of(&contains));
+        assert!(!exact.is_subset_of(&Constraint::Suffix(".pdf".to_string())));
+        assert!(!exact.is_subset_of(&Constraint::Contains("csv".to_string())));
+        assert!(!Constraint::Exact("notes.txt".to_string())
+            .is_subset_of(&Constraint::Suffix(String::new())));
+        assert!(!Constraint::Exact("notes.txt".to_string())
+            .is_subset_of(&Constraint::Contains(String::new())));
+    }
+
+    #[test]
+    fn suffix_subset_of_suffix() {
+        let long = Constraint::Suffix("/public.txt".to_string());
+        let short = Constraint::Suffix(".txt".to_string());
+        assert!(long.is_subset_of(&short));
+        assert!(!short.is_subset_of(&long));
+        assert!(!Constraint::Suffix(String::new()).is_subset_of(&short));
+        assert!(!long.is_subset_of(&Constraint::Suffix(String::new())));
+    }
+
+    #[test]
+    fn contains_subset_of_contains() {
+        let specific = Constraint::Contains("tmp/public".to_string());
+        let general = Constraint::Contains("tmp".to_string());
+        assert!(specific.is_subset_of(&general));
+        assert!(!general.is_subset_of(&specific));
+        assert!(!Constraint::Contains(String::new()).is_subset_of(&general));
+        assert!(!specific.is_subset_of(&Constraint::Contains(String::new())));
+    }
+
+    #[test]
+    fn prefix_and_suffix_subset_of_contains() {
+        let prefix = Constraint::Prefix("/tmp/".to_string());
+        let suffix = Constraint::Suffix("/tmp/out".to_string());
+        let needle = Constraint::Contains("tmp".to_string());
+        assert!(prefix.is_subset_of(&needle));
+        assert!(suffix.is_subset_of(&needle));
+        assert!(!prefix.is_subset_of(&Constraint::Contains("var".to_string())));
+        assert!(!Constraint::Contains("tmp".to_string()).is_subset_of(&prefix));
+        assert!(!Constraint::Contains("out".to_string()).is_subset_of(&suffix));
     }
 
     #[test]
