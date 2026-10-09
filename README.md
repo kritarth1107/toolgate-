@@ -385,6 +385,8 @@ file.reload_if_changed()?;
 
 `MemoryUseStore` keeps counts in process. `FileUseStore` is an append-only JSONL log (one `UseRecord` per accepted use: `jti` plus the token `expiry`). On open it rebuilds counts from the file, skips a torn or garbage trailing line with one stderr warning, and drops records whose token has already expired. Each accepted use is appended and `fsync`ed before the caller treats it as recorded. A write failure is `UseResult::StoreError` / `use_store_failed` — the call is denied, never failed open.
 
+Open/rebuild, each accepted use, and `prune_expired` take an exclusive advisory lock (`flock`) on a sibling `<path>.lock` file so two `tg gate` processes cannot race counts. The lock is held for that critical section only (reload, the use check, append/`fsync`, or rewrite), not for the lifetime of the store. Contended callers wait. A lock or I/O error is denied — the store never fails open. `inspect` loads without rewriting; `stats(now)` reports unique jtis, total records, expired records, and the path; `prune_expired(now)` rewrites the log without expired records so a later single-use check can succeed for that `jti` after expiry GC.
+
 ```rust
 use toolgate::{FileUseStore, UseStore};
 
@@ -393,6 +395,12 @@ assert!(single_use_token.verify_single_use(secret, 1999999999, &mut store).is_ok
 // After a process restart, the same path still has the count:
 let mut store = FileUseStore::open("/tmp/toolgate-uses.jsonl")?;
 assert!(single_use_token.verify_single_use(secret, 1999999999, &mut store).is_err());
+
+let inspect = FileUseStore::inspect("/tmp/toolgate-uses.jsonl")?;
+let stats = inspect.stats(1999999999);
+let _ = stats.unique_jtis;
+let report = FileUseStore::new("/tmp/toolgate-uses.jsonl").prune_expired(2_000_000_001)?;
+let _ = report.removed;
 ```
 
 Key points:
@@ -400,8 +408,11 @@ Key points:
 - Attenuated tokens inherit their parent's `jti`
 - `RevocationList` tracks explicitly revoked token IDs
 - `UseStore` trait enables pluggable use-count tracking (`MemoryUseStore` and `FileUseStore`)
+- `FileUseStore` serializes open/append/prune with an exclusive sibling `.lock` file (`flock`)
+- `FileUseStore::stats` / `prune_expired` inspect or compact a log without restarting the gate
 - Tokens without `jti` cannot be checked against revocation lists or use stores
 - `tg gate --revoked` / `--max-uses` / `--use-store` apply the same checks on each `tools/call`
+- `tg use-store stats|prune FILE` inspects or compacts a `FileUseStore` log
 
 ## Policy Files
 
@@ -631,7 +642,21 @@ tg gate --keyring /tmp/keyring.json --policy examples/policy.json -- \
   ./my-mcp-server
 ```
 
-`--revoked FILE` is a revoked-jti list: one token id per line, `#` comments and blank lines ignored. The gate loads it at start and reloads when the file's mtime changes. `--max-uses N` counts uses per `jti` through `UseStore` (tokens without a `jti` are denied as `missing_jti`). Without `--use-store` the counts live in `MemoryUseStore` and reset when the process exits. `--use-store FILE` (only valid with `--max-uses`) uses `FileUseStore`: the same append-only log, rebuilt on start, so a single-use token cannot be replayed by restarting the gate. A persist failure denies the call as `use_store_failed` and is recorded in the audit; the gate never fails open. Revocation and replay denials are recorded as `revoked` and `replay_detected`.
+`--revoked FILE` is a revoked-jti list: one token id per line, `#` comments and blank lines ignored. The gate loads it at start and reloads when the file's mtime changes. `--max-uses N` counts uses per `jti` through `UseStore` (tokens without a `jti` are denied as `missing_jti`). Without `--use-store` the counts live in `MemoryUseStore` and reset when the process exits. `--use-store FILE` (only valid with `--max-uses`) uses `FileUseStore`: the same append-only log, rebuilt on start, so a single-use token cannot be replayed by restarting the gate. Concurrent `tg gate` processes sharing that file serialize on `<FILE>.lock`. A persist or lock failure denies the call as `use_store_failed` and is recorded in the audit; the gate never fails open. Revocation and replay denials are recorded as `revoked` and `replay_detected`.
+
+### Use store
+
+Inspect or compact a `FileUseStore` log without restarting a gate.
+
+```bash
+tg use-store stats /tmp/toolgate-uses.jsonl
+# {"unique_jtis":1,"total_records":1,"expired_records":0,"path":"/tmp/toolgate-uses.jsonl"}
+
+tg use-store prune /tmp/toolgate-uses.jsonl
+# {"removed":0,"remaining":1,"path":"/tmp/toolgate-uses.jsonl"}
+```
+
+`stats` prints JSON and does not rewrite the file. `prune` drops records whose token expiry is already in the past (same rule as open compaction) and prints a short JSON report. Both exit nonzero if the file is missing or the operation fails.
 
 `--keyring FILE` and `--policy FILE` use the same mtime-check reload as the revoked-jti file: no watcher thread and no extra crate. A keyring or policy reload that fails to parse or validate keeps the previous good version and writes one warning line to stderr; the gate does not fail open. Unknown kids stay `unknown_key_id`.
 
@@ -876,6 +901,7 @@ let info = check_tools_call(&verifier, &token, &request)?;
 - **Line-oriented stdio gate only**: `tg gate` / `decide` sit in front of a local child process. They inspect newline-delimited JSON-RPC (one object per line). There is no HTTP or SSE transport. JSON-RPC batch arrays are rejected (`-32600`). Server responses are copied through and not validated. JSON strings must not contain raw newlines.
 - **Not a hosted gateway**: The gate does not dispatch tools, open a network listener, or run as a service. `check_tools_call` still only inspects a request.
 - **Nonce is random, not sequential**: Each mint/attenuate generates a fresh random nonce.
+- **Local advisory lock only**: `FileUseStore` uses `flock` on a sibling `.lock` file. That serializes processes on one machine (and filesystems that honor `flock`). It is not a distributed lock. Lock or I/O errors deny the call; they never fail open.
 
 ## Version History
 
