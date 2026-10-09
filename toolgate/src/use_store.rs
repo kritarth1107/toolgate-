@@ -64,6 +64,17 @@ pub trait UseStore {
     }
 }
 
+/// Result of [`FileUseStore::prune_expired`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PruneReport {
+    /// Records dropped because `now > expiry`.
+    pub removed: usize,
+    /// Records still in the log after the rewrite.
+    pub remaining: usize,
+    /// Path of the rewritten JSONL log.
+    pub path: PathBuf,
+}
+
 /// Snapshot of a [`FileUseStore`] log.
 ///
 /// `expired_records` is counted against `now` (unix seconds) using the
@@ -217,11 +228,12 @@ fn flock_exclusive(_file: &File) -> io::Result<()> {
 /// [`UseRecord`] so a durable log can rebuild the same counts after a restart.
 /// Persistence (load, append, compaction) is layered on this type.
 ///
-/// Open/rebuild and each accepted use take an exclusive advisory lock on
-/// `<path>.lock` (via `flock`). The lock is held for the critical section
-/// only: reload, the use check, append, and `fsync`. Contended callers
-/// wait. A lock or I/O error is [`UseResult::StoreError`] — the store
-/// never fails open.
+/// Open/rebuild, each accepted use, and [`FileUseStore::prune_expired`]
+/// take an exclusive advisory lock on `<path>.lock` (via `flock`). The
+/// lock is held for the critical section only: reload, the use check,
+/// append/`fsync`, or rewrite. Contended callers wait. A lock or I/O
+/// error is [`UseResult::StoreError`] (or `io::Error` on open/prune) —
+/// the store never fails open.
 pub struct FileUseStore {
     path: PathBuf,
     file: Option<File>,
@@ -334,6 +346,26 @@ impl FileUseStore {
             expired_records,
             path: self.path.clone(),
         }
+    }
+
+    /// Rewrite the log without expired records.
+    ///
+    /// Reloads from disk under the exclusive sibling lock, drops records
+    /// whose token expiry is already in the past (`now > expiry`), and
+    /// `fsync`s the compacted file. Call this on a live store without
+    /// restarting; [`open`] may already compact once at start.
+    pub fn prune_expired(&mut self, now: u64) -> io::Result<PruneReport> {
+        let _lock = UseStoreLock::acquire(&self.path)?;
+        self.reload_unlocked()?;
+        let before = self.records.len();
+        compact_expired(&mut self.records, now);
+        self.file = Some(rewrite_use_log(&self.path, &self.records)?);
+        self.rebuild_counts();
+        Ok(PruneReport {
+            removed: before - self.records.len(),
+            remaining: self.records.len(),
+            path: self.path.clone(),
+        })
     }
 
     /// Caller must hold [`UseStoreLock`] for `self.path`.
