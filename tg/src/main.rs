@@ -113,6 +113,11 @@ enum UseStoreCommands {
         /// Path to the JSONL use-store file
         file: PathBuf,
     },
+    /// Rewrite the log without expired records
+    Prune {
+        /// Path to the JSONL use-store file
+        file: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -349,6 +354,7 @@ fn main() {
         Commands::Revoke { token_or_jti, file } => handle_revoke(token_or_jti, file),
         Commands::UseStore { command } => match command {
             UseStoreCommands::Stats { file } => handle_use_store_stats(file),
+            UseStoreCommands::Prune { file } => handle_use_store_prune(file),
         },
     };
 
@@ -643,6 +649,14 @@ fn handle_use_store_stats(file: PathBuf) -> Result<(), Box<dyn std::error::Error
     let store = FileUseStore::inspect(file)?;
     let stats = store.stats(current_unix_time());
     println!("{}", serde_json::to_string_pretty(&stats)?);
+    Ok(())
+}
+
+fn handle_use_store_prune(file: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    require_use_store_file(&file)?;
+    let mut store = FileUseStore::new(file);
+    let report = store.prune_expired(current_unix_time())?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 
