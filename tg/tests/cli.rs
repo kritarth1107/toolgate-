@@ -1123,3 +1123,111 @@ fn gate_keyring_verifies_tokens_from_different_kids() {
     let _ = fs::remove_file(&log);
     let _ = fs::remove_file(&script);
 }
+
+#[test]
+fn use_store_help_lists_stats_and_prune() {
+    let top = tg().args(["--help"]).output().unwrap();
+    assert!(top.status.success());
+    let top_out = String::from_utf8_lossy(&top.stdout);
+    assert!(
+        top_out.contains("use-store"),
+        "top-level help missing use-store: {top_out}"
+    );
+
+    let output = tg().args(["use-store", "--help"]).output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("stats"));
+    assert!(stdout.contains("prune"));
+}
+
+#[test]
+fn use_store_stats_and_prune() {
+    let path = unique_temp("cli-use-store", "jsonl");
+    fs::write(
+        &path,
+        concat!(
+            r#"{"jti":"old","expiry":1}"#,
+            "\n",
+            r#"{"jti":"old","expiry":1}"#,
+            "\n",
+            r#"{"jti":"live","expiry":4000000000}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    let stats_out = tg()
+        .args(["use-store", "stats", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        stats_out.status.success(),
+        "stats failed: {}",
+        String::from_utf8_lossy(&stats_out.stderr)
+    );
+    let stats: Value = serde_json::from_slice(&stats_out.stdout).unwrap();
+    assert_eq!(stats["unique_jtis"], 2);
+    assert_eq!(stats["total_records"], 3);
+    assert_eq!(stats["expired_records"], 2);
+    assert_eq!(stats["path"], path.to_str().unwrap());
+
+    let prune_out = tg()
+        .args(["use-store", "prune", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(
+        prune_out.status.success(),
+        "prune failed: {}",
+        String::from_utf8_lossy(&prune_out.stderr)
+    );
+    let report: Value = serde_json::from_slice(&prune_out.stdout).unwrap();
+    assert_eq!(report["removed"], 2);
+    assert_eq!(report["remaining"], 1);
+    assert_eq!(report["path"], path.to_str().unwrap());
+
+    let text = fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("old"));
+    assert!(text.contains("live"));
+
+    let stats_after = tg()
+        .args(["use-store", "stats", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(stats_after.status.success());
+    let after: Value = serde_json::from_slice(&stats_after.stdout).unwrap();
+    assert_eq!(after["unique_jtis"], 1);
+    assert_eq!(after["total_records"], 1);
+    assert_eq!(after["expired_records"], 0);
+
+    let _ = fs::remove_file(format!("{}.lock", path.display()));
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn use_store_stats_and_prune_fail_when_file_missing() {
+    let missing = unique_temp("cli-use-store-missing", "jsonl");
+    let _ = fs::remove_file(&missing);
+
+    let stats = tg()
+        .args(["use-store", "stats", missing.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!stats.status.success());
+    let stderr = String::from_utf8_lossy(&stats.stderr);
+    assert!(
+        stderr.contains("not found") || stderr.contains("use-store"),
+        "stats stderr={stderr:?}"
+    );
+
+    let prune = tg()
+        .args(["use-store", "prune", missing.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!prune.status.success());
+    let stderr = String::from_utf8_lossy(&prune.stderr);
+    assert!(
+        stderr.contains("not found") || stderr.contains("use-store"),
+        "prune stderr={stderr:?}"
+    );
+}
