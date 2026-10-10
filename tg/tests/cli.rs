@@ -2811,3 +2811,408 @@ fn attenuate_rejects_empty_not_suffix_and_not_matches() {
         String::from_utf8_lossy(&matches.stderr)
     );
 }
+
+fn mint_composed_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["path", "name"],
+            "expiry": 2000000000,
+            "constraints": {
+                "path": {
+                    "type": "all",
+                    "value": [
+                        {"type": "prefix", "value": "/tmp/"},
+                        {"type": "max_len", "value": 20}
+                    ]
+                },
+                "name": {
+                    "type": "any",
+                    "value": [
+                        {"type": "suffix", "value": ".txt"},
+                        {"type": "suffix", "value": ".md"}
+                    ]
+                }
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+#[test]
+fn mint_accepts_all_and_any_constraints() {
+    let token = mint_composed_token();
+    assert_eq!(token["constraints"]["path"]["type"], "all");
+    assert_eq!(token["constraints"]["path"]["value"][0]["type"], "prefix");
+    assert_eq!(token["constraints"]["path"]["value"][0]["value"], "/tmp/");
+    assert_eq!(token["constraints"]["name"]["type"], "any");
+    assert_eq!(token["constraints"]["name"]["value"][0]["type"], "suffix");
+}
+
+#[test]
+fn check_call_enforces_all_and_any() {
+    let token = mint_composed_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"path": "/tmp/notes.txt", "name": "draft.md"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied_all = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"path": "/var/notes.txt", "name": "draft.md"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied_all.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied_all.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+
+    let denied_any = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"path": "/tmp/notes.txt", "name": "draft.rs"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied_any.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied_any.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn attenuate_can_tighten_all_and_any() {
+    let token = mint_composed_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "path": {
+                    "type": "all",
+                    "value": [
+                        {"type": "prefix", "value": "/tmp/sub/"},
+                        {"type": "max_len", "value": 10},
+                        {"type": "suffix", "value": ".txt"}
+                    ]
+                },
+                "name": {
+                    "type": "any",
+                    "value": [{"type": "suffix", "value": ".txt"}]
+                }
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(attenuated["constraints"]["path"]["type"], "all");
+    assert_eq!(
+        attenuated["constraints"]["path"]["value"][0]["value"],
+        "/tmp/sub/"
+    );
+    assert_eq!(attenuated["constraints"]["name"]["type"], "any");
+    assert_eq!(
+        attenuated["constraints"]["name"]["value"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn attenuate_rejects_loosening_all_and_any() {
+    let token = mint_composed_token();
+    let all = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "path": {
+                    "type": "all",
+                    "value": [{"type": "prefix", "value": "/tmp/"}]
+                }
+            }
+        }),
+    );
+    assert!(!all.status.success());
+    assert!(
+        String::from_utf8_lossy(&all.stderr).contains("attenuation"),
+        "{}",
+        String::from_utf8_lossy(&all.stderr)
+    );
+
+    let any = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "name": {
+                    "type": "any",
+                    "value": [
+                        {"type": "suffix", "value": ".txt"},
+                        {"type": "suffix", "value": ".md"},
+                        {"type": "suffix", "value": ".rs"}
+                    ]
+                }
+            }
+        }),
+    );
+    assert!(!any.status.success());
+    assert!(
+        String::from_utf8_lossy(&any.stderr).contains("attenuation"),
+        "{}",
+        String::from_utf8_lossy(&any.stderr)
+    );
+}
+
+#[test]
+fn policy_lint_rejects_empty_all_and_any() {
+    let path = write_temp_policy(
+        "empty-all",
+        r#"{
+            "version": "1",
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["path"],
+                "constraints": {"path": {"type": "all", "value": []}}
+            }]
+        }"#,
+    );
+    let output = tg()
+        .args(["policy", "lint", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any"),
+        "stdout={stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&path);
+
+    let path = write_temp_policy(
+        "empty-any",
+        r#"{
+            "version": "1",
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["name"],
+                "constraints": {"name": {"type": "any", "value": []}}
+            }]
+        }"#,
+    );
+    let output = tg()
+        .args(["policy", "lint", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any"),
+        "stdout={stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn policy_lint_rejects_over_nested_all() {
+    let mut inner = serde_json::json!({"type": "prefix", "value": "/tmp/"});
+    for _ in 0..9 {
+        inner = serde_json::json!({"type": "all", "value": [inner]});
+    }
+    let doc = serde_json::json!({
+        "version": "1",
+        "tools": [{
+            "name": "read_file",
+            "arg_keys": ["path"],
+            "constraints": {"path": inner}
+        }]
+    });
+    let path = write_temp_policy("nested-all", &doc.to_string());
+    let output = tg()
+        .args(["policy", "lint", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("exceeds maximum depth"),
+        "stdout={stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn mint_from_policy_accepts_all_and_any() {
+    let path = write_temp_policy(
+        "composed-grant",
+        r#"{
+            "version": "1",
+            "default_ttl_seconds": 60,
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["path", "name"],
+                "constraints": {
+                    "path": {
+                        "type": "all",
+                        "value": [
+                            {"type": "prefix", "value": "/tmp/"},
+                            {"type": "suffix", "value": ".txt"}
+                        ]
+                    },
+                    "name": {
+                        "type": "any",
+                        "value": [
+                            {"type": "suffix", "value": ".md"},
+                            {"type": "suffix", "value": ".txt"}
+                        ]
+                    }
+                }
+            }]
+        }"#,
+    );
+    let out = run_json(
+        &[
+            "mint",
+            "--policy",
+            path.to_str().unwrap(),
+            "--tool",
+            "read_file",
+        ],
+        &json!({
+            "secret": "cli-secret",
+            "current_time": 1700000000
+        }),
+    );
+    let token = &out["token"];
+    assert_eq!(token["tool_name"], "read_file");
+    assert_eq!(token["constraints"]["path"]["type"], "all");
+    assert_eq!(token["constraints"]["name"]["type"], "any");
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn mint_rejects_empty_all_and_any() {
+    let all = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["path"],
+            "expiry": 2000000000,
+            "constraints": {"path": {"type": "all", "value": []}}
+        }),
+    );
+    assert!(!all.status.success());
+    assert!(
+        String::from_utf8_lossy(&all.stderr)
+            .contains("empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any"),
+        "{}",
+        String::from_utf8_lossy(&all.stderr)
+    );
+
+    let any = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["name"],
+            "expiry": 2000000000,
+            "constraints": {"name": {"type": "any", "value": []}}
+        }),
+    );
+    assert!(!any.status.success());
+    assert!(
+        String::from_utf8_lossy(&any.stderr)
+            .contains("empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any"),
+        "{}",
+        String::from_utf8_lossy(&any.stderr)
+    );
+}
+
+#[test]
+fn mint_rejects_over_nested_all() {
+    let mut inner = serde_json::json!({"type": "prefix", "value": "/tmp/"});
+    for _ in 0..9 {
+        inner = serde_json::json!({"type": "all", "value": [inner]});
+    }
+    let all = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["path"],
+            "expiry": 2000000000,
+            "constraints": {"path": inner}
+        }),
+    );
+    assert!(!all.status.success());
+    assert!(
+        String::from_utf8_lossy(&all.stderr).contains("exceeds maximum depth"),
+        "{}",
+        String::from_utf8_lossy(&all.stderr)
+    );
+}
+
+#[test]
+fn attenuate_rejects_empty_all_and_any() {
+    let token = mint_composed_token();
+    let all = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"path": {"type": "all", "value": []}}
+        }),
+    );
+    assert!(!all.status.success());
+    assert!(
+        String::from_utf8_lossy(&all.stderr)
+            .contains("empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any"),
+        "{}",
+        String::from_utf8_lossy(&all.stderr)
+    );
+
+    let any = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"name": {"type": "any", "value": []}}
+        }),
+    );
+    assert!(!any.status.success());
+    assert!(
+        String::from_utf8_lossy(&any.stderr)
+            .contains("empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any"),
+        "{}",
+        String::from_utf8_lossy(&any.stderr)
+    );
+}
