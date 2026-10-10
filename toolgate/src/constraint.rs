@@ -1,7 +1,9 @@
 //! Argument value constraints for capability tokens.
 //!
 //! Constraints allow tokens to restrict not just which argument keys are allowed,
-//! but also what values those arguments may have.
+//! but also what values those arguments may have. [`Constraint::All`] and
+//! [`Constraint::Any`] compose children as AND / OR. Serde JSON forms are
+//! `{"type":"all","value":[...]}` and `{"type":"any","value":[...]}`.
 
 use std::collections::BTreeMap;
 
@@ -79,12 +81,20 @@ pub enum Constraint {
     /// Nested [`All`] / [`Any`] trees are allowed up to
     /// [`MAX_CONSTRAINT_NESTING`]. An empty `All` is rejected at
     /// mint/validate and never matches a value (fail closed).
+    ///
+    /// JSON: `{"type":"all","value":[...]}` where each child is an
+    /// existing constraint object.
+    #[serde(rename = "all")]
     All(Vec<Constraint>),
     /// Value must satisfy at least one child constraint (OR).
     ///
     /// Nested [`All`] / [`Any`] trees are allowed up to
     /// [`MAX_CONSTRAINT_NESTING`]. An empty `Any` is rejected at
     /// mint/validate and never matches a value (fail closed).
+    ///
+    /// JSON: `{"type":"any","value":[...]}` where each child is an
+    /// existing constraint object.
+    #[serde(rename = "any")]
     Any(Vec<Constraint>),
 }
 
