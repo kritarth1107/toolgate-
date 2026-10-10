@@ -7,7 +7,7 @@ A small, fast Rust library for issuing macaroon-style capability tokens for tool
 toolgate issues capability tokens that bind:
 - **Tool name**: which tool the token authorizes
 - **Argument keys**: an allowlist of permitted argument names
-- **Argument constraints** (optional): restrict argument values (prefix, suffix, contains, exact, one-of, not-equals, not-one-of, not-contains, not-prefix, min/max length, int range, simple glob)
+- **Argument constraints** (optional): restrict argument values (prefix, suffix, contains, exact, one-of, not-equals, not-one-of, not-contains, not-prefix, min/max length, int range, simple glob, All/Any composition)
 - **Expiry**: unix timestamp when the token becomes invalid
 - **Not-before (`nbf`)** (optional): unix timestamp before which the token is rejected
 - **Audience** (optional): restrict token to a specific client/service
@@ -178,12 +178,20 @@ constraints.insert("memo".to_string(), Constraint::NotContains("secret".to_strin
 constraints.insert("dest".to_string(), Constraint::NotPrefix("/tmp/".to_string()));
 constraints.insert("backup".to_string(), Constraint::NotSuffix(".bak".to_string()));
 constraints.insert("skip".to_string(), Constraint::NotMatches("*.tmp".to_string()));
+constraints.insert("path_and_name".to_string(), Constraint::All(vec![
+    Constraint::Prefix("/tmp/".to_string()),
+    Constraint::Suffix(".txt".to_string()),
+]));
+constraints.insert("tmp_or_var".to_string(), Constraint::Any(vec![
+    Constraint::Prefix("/tmp/".to_string()),
+    Constraint::Prefix("/var/".to_string()),
+]));
 
 // Mint token with constraints
 let token = Token::mint_full(
     secret,
     "file_op",
-    vec!["path".into(), "name".into(), "note".into(), "mode".into(), "limit".into(), "query".into(), "label".into(), "file".into(), "role".into(), "actor".into(), "memo".into(), "dest".into(), "backup".into(), "skip".into()],
+    vec!["path".into(), "name".into(), "note".into(), "mode".into(), "limit".into(), "query".into(), "label".into(), "file".into(), "role".into(), "actor".into(), "memo".into(), "dest".into(), "backup".into(), "skip".into(), "path_and_name".into(), "tmp_or_var".into()],
     2000000000,
     None,  // audience
     None,  // kid
@@ -205,6 +213,8 @@ args.insert("memo".to_string(), "ok".to_string());
 args.insert("dest".to_string(), "/var/out".to_string());
 args.insert("backup".to_string(), "notes.txt".to_string());
 args.insert("skip".to_string(), "notes.md".to_string());
+args.insert("path_and_name".to_string(), "/tmp/notes.txt".to_string());
+args.insert("tmp_or_var".to_string(), "/var/out".to_string());
 
 token.verify_call_with_args(
     secret,
@@ -233,9 +243,11 @@ token.verify_call_with_args(
 | `NotPrefix(String)` | Value must not start with the prefix | `NotPrefix("/tmp/".into())` |
 | `NotSuffix(String)` | Value must not end with the suffix | `NotSuffix(".bak".into())` |
 | `NotMatches(String)` | Value must not match a simple `*` / `?` glob over Unicode scalars | `NotMatches("*.tmp".into())` |
+| `All(Vec<Constraint>)` | Value must satisfy every child (AND) | `All(vec![Prefix("/tmp/".into()), Suffix(".txt".into())])` |
+| `Any(Vec<Constraint>)` | Value must satisfy at least one child (OR) | `Any(vec![Prefix("/tmp/".into()), Prefix("/var/".into())])` |
 | `IntRange { min, max }` | Value must parse as integer in range | `IntRange { min: 1, max: 100 }` |
 
-JSON forms match the Rust names: `{"type":"not_suffix","value":".bak"}` and `{"type":"not_matches","value":"*.tmp"}`. `MinLen(0)` is valid and accepts the empty string. Empty suffix, contains, matches, not-contains, not-prefix, not-suffix, or not-matches patterns, and empty NotOneOf denylists, are rejected at mint/validate and never match a value.
+JSON forms match the Rust names: `{"type":"all","value":[...]}` and `{"type":"any","value":[...]}` where children are existing constraint objects. `MinLen(0)` is valid and accepts the empty string. Empty suffix, contains, matches, not-contains, not-prefix, not-suffix, or not-matches patterns, empty NotOneOf denylists, and empty All/Any composites are rejected at mint/validate and never match a value. Nested All/Any trees deeper than `MAX_CONSTRAINT_NESTING` (8) are rejected at mint/validate.
 
 `Matches` is not a regex: only `*` (any sequence, including empty) and `?` (exactly one Unicode scalar) are special. `.` `[` `]` and every other character match literally. There are no character classes, `**` path semantics, or escape sequences.
 
@@ -270,8 +282,10 @@ Valid attenuation rules:
 - **NotPrefix**: new forbidden prefix must be a **prefix of** the old forbidden prefix (shorter/equal forbids more)
 - **NotSuffix**: new forbidden suffix must be a **suffix of** the old forbidden suffix (shorter/equal forbids more)
 - **NotMatches**: new pattern must equal the old pattern; tighten by replacing with Exact
+- **All**: new children must cover every old child with an equal-or-tighter child; extra children (more ANDs) are allowed
+- **Any**: each new child must tighten some old alternative (fewer ORs or tighter alternatives)
 - **IntRange**: new range must be within old range
-- **Exact**: can replace any constraint if the exact value satisfies it (for denylists, the exact value must not be forbidden)
+- **Exact**: can replace any constraint if the exact value satisfies it (for denylists, the exact value must not be forbidden; for All, every child; for Any, at least one child)
 
 ## Key Rotation
 
@@ -516,7 +530,7 @@ The `tg` binary accepts JSON on stdin and outputs JSON.
 echo '{
   "secret": "my-secret",
   "tool_name": "read_file",
-  "arg_keys": ["path", "limit", "name", "role", "memo", "dest", "backup", "skip"],
+  "arg_keys": ["path", "limit", "name", "role", "memo", "dest", "backup", "skip", "path_and_name", "tmp_or_var"],
   "expiry": 2000000000,
   "audience": "client-123",
   "constraints": {
@@ -527,7 +541,9 @@ echo '{
     "memo": {"type": "not_contains", "value": "secret"},
     "dest": {"type": "not_prefix", "value": "/tmp/"},
     "backup": {"type": "not_suffix", "value": ".bak"},
-    "skip": {"type": "not_matches", "value": "*.tmp"}
+    "skip": {"type": "not_matches", "value": "*.tmp"},
+    "path_and_name": {"type": "all", "value": [{"type": "prefix", "value": "/tmp/"}, {"type": "suffix", "value": ".txt"}]},
+    "tmp_or_var": {"type": "any", "value": [{"type": "prefix", "value": "/tmp/"}, {"type": "prefix", "value": "/var/"}]}
   },
   "generate_jti": true,
   "nbf": 1699990000,
@@ -844,6 +860,8 @@ Constraint type encoding:
 - `12` NotPrefix: u16 length + UTF-8 prefix
 - `13` NotSuffix: u16 length + UTF-8 suffix
 - `14` NotMatches: u16 length + UTF-8 pattern
+- `15` All: u16 count + (for each child: type + data)
+- `16` Any: u16 count + (for each child: type + data)
 
 **Example without constraints, jti, nbf, or depth** (identical to v5/v4/v3):
 

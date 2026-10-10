@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.21.0] - 2026-10-10
+
+### Added
+- **`Constraint::All(Vec<Constraint>)`**: value must satisfy every child constraint (AND composition)
+- **`Constraint::Any(Vec<Constraint>)`**: value must satisfy at least one child constraint (OR composition)
+- CLI JSON forms `{"type":"all","value":[...]}` and `{"type":"any","value":[...]}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6, MinLen=7, Matches=8, NotEquals=9, NotOneOf=10, NotContains=11, NotPrefix=12, NotSuffix=13, NotMatches=14, All=15, Any=16
+- Tokens without the new types still encode identically to 0.20.0
+
+### Notes
+- Nested All/Any trees are allowed up to depth 8 (`MAX_CONSTRAINT_NESTING`); deeper trees are rejected at mint/validate
+- Attenuation only tightens: All may replace children with tighter versions and/or add more children; Any may only keep a subset of alternatives or tighten them
+- Exact may replace All when the exact value satisfies every child, and may replace Any when it satisfies at least one child
+- All may collapse to a single child that is as strong as the conjunction; loosening All↔Any swaps are rejected
+- Empty All/Any are rejected at mint/validate and never match a value (fail closed)
+
 ## [0.20.0] - 2026-10-10
 
 ### Added
