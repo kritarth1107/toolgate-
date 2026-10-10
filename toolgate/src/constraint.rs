@@ -160,6 +160,16 @@ impl Constraint {
                 !denied.is_empty() && !denied.contains(a)
             }
 
+            // Exact is subset of NotContains if the exact value does not contain the needle
+            (Constraint::Exact(a), Constraint::NotContains(needle)) => {
+                !needle.is_empty() && !a.contains(needle)
+            }
+
+            // Exact is subset of NotPrefix if the exact value does not start with the prefix
+            (Constraint::Exact(a), Constraint::NotPrefix(prefix)) => {
+                !prefix.is_empty() && !a.starts_with(prefix)
+            }
+
             // OneOf is subset of OneOf if new set is subset of old set
             (Constraint::OneOf(new), Constraint::OneOf(old)) => new.iter().all(|v| old.contains(v)),
 
@@ -197,6 +207,16 @@ impl Constraint {
             // OneOf is subset of Contains if every allowed value contains the needle
             (Constraint::OneOf(values), Constraint::Contains(needle)) => {
                 !needle.is_empty() && values.iter().all(|v| v.contains(needle))
+            }
+
+            // OneOf is subset of NotContains if every allowed value avoids the needle
+            (Constraint::OneOf(values), Constraint::NotContains(needle)) => {
+                !needle.is_empty() && values.iter().all(|v| !v.contains(needle))
+            }
+
+            // OneOf is subset of NotPrefix if every allowed value avoids the prefix
+            (Constraint::OneOf(values), Constraint::NotPrefix(prefix)) => {
+                !prefix.is_empty() && values.iter().all(|v| !v.starts_with(prefix))
             }
 
             // Prefix is subset of Prefix if new prefix starts with (extends) old prefix
@@ -283,6 +303,54 @@ impl Constraint {
             // NotOneOf → NotOneOf only if the new denylist is a superset (more denials)
             (Constraint::NotOneOf(new), Constraint::NotOneOf(old)) => {
                 !new.is_empty() && !old.is_empty() && old.iter().all(|v| new.contains(v))
+            }
+
+            // NotContains → NotContains if the new needle is a substring of the old
+            // (shorter/equal needle forbids more values)
+            (Constraint::NotContains(new), Constraint::NotContains(old)) => {
+                !new.is_empty() && !old.is_empty() && old.contains(new)
+            }
+
+            // NotPrefix → NotPrefix if the new prefix is a prefix of the old
+            // (shorter/equal prefix forbids more values)
+            (Constraint::NotPrefix(new), Constraint::NotPrefix(old)) => {
+                !new.is_empty() && !old.is_empty() && old.starts_with(new)
+            }
+
+            // Prefix is subset of NotPrefix when the required prefix and the
+            // forbidden prefix cannot both hold (incomparable prefixes).
+            (Constraint::Prefix(prefix), Constraint::NotPrefix(forbidden)) => {
+                !forbidden.is_empty()
+                    && !prefix.starts_with(forbidden)
+                    && !forbidden.starts_with(prefix)
+            }
+
+            // NotContains may replace NotEquals when avoiding the needle still
+            // forbids that exact value (the forbidden string contains the needle).
+            (Constraint::NotContains(needle), Constraint::NotEquals(forbidden)) => {
+                !needle.is_empty() && forbidden.contains(needle)
+            }
+
+            // NotPrefix may replace NotEquals when avoiding the prefix still
+            // forbids that exact value.
+            (Constraint::NotPrefix(prefix), Constraint::NotEquals(forbidden)) => {
+                !prefix.is_empty() && forbidden.starts_with(prefix)
+            }
+
+            // NotContains may replace NotOneOf when every denied value contains
+            // the needle, so avoiding it still forbids the whole denylist.
+            (Constraint::NotContains(needle), Constraint::NotOneOf(denied)) => {
+                !needle.is_empty()
+                    && !denied.is_empty()
+                    && denied.iter().all(|v| v.contains(needle))
+            }
+
+            // NotPrefix may replace NotOneOf when every denied value starts
+            // with the prefix.
+            (Constraint::NotPrefix(prefix), Constraint::NotOneOf(denied)) => {
+                !prefix.is_empty()
+                    && !denied.is_empty()
+                    && denied.iter().all(|v| v.starts_with(prefix))
             }
 
             // Remaining cross-type pairs cannot be shown to be subsets
