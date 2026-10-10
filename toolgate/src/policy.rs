@@ -74,7 +74,8 @@ pub enum PolicyError {
     DuplicateTool { name: String },
     /// A constraint is attached to a key that is not in the grant's allowlist.
     ConstraintKeyNotAllowed { tool: String, key: String },
-    /// An empty suffix, contains, matches, NotOneOf, NotContains, or NotPrefix constraint is rejected.
+    /// An empty suffix, contains, matches, NotOneOf, NotContains, NotPrefix,
+    /// NotSuffix, or NotMatches constraint is rejected.
     EmptyConstraintPattern { tool: String, key: String },
     /// A TTL (default or per-grant) is present and zero.
     ZeroTtl {
@@ -115,7 +116,7 @@ impl std::fmt::Display for PolicyError {
             PolicyError::EmptyConstraintPattern { tool, key } => {
                 write!(
                     f,
-                    "empty suffix/contains/matches/not_one_of/not_contains/not_prefix constraint for '{key}' on tool '{tool}' is rejected"
+                    "empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches constraint for '{key}' on tool '{tool}' is rejected"
                 )
             }
             PolicyError::ZeroTtl { tool: Some(tool) } => {
