@@ -20,7 +20,7 @@
 //! - constraints_count: u16
 //! - for each constraint (sorted by key):
 //!   - key: u16 length + UTF-8 bytes
-//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches)
+//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf)
 //!   - constraint_data: type-specific encoding
 //!
 //! Format v5 (backward-compatible extension):
@@ -46,6 +46,8 @@
 //! - Contains: u16 length + UTF-8 bytes
 //! - MinLen: u64
 //! - Matches: u16 length + UTF-8 bytes
+//! - NotEquals: u16 length + UTF-8 bytes
+//! - NotOneOf: u16 count + (for each value, sorted unique: u16 length + UTF-8 bytes)
 //!
 //! The v5 format appends jti after constraints. Tokens without jti
 //! encode identically to v4. Tokens without constraints and without jti
@@ -316,6 +318,21 @@ fn encode_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
         Constraint::Matches(pattern) => {
             buf.push(8); // type = Matches
             encode_len_prefixed(buf, pattern);
+        }
+        Constraint::NotEquals(value) => {
+            buf.push(9); // type = NotEquals
+            encode_len_prefixed(buf, value);
+        }
+        Constraint::NotOneOf(values) => {
+            buf.push(10); // type = NotOneOf
+                          // Sort and unique values for deterministic encoding (same spirit as OneOf)
+            let mut sorted: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
+            sorted.sort();
+            sorted.dedup();
+            buf.extend_from_slice(&(sorted.len() as u16).to_be_bytes());
+            for value in sorted {
+                encode_len_prefixed(buf, value);
+            }
         }
     }
 }
@@ -690,6 +707,73 @@ mod tests {
 
         assert!(bytes.ends_with(&[
             0x00, 0x01, // 1 constraint
+            0x00, 0x01, b'q', // key "q"
+            0x07, // type = MinLen
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, // u64 8
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_not_equals() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "role".to_string(),
+            Constraint::NotEquals("admin".to_string()),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'r', b'o', b'l', b'e', // key "role"
+            0x09, // type = NotEquals
+            0x00, 0x05, b'a', b'd', b'm', b'i', b'n', // value "admin"
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_not_one_of() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "role".to_string(),
+            Constraint::NotOneOf(vec![
+                "root".to_string(),
+                "admin".to_string(),
+                "admin".to_string(),
+            ]), // unsorted + duplicate
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        // Values should be sorted and unique in encoding
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'r', b'o', b'l', b'e', // key "role"
+            0x0A, // type = NotOneOf
+            0x00, 0x02, // 2 unique values
+            0x00, 0x05, b'a', b'd', b'm', b'i', b'n', // "admin" (sorted first)
+            0x00, 0x04, b'r', b'o', b'o', b't', // "root" (sorted second)
+        ]));
+    }
+
+    #[test]
+    fn encoding_without_not_equals_identical_to_prior() {
+        // Tokens that do not use NotEquals/NotOneOf must keep the 0.17.0 bytes.
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("name".to_string(), Constraint::Matches("*.txt".to_string()));
+        constraints.insert("q".to_string(), Constraint::MinLen(8));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        // Sorted by key: "name" then "q"
+        assert!(bytes.ends_with(&[
+            0x00, 0x02, // 2 constraints
+            0x00, 0x04, b'n', b'a', b'm', b'e', // key "name"
+            0x08, // type = Matches
+            0x00, 0x05, b'*', b'.', b't', b'x', b't', // pattern "*.txt"
             0x00, 0x01, b'q', // key "q"
             0x07, // type = MinLen
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, // u64 8

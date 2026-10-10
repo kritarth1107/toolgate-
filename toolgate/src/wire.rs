@@ -17,7 +17,7 @@
 //! | audience | u16 length + UTF-8 bytes (0 = none) |
 //! | kid | u16 length + UTF-8 bytes (0 = none) |
 //! | constraints_count | u16 (0 = none) |
-//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches) |
+//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf) |
 //! | jti | u16 length + UTF-8 bytes (0 = none) |
 //! | nbf_flag | u8 (v5 only; 0 = none, 1 = present) |
 //! | nbf | u64 (v5 only, if nbf_flag = 1) |
@@ -118,6 +118,20 @@ fn encode_constraint_to_wire(buf: &mut Vec<u8>, key: &str, constraint: &Constrai
         Constraint::Matches(pattern) => {
             buf.push(8); // type = Matches
             encode_len_prefixed(buf, pattern);
+        }
+        Constraint::NotEquals(value) => {
+            buf.push(9); // type = NotEquals
+            encode_len_prefixed(buf, value);
+        }
+        Constraint::NotOneOf(values) => {
+            buf.push(10); // type = NotOneOf
+            let mut sorted: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
+            sorted.sort();
+            sorted.dedup();
+            buf.extend_from_slice(&(sorted.len() as u16).to_be_bytes());
+            for value in sorted {
+                encode_len_prefixed(buf, value);
+            }
         }
     }
 }
@@ -220,6 +234,28 @@ fn decode_constraint_from_wire(
             let pattern =
                 String::from_utf8(pattern_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
             Constraint::Matches(pattern)
+        }
+        9 => {
+            // NotEquals
+            let value_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
+            let value_bytes = read_bytes(pos, value_len)?;
+            let value =
+                String::from_utf8(value_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
+            Constraint::NotEquals(value)
+        }
+        10 => {
+            // NotOneOf
+            let count = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
+            let mut values = Vec::with_capacity(count);
+            for _ in 0..count {
+                let value_len =
+                    u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
+                let value_bytes = read_bytes(pos, value_len)?;
+                let value =
+                    String::from_utf8(value_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
+                values.push(value);
+            }
+            Constraint::NotOneOf(values)
         }
         _ => return Err(WireError::UnexpectedEof), // Invalid constraint type
     };
@@ -868,6 +904,68 @@ mod tests {
         let decoded = Token::from_wire(&wire).unwrap();
         assert!(decoded.constraints.is_none());
         assert!(decoded.verify(SECRET, 999).is_ok());
+    }
+
+    #[test]
+    fn wire_roundtrip_constraint_not_equals() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "role".to_string(),
+            Constraint::NotEquals("admin".to_string()),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "file_op",
+            vec!["role".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn wire_roundtrip_constraint_not_one_of() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "role".to_string(),
+            Constraint::NotOneOf(vec!["root".to_string(), "admin".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "file_op",
+            vec!["role".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        let decoded_constraint = decoded.constraints.as_ref().unwrap().get("role").unwrap();
+        match decoded_constraint {
+            Constraint::NotOneOf(values) => {
+                assert_eq!(values, &vec!["admin".to_string(), "root".to_string()]);
+            }
+            _ => panic!("expected NotOneOf constraint"),
+        }
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
     }
 
     #[test]

@@ -40,6 +40,15 @@ pub enum Constraint {
     /// are special. Every other character, including `.` `[` `]`, is literal.
     /// An empty pattern is rejected at mint/validate and never matches.
     Matches(String),
+    /// Value must not equal the forbidden string (byte/UTF-8 exact).
+    #[serde(rename = "not_equals")]
+    NotEquals(String),
+    /// Value must not be any of the forbidden values.
+    ///
+    /// Stored and encoded as sorted unique strings, the same spirit as [`OneOf`].
+    /// An empty denylist is rejected at mint/validate and never matches.
+    #[serde(rename = "not_one_of")]
+    NotOneOf(Vec<String>),
 }
 
 impl Constraint {
@@ -63,15 +72,20 @@ impl Constraint {
             Constraint::MinLen(min) => value.len() >= *min,
             // Empty glob would be a wildcard; fail closed, same as Suffix/Contains.
             Constraint::Matches(pattern) => !pattern.is_empty() && glob_match(pattern, value),
+            Constraint::NotEquals(forbidden) => value != forbidden,
+            // Empty denylist would forbid nothing; fail closed.
+            Constraint::NotOneOf(denied) => !denied.is_empty() && denied.iter().all(|s| s != value),
         }
     }
 
-    /// Empty suffix/contains/matches needles match nothing and must not be treated as wildcards.
+    /// Empty suffix/contains/matches needles and empty NotOneOf denylists
+    /// match nothing and must not be treated as wildcards.
     pub fn is_empty_pattern(&self) -> bool {
         match self {
             Constraint::Suffix(value)
             | Constraint::Contains(value)
             | Constraint::Matches(value) => value.is_empty(),
+            Constraint::NotOneOf(denied) => denied.is_empty(),
             _ => false,
         }
     }
@@ -117,6 +131,14 @@ impl Constraint {
             // Exact is subset of Contains if the value contains the needle
             (Constraint::Exact(a), Constraint::Contains(needle)) => {
                 !needle.is_empty() && a.contains(needle)
+            }
+
+            // Exact is subset of NotEquals if the exact value is not forbidden
+            (Constraint::Exact(a), Constraint::NotEquals(forbidden)) => a != forbidden,
+
+            // Exact is subset of NotOneOf if the exact value is not in the denylist
+            (Constraint::Exact(a), Constraint::NotOneOf(denied)) => {
+                !denied.is_empty() && !denied.contains(a)
             }
 
             // OneOf is subset of OneOf if new set is subset of old set
@@ -229,6 +251,19 @@ impl Constraint {
             // Contains is subset of Contains if new needle contains (specializes) old needle
             (Constraint::Contains(new), Constraint::Contains(old)) => {
                 !new.is_empty() && !old.is_empty() && new.contains(old)
+            }
+
+            // NotEquals → NotEquals only if the forbidden value is unchanged
+            (Constraint::NotEquals(new), Constraint::NotEquals(old)) => new == old,
+
+            // NotEquals may become NotOneOf when the new denylist still forbids that value
+            (Constraint::NotOneOf(new), Constraint::NotEquals(old)) => {
+                !new.is_empty() && new.contains(old)
+            }
+
+            // NotOneOf → NotOneOf only if the new denylist is a superset (more denials)
+            (Constraint::NotOneOf(new), Constraint::NotOneOf(old)) => {
+                !new.is_empty() && !old.is_empty() && old.iter().all(|v| new.contains(v))
             }
 
             // Remaining cross-type pairs cannot be shown to be subsets
@@ -437,6 +472,35 @@ mod tests {
     }
 
     #[test]
+    fn not_equals_check() {
+        let c = Constraint::NotEquals("admin".to_string());
+        assert!(c.check("user"));
+        assert!(c.check("Admin"));
+        assert!(c.check("admin "));
+        assert!(!c.check("admin"));
+        assert!(!Constraint::NotEquals(String::new()).check(""));
+        assert!(Constraint::NotEquals(String::new()).check("x"));
+    }
+
+    #[test]
+    fn not_one_of_check() {
+        let c = Constraint::NotOneOf(vec!["admin".to_string(), "root".to_string()]);
+        assert!(c.check("user"));
+        assert!(c.check("Admin"));
+        assert!(!c.check("admin"));
+        assert!(!c.check("root"));
+    }
+
+    #[test]
+    fn empty_not_one_of_fail_closed() {
+        let empty = Constraint::NotOneOf(vec![]);
+        assert!(empty.is_empty_pattern());
+        assert!(!empty.check(""));
+        assert!(!empty.check("anything"));
+        assert!(!empty.check("admin"));
+    }
+
+    #[test]
     fn exact_subset_of_exact() {
         let a = Constraint::Exact("foo".to_string());
         let b = Constraint::Exact("foo".to_string());
@@ -574,6 +638,46 @@ mod tests {
     }
 
     #[test]
+    fn not_equals_subset_of_not_equals() {
+        let deny = Constraint::NotEquals("admin".to_string());
+        assert!(deny.is_subset_of(&Constraint::NotEquals("admin".to_string())));
+        assert!(!deny.is_subset_of(&Constraint::NotEquals("root".to_string())));
+    }
+
+    #[test]
+    fn not_one_of_may_replace_not_equals() {
+        let deny = Constraint::NotEquals("admin".to_string());
+        let wider = Constraint::NotOneOf(vec!["admin".to_string(), "root".to_string()]);
+        let missing = Constraint::NotOneOf(vec!["root".to_string()]);
+        assert!(wider.is_subset_of(&deny));
+        assert!(!missing.is_subset_of(&deny));
+        assert!(!Constraint::NotOneOf(vec![]).is_subset_of(&deny));
+    }
+
+    #[test]
+    fn not_one_of_subset_of_not_one_of_is_superset() {
+        let small = Constraint::NotOneOf(vec!["admin".to_string()]);
+        let large = Constraint::NotOneOf(vec!["admin".to_string(), "root".to_string()]);
+        assert!(large.is_subset_of(&small));
+        assert!(!small.is_subset_of(&large));
+        assert!(!Constraint::NotOneOf(vec![]).is_subset_of(&small));
+        assert!(!large.is_subset_of(&Constraint::NotOneOf(vec![])));
+    }
+
+    #[test]
+    fn exact_subset_of_not_equals_and_not_one_of() {
+        let exact = Constraint::Exact("user".to_string());
+        assert!(exact.is_subset_of(&Constraint::NotEquals("admin".to_string())));
+        assert!(!exact.is_subset_of(&Constraint::NotEquals("user".to_string())));
+        assert!(exact.is_subset_of(&Constraint::NotOneOf(vec![
+            "admin".to_string(),
+            "root".to_string()
+        ])));
+        assert!(!exact.is_subset_of(&Constraint::NotOneOf(vec!["user".to_string()])));
+        assert!(!exact.is_subset_of(&Constraint::NotOneOf(vec![])));
+    }
+
+    #[test]
     fn intrange_subset_of_intrange() {
         let inner = Constraint::IntRange { min: 10, max: 50 };
         let outer = Constraint::IntRange { min: 1, max: 100 };
@@ -695,6 +799,38 @@ mod tests {
         let from_cli: Constraint =
             serde_json::from_str(r#"{"type":"matches","value":"*.txt"}"#).unwrap();
         assert_eq!(from_cli, Constraint::Matches("*.txt".to_string()));
+    }
+
+    #[test]
+    fn json_not_equals() {
+        let c = Constraint::NotEquals("admin".to_string());
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"not_equals\""));
+        assert!(json.contains("\"value\":\"admin\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"not_equals","value":"root"}"#).unwrap();
+        assert_eq!(from_cli, Constraint::NotEquals("root".to_string()));
+    }
+
+    #[test]
+    fn json_not_one_of() {
+        let c = Constraint::NotOneOf(vec!["admin".to_string(), "root".to_string()]);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"not_one_of\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"not_one_of","value":["a","b"]}"#).unwrap();
+        assert_eq!(
+            from_cli,
+            Constraint::NotOneOf(vec!["a".to_string(), "b".to_string()])
+        );
     }
 
     #[test]
