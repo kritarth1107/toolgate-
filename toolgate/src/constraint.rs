@@ -104,21 +104,25 @@ impl Constraint {
             Constraint::NotContains(needle) => !needle.is_empty() && !value.contains(needle),
             // Empty prefix would forbid nothing; fail closed, same as Prefix inverted.
             Constraint::NotPrefix(prefix) => !prefix.is_empty() && !value.starts_with(prefix),
-            // Matching for the new inverted constraints is added next.
-            Constraint::NotSuffix(_) | Constraint::NotMatches(_) => false,
+            // Empty suffix would forbid nothing; fail closed, same as Suffix inverted.
+            Constraint::NotSuffix(suffix) => !suffix.is_empty() && !value.ends_with(suffix),
+            // Empty glob would forbid nothing; fail closed, same as Matches inverted.
+            Constraint::NotMatches(pattern) => !pattern.is_empty() && !glob_match(pattern, value),
         }
     }
 
-    /// Empty suffix/contains/matches/not_contains/not_prefix needles and
-    /// empty NotOneOf denylists match nothing and must not be treated as
-    /// wildcards.
+    /// Empty suffix/contains/matches/not_contains/not_prefix/not_suffix/
+    /// not_matches needles and empty NotOneOf denylists match nothing and
+    /// must not be treated as wildcards.
     pub fn is_empty_pattern(&self) -> bool {
         match self {
             Constraint::Suffix(value)
             | Constraint::Contains(value)
             | Constraint::Matches(value)
             | Constraint::NotContains(value)
-            | Constraint::NotPrefix(value) => value.is_empty(),
+            | Constraint::NotPrefix(value)
+            | Constraint::NotSuffix(value)
+            | Constraint::NotMatches(value) => value.is_empty(),
             Constraint::NotOneOf(denied) => denied.is_empty(),
             _ => false,
         }
