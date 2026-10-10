@@ -61,6 +61,19 @@ pub enum Constraint {
     /// mint/validate and never matches a value (fail closed).
     #[serde(rename = "not_prefix")]
     NotPrefix(String),
+    /// Value must not end with the forbidden suffix.
+    ///
+    /// Same spirit as [`Suffix`], inverted. An empty suffix is rejected at
+    /// mint/validate and never matches a value (fail closed).
+    #[serde(rename = "not_suffix")]
+    NotSuffix(String),
+    /// Value must not match a simple glob over Unicode scalars.
+    ///
+    /// Same glob rules as [`Matches`] (`*` and `?` only; other characters
+    /// are literal), inverted. An empty pattern is rejected at mint/validate
+    /// and never matches a value (fail closed).
+    #[serde(rename = "not_matches")]
+    NotMatches(String),
 }
 
 impl Constraint {
@@ -91,6 +104,8 @@ impl Constraint {
             Constraint::NotContains(needle) => !needle.is_empty() && !value.contains(needle),
             // Empty prefix would forbid nothing; fail closed, same as Prefix inverted.
             Constraint::NotPrefix(prefix) => !prefix.is_empty() && !value.starts_with(prefix),
+            // Matching for the new inverted constraints is added next.
+            Constraint::NotSuffix(_) | Constraint::NotMatches(_) => false,
         }
     }
 

@@ -141,6 +141,14 @@ fn encode_constraint_to_wire(buf: &mut Vec<u8>, key: &str, constraint: &Constrai
             buf.push(12); // type = NotPrefix
             encode_len_prefixed(buf, prefix);
         }
+        Constraint::NotSuffix(suffix) => {
+            buf.push(13); // type = NotSuffix
+            encode_len_prefixed(buf, suffix);
+        }
+        Constraint::NotMatches(pattern) => {
+            buf.push(14); // type = NotMatches
+            encode_len_prefixed(buf, pattern);
+        }
     }
 }
 
@@ -280,6 +288,22 @@ fn decode_constraint_from_wire(
             let prefix =
                 String::from_utf8(prefix_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
             Constraint::NotPrefix(prefix)
+        }
+        13 => {
+            // NotSuffix
+            let suffix_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
+            let suffix_bytes = read_bytes(pos, suffix_len)?;
+            let suffix =
+                String::from_utf8(suffix_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
+            Constraint::NotSuffix(suffix)
+        }
+        14 => {
+            // NotMatches
+            let pattern_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
+            let pattern_bytes = read_bytes(pos, pattern_len)?;
+            let pattern =
+                String::from_utf8(pattern_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
+            Constraint::NotMatches(pattern)
         }
         _ => return Err(WireError::UnexpectedEof), // Invalid constraint type
     };
