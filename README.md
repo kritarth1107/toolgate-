@@ -25,7 +25,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-toolgate = "0.19"
+toolgate = "0.20"
 ```
 
 Or install the CLI:
@@ -990,6 +990,7 @@ let info = check_tools_call(&verifier, &token, &request)?;
 
 ## Version History
 
+- **0.20.0**: `Constraint::NotSuffix` and `Constraint::NotMatches` inverted argument constraints, with fail-closed empty patterns and tighten-only attenuation
 - **0.19.0**: `Constraint::NotContains` and `Constraint::NotPrefix` inverted argument constraints, with fail-closed empty needles and tighten-only attenuation
 - **0.18.0**: `Constraint::NotEquals` and `Constraint::NotOneOf` denylist argument constraints, with fail-closed empty NotOneOf and tighten-only attenuation
 - **0.17.0**: `Constraint::MinLen` and `Constraint::Matches` (`*` / `?` glob), with fail-closed empty patterns and tighten-only attenuation
