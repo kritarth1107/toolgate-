@@ -871,6 +871,78 @@ mod tests {
     }
 
     #[test]
+    fn encoding_constraint_all() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "path".to_string(),
+            Constraint::All(vec![
+                Constraint::Prefix("/tmp/".to_string()),
+                Constraint::Suffix(".txt".to_string()),
+            ]),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'p', b'a', b't', b'h', // key "path"
+            0x0F, // type = All
+            0x00, 0x02, // 2 children
+            0x02, // type = Prefix
+            0x00, 0x05, b'/', b't', b'm', b'p', b'/', // "/tmp/"
+            0x05, // type = Suffix
+            0x00, 0x04, b'.', b't', b'x', b't', // ".txt"
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_any() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "path".to_string(),
+            Constraint::Any(vec![
+                Constraint::Prefix("/tmp/".to_string()),
+                Constraint::Prefix("/var/".to_string()),
+            ]),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'p', b'a', b't', b'h', // key "path"
+            0x10, // type = Any
+            0x00, 0x02, // 2 children
+            0x02, // Prefix
+            0x00, 0x05, b'/', b't', b'm', b'p', b'/', // "/tmp/"
+            0x02, // Prefix
+            0x00, 0x05, b'/', b'v', b'a', b'r', b'/', // "/var/"
+        ]));
+    }
+
+    #[test]
+    fn encoding_without_all_any_identical_to_prior() {
+        // Tokens that do not use All/Any must keep the 0.20.0 bytes.
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "name".to_string(),
+            Constraint::NotSuffix(".txt".to_string()),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'n', b'a', b'm', b'e', // key "name"
+            0x0D, // type = NotSuffix
+            0x00, 0x04, b'.', b't', b'x', b't', // suffix ".txt"
+        ]));
+    }
+
+    #[test]
     fn encoding_without_not_suffix_identical_to_prior() {
         // Tokens that do not use NotSuffix/NotMatches must keep the 0.19.0 bytes.
         use std::collections::BTreeMap;
