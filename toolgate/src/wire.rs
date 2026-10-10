@@ -133,6 +133,14 @@ fn encode_constraint_to_wire(buf: &mut Vec<u8>, key: &str, constraint: &Constrai
                 encode_len_prefixed(buf, value);
             }
         }
+        Constraint::NotContains(needle) => {
+            buf.push(11); // type = NotContains
+            encode_len_prefixed(buf, needle);
+        }
+        Constraint::NotPrefix(prefix) => {
+            buf.push(12); // type = NotPrefix
+            encode_len_prefixed(buf, prefix);
+        }
     }
 }
 
@@ -256,6 +264,22 @@ fn decode_constraint_from_wire(
                 values.push(value);
             }
             Constraint::NotOneOf(values)
+        }
+        11 => {
+            // NotContains
+            let needle_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
+            let needle_bytes = read_bytes(pos, needle_len)?;
+            let needle =
+                String::from_utf8(needle_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
+            Constraint::NotContains(needle)
+        }
+        12 => {
+            // NotPrefix
+            let prefix_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
+            let prefix_bytes = read_bytes(pos, prefix_len)?;
+            let prefix =
+                String::from_utf8(prefix_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
+            Constraint::NotPrefix(prefix)
         }
         _ => return Err(WireError::UnexpectedEof), // Invalid constraint type
     };

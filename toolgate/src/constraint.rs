@@ -49,6 +49,18 @@ pub enum Constraint {
     /// An empty denylist is rejected at mint/validate and never matches.
     #[serde(rename = "not_one_of")]
     NotOneOf(Vec<String>),
+    /// Value must not contain the forbidden UTF-8 substring.
+    ///
+    /// Same spirit as [`Contains`], inverted. An empty needle is rejected at
+    /// mint/validate and never matches a value (fail closed).
+    #[serde(rename = "not_contains")]
+    NotContains(String),
+    /// Value must not start with the forbidden prefix.
+    ///
+    /// Same spirit as [`Prefix`], inverted. An empty prefix is rejected at
+    /// mint/validate and never matches a value (fail closed).
+    #[serde(rename = "not_prefix")]
+    NotPrefix(String),
 }
 
 impl Constraint {
@@ -75,6 +87,8 @@ impl Constraint {
             Constraint::NotEquals(forbidden) => value != forbidden,
             // Empty denylist would forbid nothing; fail closed.
             Constraint::NotOneOf(denied) => !denied.is_empty() && denied.iter().all(|s| s != value),
+            // Matching for the new inverted constraints is added next.
+            Constraint::NotContains(_) | Constraint::NotPrefix(_) => false,
         }
     }
 

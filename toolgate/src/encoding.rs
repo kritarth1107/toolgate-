@@ -334,6 +334,14 @@ fn encode_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
                 encode_len_prefixed(buf, value);
             }
         }
+        Constraint::NotContains(needle) => {
+            buf.push(11); // type = NotContains
+            encode_len_prefixed(buf, needle);
+        }
+        Constraint::NotPrefix(prefix) => {
+            buf.push(12); // type = NotPrefix
+            encode_len_prefixed(buf, prefix);
+        }
     }
 }
 
