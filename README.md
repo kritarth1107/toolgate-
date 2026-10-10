@@ -7,7 +7,7 @@ A small, fast Rust library for issuing macaroon-style capability tokens for tool
 toolgate issues capability tokens that bind:
 - **Tool name**: which tool the token authorizes
 - **Argument keys**: an allowlist of permitted argument names
-- **Argument constraints** (optional): restrict argument values (prefix, suffix, contains, exact, one-of, min/max length, int range, simple glob)
+- **Argument constraints** (optional): restrict argument values (prefix, suffix, contains, exact, one-of, not-equals, not-one-of, min/max length, int range, simple glob)
 - **Expiry**: unix timestamp when the token becomes invalid
 - **Not-before (`nbf`)** (optional): unix timestamp before which the token is rejected
 - **Audience** (optional): restrict token to a specific client/service
@@ -25,7 +25,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-toolgate = "0.17"
+toolgate = "0.18"
 ```
 
 Or install the CLI:
@@ -172,12 +172,14 @@ constraints.insert("limit".to_string(), Constraint::IntRange { min: 1, max: 100 
 constraints.insert("query".to_string(), Constraint::MaxLen(256));
 constraints.insert("label".to_string(), Constraint::MinLen(3));
 constraints.insert("file".to_string(), Constraint::Matches("*.txt".to_string()));
+constraints.insert("role".to_string(), Constraint::NotEquals("admin".to_string()));
+constraints.insert("actor".to_string(), Constraint::NotOneOf(vec!["admin".into(), "root".into()]));
 
 // Mint token with constraints
 let token = Token::mint_full(
     secret,
     "file_op",
-    vec!["path".into(), "name".into(), "note".into(), "mode".into(), "limit".into(), "query".into(), "label".into(), "file".into()],
+    vec!["path".into(), "name".into(), "note".into(), "mode".into(), "limit".into(), "query".into(), "label".into(), "file".into(), "role".into(), "actor".into()],
     2000000000,
     None,  // audience
     None,  // kid
@@ -193,6 +195,8 @@ args.insert("mode".to_string(), "read".to_string());
 args.insert("limit".to_string(), "50".to_string());
 args.insert("label".to_string(), "abc".to_string());
 args.insert("file".to_string(), "notes.txt".to_string());
+args.insert("role".to_string(), "user".to_string());
+args.insert("actor".to_string(), "user".to_string());
 
 token.verify_call_with_args(
     secret,
@@ -215,9 +219,11 @@ token.verify_call_with_args(
 | `MaxLen(usize)` | Value must have at most N bytes | `MaxLen(256)` |
 | `MinLen(usize)` | Value must have at least N bytes | `MinLen(3)` |
 | `Matches(String)` | Value must match a simple `*` / `?` glob over Unicode scalars | `Matches("*.txt".into())` |
+| `NotEquals(String)` | Value must not equal the forbidden string | `NotEquals("admin".into())` |
+| `NotOneOf(Vec<String>)` | Value must not be any of the forbidden values | `NotOneOf(vec!["admin".into(), "root".into()])` |
 | `IntRange { min, max }` | Value must parse as integer in range | `IntRange { min: 1, max: 100 }` |
 
-JSON forms match the Rust names: `{"type":"min_len","value":3}` and `{"type":"matches","value":"*.txt"}`. `MinLen(0)` is valid and accepts the empty string. Empty suffix, contains, or matches patterns are rejected at mint/validate and never match a value.
+JSON forms match the Rust names: `{"type":"not_equals","value":"admin"}` and `{"type":"not_one_of","value":["admin","root"]}`. `MinLen(0)` is valid and accepts the empty string. Empty suffix, contains, or matches patterns, and empty NotOneOf denylists, are rejected at mint/validate and never match a value.
 
 `Matches` is not a regex: only `*` (any sequence, including empty) and `?` (exactly one Unicode scalar) are special. `.` `[` `]` and every other character match literally. There are no character classes, `**` path semantics, or escape sequences.
 
@@ -246,8 +252,10 @@ Valid attenuation rules:
 - **MaxLen**: new max must be ≤ old max
 - **MinLen**: new min must be ≥ old min
 - **Matches**: new pattern must equal the old pattern; tighten by replacing with Exact
+- **NotEquals**: new forbidden value must equal the old; may become NotOneOf if the new denylist still contains that value
+- **NotOneOf**: new denylist must be a **superset** of the old (more denials = tighter); dropping a forbidden value is rejected
 - **IntRange**: new range must be within old range
-- **Exact**: can replace any constraint if the exact value satisfies it
+- **Exact**: can replace any constraint if the exact value satisfies it (for denylists, the exact value must not be forbidden)
 
 ## Key Rotation
 
@@ -492,13 +500,14 @@ The `tg` binary accepts JSON on stdin and outputs JSON.
 echo '{
   "secret": "my-secret",
   "tool_name": "read_file",
-  "arg_keys": ["path", "limit", "name"],
+  "arg_keys": ["path", "limit", "name", "role"],
   "expiry": 2000000000,
   "audience": "client-123",
   "constraints": {
     "path": {"type": "prefix", "value": "/tmp/"},
     "limit": {"type": "int_range", "value": {"min": 1, "max": 100}},
-    "name": {"type": "matches", "value": "*.txt"}
+    "name": {"type": "matches", "value": "*.txt"},
+    "role": {"type": "not_equals", "value": "admin"}
   },
   "generate_jti": true,
   "nbf": 1699990000,
@@ -809,6 +818,8 @@ Constraint type encoding:
 - `6` Contains: u16 length + UTF-8 needle
 - `7` MinLen: u64 min
 - `8` Matches: u16 length + UTF-8 pattern
+- `9` NotEquals: u16 length + UTF-8 value
+- `10` NotOneOf: u16 count + (for each, sorted unique: u16 length + UTF-8 value)
 
 **Example without constraints, jti, nbf, or depth** (identical to v5/v4/v3):
 
@@ -955,6 +966,7 @@ let info = check_tools_call(&verifier, &token, &request)?;
 
 ## Version History
 
+- **0.18.0**: `Constraint::NotEquals` and `Constraint::NotOneOf` denylist argument constraints, with fail-closed empty NotOneOf and tighten-only attenuation
 - **0.17.0**: `Constraint::MinLen` and `Constraint::Matches` (`*` / `?` glob), with fail-closed empty patterns and tighten-only attenuation
 - **0.16.0**: `Constraint::Suffix` and `Constraint::Contains`, with fail-closed empty needles and tighten-only attenuation
 - **0.15.0**: `tg gate` falls back to `TG_POLICY`, `TG_KEYRING`, `TG_REVOKED`, `TG_USE_STORE`, `TG_MAX_USES`, `TG_AUDIENCE`, `TG_LEEWAY`, and `TG_AUDIT_JSONL` when the matching flag is omitted

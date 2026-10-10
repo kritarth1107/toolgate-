@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0] - 2026-10-10
+
+### Added
+- **`Constraint::NotEquals(String)`**: value must not equal the forbidden string (byte/UTF-8 exact, same spirit as Exact)
+- **`Constraint::NotOneOf(Vec<String>)`**: value must not be any of the forbidden values (stored and encoded as sorted unique strings, same spirit as OneOf)
+- CLI JSON forms `{"type":"not_equals","value":"..."}` and `{"type":"not_one_of","value":["a","b"]}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6, MinLen=7, Matches=8, NotEquals=9, NotOneOf=10
+- Tokens without the new types still encode identically to 0.17.0
+
+### Notes
+- Attenuation only tightens: NotEquals may stay the same forbidden value or become a NotOneOf that still contains it; NotOneOf may only grow (more denials)
+- Exact may replace NotEquals when the exact value is not the forbidden string, and may replace NotOneOf when the exact value is not in the old denylist
+- Empty NotOneOf denylists are rejected at mint/validate and never match a value (fail closed)
+
 ## [0.17.0] - 2026-10-10
 
 ### Added
