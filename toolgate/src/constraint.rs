@@ -189,6 +189,16 @@ impl Constraint {
                 !prefix.is_empty() && !a.starts_with(prefix)
             }
 
+            // Exact is subset of NotSuffix if the exact value does not end with the suffix
+            (Constraint::Exact(a), Constraint::NotSuffix(suffix)) => {
+                !suffix.is_empty() && !a.ends_with(suffix)
+            }
+
+            // Exact is subset of NotMatches if the exact value does not match the glob
+            (Constraint::Exact(a), Constraint::NotMatches(pattern)) => {
+                !pattern.is_empty() && !glob_match(pattern, a)
+            }
+
             // OneOf is subset of OneOf if new set is subset of old set
             (Constraint::OneOf(new), Constraint::OneOf(old)) => new.iter().all(|v| old.contains(v)),
 
@@ -236,6 +246,16 @@ impl Constraint {
             // OneOf is subset of NotPrefix if every allowed value avoids the prefix
             (Constraint::OneOf(values), Constraint::NotPrefix(prefix)) => {
                 !prefix.is_empty() && values.iter().all(|v| !v.starts_with(prefix))
+            }
+
+            // OneOf is subset of NotSuffix if every allowed value avoids the suffix
+            (Constraint::OneOf(values), Constraint::NotSuffix(suffix)) => {
+                !suffix.is_empty() && values.iter().all(|v| !v.ends_with(suffix))
+            }
+
+            // OneOf is subset of NotMatches if every allowed value avoids the glob
+            (Constraint::OneOf(values), Constraint::NotMatches(pattern)) => {
+                !pattern.is_empty() && values.iter().all(|v| !glob_match(pattern, v))
             }
 
             // Prefix is subset of Prefix if new prefix starts with (extends) old prefix
@@ -370,6 +390,54 @@ impl Constraint {
                 !prefix.is_empty()
                     && !denied.is_empty()
                     && denied.iter().all(|v| v.starts_with(prefix))
+            }
+
+            // NotSuffix → NotSuffix if the new suffix is a suffix of the old
+            // (shorter/equal suffix forbids more values)
+            (Constraint::NotSuffix(new), Constraint::NotSuffix(old)) => {
+                !new.is_empty() && !old.is_empty() && old.ends_with(new)
+            }
+
+            // NotMatches→NotMatches only allows an identical pattern. Narrowing
+            // to Exact is the supported tightening path, same as Matches.
+            (Constraint::NotMatches(new), Constraint::NotMatches(old)) => {
+                !new.is_empty() && !old.is_empty() && new == old
+            }
+
+            // Suffix is subset of NotSuffix when the required suffix and the
+            // forbidden suffix cannot both hold (incomparable suffixes).
+            (Constraint::Suffix(suffix), Constraint::NotSuffix(forbidden)) => {
+                !forbidden.is_empty()
+                    && !suffix.ends_with(forbidden)
+                    && !forbidden.ends_with(suffix)
+            }
+
+            // NotSuffix may replace NotEquals when avoiding the suffix still
+            // forbids that exact value.
+            (Constraint::NotSuffix(suffix), Constraint::NotEquals(forbidden)) => {
+                !suffix.is_empty() && forbidden.ends_with(suffix)
+            }
+
+            // NotMatches may replace NotEquals when avoiding the glob still
+            // forbids that exact value.
+            (Constraint::NotMatches(pattern), Constraint::NotEquals(forbidden)) => {
+                !pattern.is_empty() && glob_match(pattern, forbidden)
+            }
+
+            // NotSuffix may replace NotOneOf when every denied value ends
+            // with the suffix.
+            (Constraint::NotSuffix(suffix), Constraint::NotOneOf(denied)) => {
+                !suffix.is_empty()
+                    && !denied.is_empty()
+                    && denied.iter().all(|v| v.ends_with(suffix))
+            }
+
+            // NotMatches may replace NotOneOf when every denied value matches
+            // the glob, so avoiding it still forbids the whole denylist.
+            (Constraint::NotMatches(pattern), Constraint::NotOneOf(denied)) => {
+                !pattern.is_empty()
+                    && !denied.is_empty()
+                    && denied.iter().all(|v| glob_match(pattern, v))
             }
 
             // Remaining cross-type pairs cannot be shown to be subsets
