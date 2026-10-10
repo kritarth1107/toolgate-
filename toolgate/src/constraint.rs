@@ -1434,6 +1434,298 @@ mod tests {
     }
 
     #[test]
+    fn all_check() {
+        let c = Constraint::All(vec![
+            Constraint::Prefix("/tmp/".to_string()),
+            Constraint::Suffix(".txt".to_string()),
+        ]);
+        assert!(c.check("/tmp/notes.txt"));
+        assert!(!c.check("/tmp/notes.rs"));
+        assert!(!c.check("/var/notes.txt"));
+        assert!(!c.check("notes.txt"));
+    }
+
+    #[test]
+    fn any_check() {
+        let c = Constraint::Any(vec![
+            Constraint::Prefix("/tmp/".to_string()),
+            Constraint::Prefix("/var/".to_string()),
+        ]);
+        assert!(c.check("/tmp/a"));
+        assert!(c.check("/var/b"));
+        assert!(!c.check("/home/c"));
+        assert!(!c.check("tmp/a"));
+    }
+
+    #[test]
+    fn nested_all_any_check() {
+        let c = Constraint::All(vec![
+            Constraint::Prefix("/tmp/".to_string()),
+            Constraint::Any(vec![
+                Constraint::Suffix(".txt".to_string()),
+                Constraint::Suffix(".md".to_string()),
+            ]),
+        ]);
+        assert!(c.check("/tmp/a.txt"));
+        assert!(c.check("/tmp/a.md"));
+        assert!(!c.check("/tmp/a.rs"));
+        assert!(!c.check("/var/a.txt"));
+    }
+
+    #[test]
+    fn empty_all_and_any_fail_closed() {
+        let all = Constraint::All(vec![]);
+        let any = Constraint::Any(vec![]);
+        assert!(all.is_empty_pattern());
+        assert!(any.is_empty_pattern());
+        assert!(!all.check(""));
+        assert!(!all.check("anything"));
+        assert!(!any.check(""));
+        assert!(!any.check("anything"));
+    }
+
+    #[test]
+    fn all_or_any_with_empty_child_is_empty_pattern() {
+        let all = Constraint::All(vec![
+            Constraint::Prefix("/tmp/".to_string()),
+            Constraint::Suffix(String::new()),
+        ]);
+        let any = Constraint::Any(vec![Constraint::Matches(String::new())]);
+        assert!(all.is_empty_pattern());
+        assert!(any.is_empty_pattern());
+        assert!(!all.check("/tmp/a.txt"));
+        assert!(!any.check("notes.txt"));
+    }
+
+    fn nest_all(depth: usize) -> Constraint {
+        let mut c = Constraint::Prefix("/tmp/".to_string());
+        for _ in 0..depth {
+            c = Constraint::All(vec![c]);
+        }
+        c
+    }
+
+    #[test]
+    fn nesting_depth_counts_composites() {
+        assert_eq!(Constraint::Prefix("/tmp/".to_string()).nesting_depth(), 0);
+        assert_eq!(
+            Constraint::All(vec![Constraint::Prefix("/tmp/".to_string())]).nesting_depth(),
+            1
+        );
+        assert_eq!(nest_all(8).nesting_depth(), 8);
+        assert_eq!(nest_all(9).nesting_depth(), 9);
+        assert!(!nest_all(8).exceeds_max_nesting());
+        assert!(nest_all(9).exceeds_max_nesting());
+        assert_eq!(MAX_CONSTRAINT_NESTING, 8);
+    }
+
+    #[test]
+    fn all_subset_of_all_may_tighten_and_add_children() {
+        let old = Constraint::All(vec![
+            Constraint::Prefix("/tmp/".to_string()),
+            Constraint::MaxLen(20),
+        ]);
+        let tighter = Constraint::All(vec![
+            Constraint::Prefix("/tmp/sub/".to_string()),
+            Constraint::MaxLen(10),
+        ]);
+        let extra = Constraint::All(vec![
+            Constraint::Prefix("/tmp/".to_string()),
+            Constraint::MaxLen(20),
+            Constraint::Suffix(".txt".to_string()),
+        ]);
+        assert!(tighter.is_subset_of(&old));
+        assert!(extra.is_subset_of(&old));
+        assert!(!old.is_subset_of(&tighter));
+        assert!(!Constraint::All(vec![Constraint::Prefix("/tmp/".to_string())]).is_subset_of(&old));
+        assert!(!Constraint::All(vec![]).is_subset_of(&old));
+    }
+
+    #[test]
+    fn any_subset_of_any_may_drop_or_tighten_alternatives() {
+        let old = Constraint::Any(vec![
+            Constraint::Prefix("/tmp/".to_string()),
+            Constraint::Prefix("/var/".to_string()),
+        ]);
+        let fewer = Constraint::Any(vec![Constraint::Prefix("/tmp/".to_string())]);
+        let tighter = Constraint::Any(vec![
+            Constraint::Prefix("/tmp/sub/".to_string()),
+            Constraint::Prefix("/var/log/".to_string()),
+        ]);
+        let extra = Constraint::Any(vec![
+            Constraint::Prefix("/tmp/".to_string()),
+            Constraint::Prefix("/var/".to_string()),
+            Constraint::Prefix("/home/".to_string()),
+        ]);
+        assert!(fewer.is_subset_of(&old));
+        assert!(tighter.is_subset_of(&old));
+        assert!(!extra.is_subset_of(&old));
+        assert!(!old.is_subset_of(&fewer));
+        assert!(!Constraint::Any(vec![]).is_subset_of(&old));
+    }
+
+    #[test]
+    fn exact_subset_of_all_and_any() {
+        let all = Constraint::All(vec![
+            Constraint::Prefix("/tmp/".to_string()),
+            Constraint::Suffix(".txt".to_string()),
+        ]);
+        let any = Constraint::Any(vec![
+            Constraint::Prefix("/tmp/".to_string()),
+            Constraint::Prefix("/var/".to_string()),
+        ]);
+        assert!(Constraint::Exact("/tmp/a.txt".to_string()).is_subset_of(&all));
+        assert!(!Constraint::Exact("/tmp/a.rs".to_string()).is_subset_of(&all));
+        assert!(Constraint::Exact("/tmp/a".to_string()).is_subset_of(&any));
+        assert!(Constraint::Exact("/var/b".to_string()).is_subset_of(&any));
+        assert!(!Constraint::Exact("/home/c".to_string()).is_subset_of(&any));
+        assert!(!Constraint::Exact("x".to_string()).is_subset_of(&Constraint::All(vec![])));
+        assert!(!Constraint::Exact("x".to_string()).is_subset_of(&Constraint::Any(vec![])));
+    }
+
+    #[test]
+    fn all_may_become_single_child_when_as_strong() {
+        let all = Constraint::All(vec![Constraint::Prefix("/tmp/".to_string())]);
+        assert!(Constraint::Prefix("/tmp/sub/".to_string()).is_subset_of(&all));
+        assert!(Constraint::Prefix("/tmp/".to_string()).is_subset_of(&all));
+
+        let both = Constraint::All(vec![
+            Constraint::Prefix("/tmp/".to_string()),
+            Constraint::MaxLen(10),
+        ]);
+        assert!(!Constraint::Prefix("/tmp/".to_string()).is_subset_of(&both));
+    }
+
+    #[test]
+    fn any_may_become_single_child_that_tightens_an_alternative() {
+        let any = Constraint::Any(vec![
+            Constraint::Prefix("/tmp/".to_string()),
+            Constraint::Prefix("/var/".to_string()),
+        ]);
+        assert!(Constraint::Prefix("/tmp/sub/".to_string()).is_subset_of(&any));
+        assert!(Constraint::Prefix("/tmp/".to_string()).is_subset_of(&any));
+        assert!(!Constraint::Prefix("/home/".to_string()).is_subset_of(&any));
+    }
+
+    #[test]
+    fn single_may_become_all_or_any_when_tighter() {
+        let prefix = Constraint::Prefix("/tmp/".to_string());
+        assert!(Constraint::All(vec![
+            Constraint::Prefix("/tmp/sub/".to_string()),
+            Constraint::MaxLen(10),
+        ])
+        .is_subset_of(&prefix));
+        assert!(
+            Constraint::Any(vec![Constraint::Prefix("/tmp/sub/".to_string())])
+                .is_subset_of(&prefix)
+        );
+        assert!(!Constraint::Any(vec![
+            Constraint::Prefix("/tmp/sub/".to_string()),
+            Constraint::Prefix("/var/".to_string()),
+        ])
+        .is_subset_of(&prefix));
+        assert!(
+            !Constraint::All(vec![Constraint::Prefix("/var/".to_string())]).is_subset_of(&prefix)
+        );
+    }
+
+    #[test]
+    fn all_any_swap_does_not_loosen() {
+        let all = Constraint::All(vec![
+            Constraint::Prefix("/tmp/".to_string()),
+            Constraint::MaxLen(10),
+        ]);
+        let any = Constraint::Any(vec![
+            Constraint::Prefix("/tmp/".to_string()),
+            Constraint::MaxLen(10),
+        ]);
+        assert!(!any.is_subset_of(&all));
+        assert!(all.is_subset_of(&any));
+
+        let exact_any = Constraint::Any(vec![Constraint::Exact("/tmp/a".to_string())]);
+        assert!(exact_any.is_subset_of(&all));
+    }
+
+    #[test]
+    fn oneof_subset_of_all_and_any() {
+        let all = Constraint::All(vec![
+            Constraint::Prefix("/tmp/".to_string()),
+            Constraint::Suffix(".txt".to_string()),
+        ]);
+        let any = Constraint::Any(vec![
+            Constraint::Prefix("/tmp/".to_string()),
+            Constraint::Prefix("/var/".to_string()),
+        ]);
+        assert!(
+            Constraint::OneOf(vec!["/tmp/a.txt".to_string(), "/tmp/b.txt".to_string()])
+                .is_subset_of(&all)
+        );
+        assert!(
+            !Constraint::OneOf(vec!["/tmp/a.txt".to_string(), "/tmp/b.rs".to_string()])
+                .is_subset_of(&all)
+        );
+        assert!(
+            Constraint::OneOf(vec!["/tmp/a".to_string(), "/var/b".to_string()]).is_subset_of(&any)
+        );
+        assert!(
+            !Constraint::OneOf(vec!["/tmp/a".to_string(), "/home/c".to_string()])
+                .is_subset_of(&any)
+        );
+    }
+
+    #[test]
+    fn json_all() {
+        let c = Constraint::All(vec![
+            Constraint::Prefix("/tmp/".to_string()),
+            Constraint::Suffix(".txt".to_string()),
+        ]);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"all\""));
+        assert!(json.contains("\"type\":\"prefix\""));
+        assert!(json.contains("\"type\":\"suffix\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint = serde_json::from_str(
+            r#"{"type":"all","value":[{"type":"prefix","value":"/tmp/"},{"type":"max_len","value":10}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            from_cli,
+            Constraint::All(vec![
+                Constraint::Prefix("/tmp/".to_string()),
+                Constraint::MaxLen(10)
+            ])
+        );
+    }
+
+    #[test]
+    fn json_any() {
+        let c = Constraint::Any(vec![
+            Constraint::Prefix("/tmp/".to_string()),
+            Constraint::Prefix("/var/".to_string()),
+        ]);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"any\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint = serde_json::from_str(
+            r#"{"type":"any","value":[{"type":"suffix","value":".txt"},{"type":"suffix","value":".md"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            from_cli,
+            Constraint::Any(vec![
+                Constraint::Suffix(".txt".to_string()),
+                Constraint::Suffix(".md".to_string())
+            ])
+        );
+    }
+
+    #[test]
     fn json_constraints_map() {
         let mut constraints: Constraints = BTreeMap::new();
         constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
