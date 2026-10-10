@@ -709,6 +709,46 @@ mod tests {
     }
 
     #[test]
+    fn not_suffix_check() {
+        let c = Constraint::NotSuffix(".txt".to_string());
+        assert!(c.check("notes.txt.bak"));
+        assert!(c.check("txt"));
+        assert!(c.check(""));
+        assert!(!c.check("notes.txt"));
+        assert!(!c.check(".txt"));
+    }
+
+    #[test]
+    fn not_matches_star_and_question() {
+        let c = Constraint::NotMatches("*.txt".to_string());
+        assert!(c.check("notes.txt.bak"));
+        assert!(c.check("txt"));
+        assert!(c.check(""));
+        assert!(!c.check("notes.txt"));
+        assert!(!c.check(".txt"));
+        assert!(!c.check("a.txt"));
+
+        let q = Constraint::NotMatches("file?.rs".to_string());
+        assert!(q.check("file.rs"));
+        assert!(q.check("file12.rs"));
+        assert!(!q.check("file1.rs"));
+        assert!(!q.check("filex.rs"));
+    }
+
+    #[test]
+    fn empty_not_suffix_and_not_matches_fail_closed() {
+        let suffix = Constraint::NotSuffix(String::new());
+        let matches = Constraint::NotMatches(String::new());
+        assert!(suffix.is_empty_pattern());
+        assert!(matches.is_empty_pattern());
+        assert!(!suffix.check(""));
+        assert!(!suffix.check("anything"));
+        assert!(!matches.check(""));
+        assert!(!matches.check("anything"));
+        assert!(!matches.check("*"));
+    }
+
+    #[test]
     fn exact_subset_of_exact() {
         let a = Constraint::Exact("foo".to_string());
         let b = Constraint::Exact("foo".to_string());
@@ -955,6 +995,74 @@ mod tests {
     }
 
     #[test]
+    fn not_suffix_subset_of_not_suffix_is_suffix() {
+        let short = Constraint::NotSuffix(".txt".to_string());
+        let long = Constraint::NotSuffix(".bak.txt".to_string());
+        assert!(short.is_subset_of(&long));
+        assert!(!long.is_subset_of(&short));
+        assert!(short.is_subset_of(&Constraint::NotSuffix(".txt".to_string())));
+        assert!(!Constraint::NotSuffix(String::new()).is_subset_of(&long));
+        assert!(!short.is_subset_of(&Constraint::NotSuffix(String::new())));
+        assert!(!Constraint::NotSuffix(".rs".to_string()).is_subset_of(&long));
+    }
+
+    #[test]
+    fn not_matches_subset_of_not_matches_only_identical() {
+        let glob = Constraint::NotMatches("*.txt".to_string());
+        assert!(glob.is_subset_of(&Constraint::NotMatches("*.txt".to_string())));
+        assert!(!glob.is_subset_of(&Constraint::NotMatches("*.rs".to_string())));
+        assert!(!glob.is_subset_of(&Constraint::NotMatches("notes.txt".to_string())));
+        assert!(!Constraint::NotMatches("notes.txt".to_string()).is_subset_of(&glob));
+        assert!(!Constraint::NotMatches(String::new()).is_subset_of(&glob));
+        assert!(!glob.is_subset_of(&Constraint::NotMatches(String::new())));
+    }
+
+    #[test]
+    fn exact_subset_of_not_suffix_and_not_matches() {
+        let exact = Constraint::Exact("notes.rs".to_string());
+        assert!(exact.is_subset_of(&Constraint::NotSuffix(".txt".to_string())));
+        assert!(!exact.is_subset_of(&Constraint::NotSuffix(".rs".to_string())));
+        assert!(!exact.is_subset_of(&Constraint::NotSuffix(String::new())));
+        assert!(exact.is_subset_of(&Constraint::NotMatches("*.txt".to_string())));
+        assert!(!exact.is_subset_of(&Constraint::NotMatches("*.rs".to_string())));
+        assert!(!exact.is_subset_of(&Constraint::NotMatches(String::new())));
+    }
+
+    #[test]
+    fn oneof_subset_of_not_suffix_and_not_matches() {
+        let oneof = Constraint::OneOf(vec!["a.rs".to_string(), "b.rs".to_string()]);
+        assert!(oneof.is_subset_of(&Constraint::NotSuffix(".txt".to_string())));
+        assert!(!oneof.is_subset_of(&Constraint::NotSuffix(".rs".to_string())));
+        assert!(oneof.is_subset_of(&Constraint::NotMatches("*.txt".to_string())));
+        assert!(!oneof.is_subset_of(&Constraint::NotMatches("*.rs".to_string())));
+    }
+
+    #[test]
+    fn not_suffix_and_not_matches_may_replace_denylists() {
+        let deny = Constraint::NotEquals("admin.txt".to_string());
+        assert!(Constraint::NotSuffix(".txt".to_string()).is_subset_of(&deny));
+        assert!(!Constraint::NotSuffix(".rs".to_string()).is_subset_of(&deny));
+        assert!(Constraint::NotMatches("*.txt".to_string()).is_subset_of(&deny));
+        assert!(!Constraint::NotMatches("*.rs".to_string()).is_subset_of(&deny));
+
+        let list = Constraint::NotOneOf(vec!["admin.txt".to_string(), "root.txt".to_string()]);
+        assert!(Constraint::NotSuffix(".txt".to_string()).is_subset_of(&list));
+        assert!(!Constraint::NotSuffix(".rs".to_string()).is_subset_of(&list));
+        assert!(Constraint::NotMatches("*.txt".to_string()).is_subset_of(&list));
+        assert!(!Constraint::NotMatches("*.rs".to_string()).is_subset_of(&list));
+    }
+
+    #[test]
+    fn suffix_subset_of_not_suffix_when_incomparable() {
+        let suffix = Constraint::Suffix(".txt".to_string());
+        assert!(suffix.is_subset_of(&Constraint::NotSuffix(".rs".to_string())));
+        assert!(!suffix.is_subset_of(&Constraint::NotSuffix(".txt".to_string())));
+        assert!(!suffix.is_subset_of(&Constraint::NotSuffix(".bak.txt".to_string())));
+        assert!(!Constraint::Suffix(".bak.txt".to_string())
+            .is_subset_of(&Constraint::NotSuffix(".txt".to_string())));
+    }
+
+    #[test]
     fn intrange_subset_of_intrange() {
         let inner = Constraint::IntRange { min: 10, max: 50 };
         let outer = Constraint::IntRange { min: 1, max: 100 };
@@ -1138,6 +1246,36 @@ mod tests {
         let from_cli: Constraint =
             serde_json::from_str(r#"{"type":"not_prefix","value":"/var/"}"#).unwrap();
         assert_eq!(from_cli, Constraint::NotPrefix("/var/".to_string()));
+    }
+
+    #[test]
+    fn json_not_suffix() {
+        let c = Constraint::NotSuffix(".txt".to_string());
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"not_suffix\""));
+        assert!(json.contains("\"value\":\".txt\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"not_suffix","value":".log"}"#).unwrap();
+        assert_eq!(from_cli, Constraint::NotSuffix(".log".to_string()));
+    }
+
+    #[test]
+    fn json_not_matches() {
+        let c = Constraint::NotMatches("pat*tern".to_string());
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"not_matches\""));
+        assert!(json.contains("\"value\":\"pat*tern\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"not_matches","value":"*.txt"}"#).unwrap();
+        assert_eq!(from_cli, Constraint::NotMatches("*.txt".to_string()));
     }
 
     #[test]
