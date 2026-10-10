@@ -817,6 +817,64 @@ mod tests {
     }
 
     #[test]
+    fn encoding_constraint_not_suffix() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "name".to_string(),
+            Constraint::NotSuffix(".txt".to_string()),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'n', b'a', b'm', b'e', // key "name"
+            0x0D, // type = NotSuffix
+            0x00, 0x04, b'.', b't', b'x', b't', // suffix ".txt"
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_not_matches() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "name".to_string(),
+            Constraint::NotMatches("*.txt".to_string()),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'n', b'a', b'm', b'e', // key "name"
+            0x0E, // type = NotMatches
+            0x00, 0x05, b'*', b'.', b't', b'x', b't', // pattern "*.txt"
+        ]));
+    }
+
+    #[test]
+    fn encoding_without_not_suffix_identical_to_prior() {
+        // Tokens that do not use NotSuffix/NotMatches must keep the 0.19.0 bytes.
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "path".to_string(),
+            Constraint::NotPrefix("/tmp/".to_string()),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'p', b'a', b't', b'h', // key "path"
+            0x0C, // type = NotPrefix
+            0x00, 0x05, b'/', b't', b'm', b'p', b'/', // prefix "/tmp/"
+        ]));
+    }
+
+    #[test]
     fn encoding_without_not_contains_identical_to_prior() {
         // Tokens that do not use NotContains/NotPrefix must keep the 0.18.0 bytes.
         use std::collections::BTreeMap;

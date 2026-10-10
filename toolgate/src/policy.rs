@@ -835,6 +835,76 @@ mod tests {
     }
 
     #[test]
+    fn from_json_parses_not_suffix_and_not_matches() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 60,
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["name", "file"],
+                    "constraints": {
+                        "name": {"type": "not_suffix", "value": ".bak"},
+                        "file": {"type": "not_matches", "value": "*.tmp"}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        policy.validate().unwrap();
+        let grant = policy.grant("read_file").unwrap();
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("name"),
+            Some(&Constraint::NotSuffix(".bak".into()))
+        );
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("file"),
+            Some(&Constraint::NotMatches("*.tmp".into()))
+        );
+    }
+
+    #[test]
+    fn validate_empty_not_suffix_and_not_matches_are_rejected() {
+        let suffix = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["name"],
+                    "constraints": {"name": {"type": "not_suffix", "value": ""}}
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            suffix.validate(),
+            Err(PolicyError::EmptyConstraintPattern {
+                tool: "read_file".into(),
+                key: "name".into()
+            })
+        );
+
+        let matches = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["file"],
+                    "constraints": {"file": {"type": "not_matches", "value": ""}}
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            matches.validate(),
+            Err(PolicyError::EmptyConstraintPattern {
+                tool: "read_file".into(),
+                key: "file".into()
+            })
+        );
+    }
+
+    #[test]
     fn validate_empty_not_one_of_is_rejected() {
         let policy = Policy::from_json(
             r#"{
