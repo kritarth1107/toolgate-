@@ -12,7 +12,7 @@ use toolgate::{
     append_revoked_jti, check_tools_call, decide, decide_with_replay, AuditSink, Constraints,
     Decision, FileUseStore, GateAction, JsonlAuditSink, KeyringFile, MemoryAuditSink,
     MemoryUseStore, Policy, PolicyFile, Redaction, RevocationFile, RevocationList, Token,
-    TokenStringError, UseStore, Verifier,
+    TokenStringError, UseStore, Verifier, MAX_CONSTRAINT_NESTING,
 };
 
 #[derive(Parser)]
@@ -385,7 +385,13 @@ fn reject_empty_constraint_patterns(
     for (key, constraint) in constraints {
         if constraint.is_empty_pattern() {
             return Err(format!(
-                "empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches constraint for '{key}' is rejected"
+                "empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any constraint for '{key}' is rejected"
+            )
+            .into());
+        }
+        if constraint.exceeds_max_nesting() {
+            return Err(format!(
+                "constraint nesting for '{key}' exceeds maximum depth of {MAX_CONSTRAINT_NESTING}"
             )
             .into());
         }
