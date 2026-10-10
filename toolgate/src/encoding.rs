@@ -769,6 +769,64 @@ mod tests {
     }
 
     #[test]
+    fn encoding_constraint_not_contains() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "path".to_string(),
+            Constraint::NotContains("tmp".to_string()),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'p', b'a', b't', b'h', // key "path"
+            0x0B, // type = NotContains
+            0x00, 0x03, b't', b'm', b'p', // needle "tmp"
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_not_prefix() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "path".to_string(),
+            Constraint::NotPrefix("/tmp/".to_string()),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'p', b'a', b't', b'h', // key "path"
+            0x0C, // type = NotPrefix
+            0x00, 0x05, b'/', b't', b'm', b'p', b'/', // prefix "/tmp/"
+        ]));
+    }
+
+    #[test]
+    fn encoding_without_not_contains_identical_to_prior() {
+        // Tokens that do not use NotContains/NotPrefix must keep the 0.18.0 bytes.
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "role".to_string(),
+            Constraint::NotEquals("admin".to_string()),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'r', b'o', b'l', b'e', // key "role"
+            0x09, // type = NotEquals
+            0x00, 0x05, b'a', b'd', b'm', b'i', b'n', // value "admin"
+        ]));
+    }
+
+    #[test]
     fn encoding_without_not_equals_identical_to_prior() {
         // Tokens that do not use NotEquals/NotOneOf must keep the 0.17.0 bytes.
         use std::collections::BTreeMap;

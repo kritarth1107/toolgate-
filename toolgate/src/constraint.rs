@@ -588,6 +588,40 @@ mod tests {
     }
 
     #[test]
+    fn not_contains_check() {
+        let c = Constraint::NotContains("tmp".to_string());
+        assert!(c.check("/var/file"));
+        assert!(c.check("TMP"));
+        assert!(c.check(""));
+        assert!(!c.check("/tmp/file"));
+        assert!(!c.check("tmp"));
+        assert!(!c.check("atmpb"));
+    }
+
+    #[test]
+    fn not_prefix_check() {
+        let c = Constraint::NotPrefix("/tmp/".to_string());
+        assert!(c.check("/var/tmp"));
+        assert!(c.check("tmp/"));
+        assert!(c.check("/tmp"));
+        assert!(c.check(""));
+        assert!(!c.check("/tmp/"));
+        assert!(!c.check("/tmp/foo"));
+    }
+
+    #[test]
+    fn empty_not_contains_and_not_prefix_fail_closed() {
+        let contains = Constraint::NotContains(String::new());
+        let prefix = Constraint::NotPrefix(String::new());
+        assert!(contains.is_empty_pattern());
+        assert!(prefix.is_empty_pattern());
+        assert!(!contains.check(""));
+        assert!(!contains.check("anything"));
+        assert!(!prefix.check(""));
+        assert!(!prefix.check("anything"));
+    }
+
+    #[test]
     fn exact_subset_of_exact() {
         let a = Constraint::Exact("foo".to_string());
         let b = Constraint::Exact("foo".to_string());
@@ -765,6 +799,75 @@ mod tests {
     }
 
     #[test]
+    fn not_contains_subset_of_not_contains_is_substring() {
+        let short = Constraint::NotContains("tmp".to_string());
+        let long = Constraint::NotContains("tmp/public".to_string());
+        assert!(short.is_subset_of(&long));
+        assert!(!long.is_subset_of(&short));
+        assert!(short.is_subset_of(&Constraint::NotContains("tmp".to_string())));
+        assert!(!Constraint::NotContains(String::new()).is_subset_of(&long));
+        assert!(!short.is_subset_of(&Constraint::NotContains(String::new())));
+        assert!(!Constraint::NotContains("var".to_string()).is_subset_of(&long));
+    }
+
+    #[test]
+    fn not_prefix_subset_of_not_prefix_is_prefix() {
+        let short = Constraint::NotPrefix("/tmp/".to_string());
+        let long = Constraint::NotPrefix("/tmp/subdir/".to_string());
+        assert!(short.is_subset_of(&long));
+        assert!(!long.is_subset_of(&short));
+        assert!(short.is_subset_of(&Constraint::NotPrefix("/tmp/".to_string())));
+        assert!(!Constraint::NotPrefix(String::new()).is_subset_of(&long));
+        assert!(!short.is_subset_of(&Constraint::NotPrefix(String::new())));
+        assert!(!Constraint::NotPrefix("/var/".to_string()).is_subset_of(&long));
+    }
+
+    #[test]
+    fn exact_subset_of_not_contains_and_not_prefix() {
+        let exact = Constraint::Exact("/var/file".to_string());
+        assert!(exact.is_subset_of(&Constraint::NotContains("tmp".to_string())));
+        assert!(!exact.is_subset_of(&Constraint::NotContains("var".to_string())));
+        assert!(!exact.is_subset_of(&Constraint::NotContains(String::new())));
+        assert!(exact.is_subset_of(&Constraint::NotPrefix("/tmp/".to_string())));
+        assert!(!exact.is_subset_of(&Constraint::NotPrefix("/var/".to_string())));
+        assert!(!exact.is_subset_of(&Constraint::NotPrefix(String::new())));
+    }
+
+    #[test]
+    fn oneof_subset_of_not_contains_and_not_prefix() {
+        let oneof = Constraint::OneOf(vec!["/var/a".to_string(), "/var/b".to_string()]);
+        assert!(oneof.is_subset_of(&Constraint::NotContains("tmp".to_string())));
+        assert!(!oneof.is_subset_of(&Constraint::NotContains("var".to_string())));
+        assert!(oneof.is_subset_of(&Constraint::NotPrefix("/tmp/".to_string())));
+        assert!(!oneof.is_subset_of(&Constraint::NotPrefix("/var/".to_string())));
+    }
+
+    #[test]
+    fn not_contains_and_not_prefix_may_replace_denylists() {
+        let deny = Constraint::NotEquals("admin".to_string());
+        assert!(Constraint::NotContains("adm".to_string()).is_subset_of(&deny));
+        assert!(!Constraint::NotContains("root".to_string()).is_subset_of(&deny));
+        assert!(Constraint::NotPrefix("ad".to_string()).is_subset_of(&deny));
+        assert!(!Constraint::NotPrefix("ro".to_string()).is_subset_of(&deny));
+
+        let list = Constraint::NotOneOf(vec!["admin".to_string(), "adm".to_string()]);
+        assert!(Constraint::NotContains("adm".to_string()).is_subset_of(&list));
+        assert!(!Constraint::NotContains("root".to_string()).is_subset_of(&list));
+        assert!(Constraint::NotPrefix("ad".to_string()).is_subset_of(&list));
+        assert!(!Constraint::NotPrefix("ro".to_string()).is_subset_of(&list));
+    }
+
+    #[test]
+    fn prefix_subset_of_not_prefix_when_incomparable() {
+        let prefix = Constraint::Prefix("/tmp/".to_string());
+        assert!(prefix.is_subset_of(&Constraint::NotPrefix("/var/".to_string())));
+        assert!(!prefix.is_subset_of(&Constraint::NotPrefix("/tmp/".to_string())));
+        assert!(!prefix.is_subset_of(&Constraint::NotPrefix("/tmp/sub/".to_string())));
+        assert!(!Constraint::Prefix("/tmp/sub/".to_string())
+            .is_subset_of(&Constraint::NotPrefix("/tmp/".to_string())));
+    }
+
+    #[test]
     fn intrange_subset_of_intrange() {
         let inner = Constraint::IntRange { min: 10, max: 50 };
         let outer = Constraint::IntRange { min: 1, max: 100 };
@@ -918,6 +1021,36 @@ mod tests {
             from_cli,
             Constraint::NotOneOf(vec!["a".to_string(), "b".to_string()])
         );
+    }
+
+    #[test]
+    fn json_not_contains() {
+        let c = Constraint::NotContains("secret".to_string());
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"not_contains\""));
+        assert!(json.contains("\"value\":\"secret\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"not_contains","value":"tmp"}"#).unwrap();
+        assert_eq!(from_cli, Constraint::NotContains("tmp".to_string()));
+    }
+
+    #[test]
+    fn json_not_prefix() {
+        let c = Constraint::NotPrefix("/tmp/".to_string());
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"not_prefix\""));
+        assert!(json.contains("\"value\":\"/tmp/\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"not_prefix","value":"/var/"}"#).unwrap();
+        assert_eq!(from_cli, Constraint::NotPrefix("/var/".to_string()));
     }
 
     #[test]

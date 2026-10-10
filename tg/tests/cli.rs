@@ -2219,3 +2219,299 @@ fn attenuate_rejects_empty_not_one_of() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+fn mint_inverted_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["note", "path"],
+            "expiry": 2000000000,
+            "constraints": {
+                "note": {"type": "not_contains", "value": "secret"},
+                "path": {"type": "not_prefix", "value": "/tmp/subdir/"}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+#[test]
+fn mint_accepts_not_contains_and_not_prefix_constraints() {
+    let token = mint_inverted_token();
+    assert_eq!(token["constraints"]["note"]["type"], "not_contains");
+    assert_eq!(token["constraints"]["note"]["value"], "secret");
+    assert_eq!(token["constraints"]["path"]["type"], "not_prefix");
+    assert_eq!(token["constraints"]["path"]["value"], "/tmp/subdir/");
+}
+
+#[test]
+fn check_call_enforces_not_contains_and_not_prefix() {
+    let token = mint_inverted_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"note": "draft", "path": "/var/out"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied_contains = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"note": "top-secret", "path": "/var/out"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied_contains.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied_contains.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+
+    let denied_prefix = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"note": "draft", "path": "/tmp/subdir/out"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied_prefix.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied_prefix.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn attenuate_can_tighten_not_contains_and_not_prefix() {
+    let token = mint_inverted_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "note": {"type": "not_contains", "value": "sec"},
+                "path": {"type": "not_prefix", "value": "/tmp/"}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(attenuated["constraints"]["note"]["type"], "not_contains");
+    assert_eq!(attenuated["constraints"]["note"]["value"], "sec");
+    assert_eq!(attenuated["constraints"]["path"]["type"], "not_prefix");
+    assert_eq!(attenuated["constraints"]["path"]["value"], "/tmp/");
+}
+
+#[test]
+fn attenuate_rejects_loosening_not_contains_and_not_prefix() {
+    let token = mint_inverted_token();
+    let contains = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"note": {"type": "not_contains", "value": "top-secret"}}
+        }),
+    );
+    assert!(!contains.status.success());
+    assert!(
+        String::from_utf8_lossy(&contains.stderr).contains("attenuation"),
+        "{}",
+        String::from_utf8_lossy(&contains.stderr)
+    );
+
+    let prefix = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"path": {"type": "not_prefix", "value": "/tmp/subdir/pub/"}}
+        }),
+    );
+    assert!(!prefix.status.success());
+    assert!(
+        String::from_utf8_lossy(&prefix.stderr).contains("attenuation"),
+        "{}",
+        String::from_utf8_lossy(&prefix.stderr)
+    );
+}
+
+#[test]
+fn policy_lint_rejects_empty_not_contains_and_not_prefix() {
+    let path = write_temp_policy(
+        "empty-not-contains",
+        r#"{
+            "version": "1",
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["note"],
+                "constraints": {"note": {"type": "not_contains", "value": ""}}
+            }]
+        }"#,
+    );
+    let output = tg()
+        .args(["policy", "lint", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("empty suffix/contains/matches/not_one_of/not_contains/not_prefix"),
+        "stdout={stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&path);
+
+    let path = write_temp_policy(
+        "empty-not-prefix",
+        r#"{
+            "version": "1",
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["path"],
+                "constraints": {"path": {"type": "not_prefix", "value": ""}}
+            }]
+        }"#,
+    );
+    let output = tg()
+        .args(["policy", "lint", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("empty suffix/contains/matches/not_one_of/not_contains/not_prefix"),
+        "stdout={stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn mint_from_policy_accepts_not_contains_and_not_prefix() {
+    let path = write_temp_policy(
+        "inverted-grant",
+        r#"{
+            "version": "1",
+            "default_ttl_seconds": 60,
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["note", "path"],
+                "constraints": {
+                    "note": {"type": "not_contains", "value": "secret"},
+                    "path": {"type": "not_prefix", "value": "/tmp/"}
+                }
+            }]
+        }"#,
+    );
+    let out = run_json(
+        &[
+            "mint",
+            "--policy",
+            path.to_str().unwrap(),
+            "--tool",
+            "read_file",
+        ],
+        &json!({
+            "secret": "cli-secret",
+            "current_time": 1700000000
+        }),
+    );
+    let token = &out["token"];
+    assert_eq!(token["tool_name"], "read_file");
+    assert_eq!(token["constraints"]["note"]["type"], "not_contains");
+    assert_eq!(token["constraints"]["note"]["value"], "secret");
+    assert_eq!(token["constraints"]["path"]["type"], "not_prefix");
+    assert_eq!(token["constraints"]["path"]["value"], "/tmp/");
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn mint_rejects_empty_not_contains_and_not_prefix() {
+    let contains = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["note"],
+            "expiry": 2000000000,
+            "constraints": {"note": {"type": "not_contains", "value": ""}}
+        }),
+    );
+    assert!(!contains.status.success());
+    assert!(
+        String::from_utf8_lossy(&contains.stderr)
+            .contains("empty suffix/contains/matches/not_one_of/not_contains/not_prefix"),
+        "{}",
+        String::from_utf8_lossy(&contains.stderr)
+    );
+
+    let prefix = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["path"],
+            "expiry": 2000000000,
+            "constraints": {"path": {"type": "not_prefix", "value": ""}}
+        }),
+    );
+    assert!(!prefix.status.success());
+    assert!(
+        String::from_utf8_lossy(&prefix.stderr)
+            .contains("empty suffix/contains/matches/not_one_of/not_contains/not_prefix"),
+        "{}",
+        String::from_utf8_lossy(&prefix.stderr)
+    );
+}
+
+#[test]
+fn attenuate_rejects_empty_not_contains_and_not_prefix() {
+    let token = mint_inverted_token();
+    let contains = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"note": {"type": "not_contains", "value": ""}}
+        }),
+    );
+    assert!(!contains.status.success());
+    assert!(
+        String::from_utf8_lossy(&contains.stderr)
+            .contains("empty suffix/contains/matches/not_one_of/not_contains/not_prefix"),
+        "{}",
+        String::from_utf8_lossy(&contains.stderr)
+    );
+
+    let prefix = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"path": {"type": "not_prefix", "value": ""}}
+        }),
+    );
+    assert!(!prefix.status.success());
+    assert!(
+        String::from_utf8_lossy(&prefix.stderr)
+            .contains("empty suffix/contains/matches/not_one_of/not_contains/not_prefix"),
+        "{}",
+        String::from_utf8_lossy(&prefix.stderr)
+    );
+}
