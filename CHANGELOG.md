@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0] - 2026-10-10
+
+### Added
+- **`Constraint::NotSuffix(String)`**: value must not end with the forbidden suffix (same spirit as Suffix)
+- **`Constraint::NotMatches(String)`**: value must not match the same simple `*` / `?` glob as Matches
+- CLI JSON forms `{"type":"not_suffix","value":"..."}` and `{"type":"not_matches","value":"..."}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6, MinLen=7, Matches=8, NotEquals=9, NotOneOf=10, NotContains=11, NotPrefix=12, NotSuffix=13, NotMatches=14
+- Tokens without the new types still encode identically to 0.19.0
+
+### Notes
+- Attenuation only tightens: a new NotSuffix suffix must be a suffix of the old forbidden suffix (shorter/equal forbids more); NotMatches may only stay the same pattern
+- Exact may replace NotSuffix when the exact value does not end with the old suffix, and may replace NotMatches when the exact value does not match the old glob
+- Empty NotSuffix suffixes and empty NotMatches patterns are rejected at mint/validate and never match a value (fail closed)
+
 ## [0.19.0] - 2026-10-10
 
 ### Added
