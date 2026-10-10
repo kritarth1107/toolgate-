@@ -1978,3 +1978,244 @@ fn attenuate_rejects_empty_matches() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+fn mint_denylist_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "file_op",
+            "arg_keys": ["role", "mode"],
+            "expiry": 2000000000,
+            "constraints": {
+                "role": {"type": "not_equals", "value": "admin"},
+                "mode": {"type": "not_one_of", "value": ["admin"]}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+#[test]
+fn mint_accepts_not_equals_and_not_one_of_constraints() {
+    let token = mint_denylist_token();
+    assert_eq!(token["constraints"]["role"]["type"], "not_equals");
+    assert_eq!(token["constraints"]["role"]["value"], "admin");
+    assert_eq!(token["constraints"]["mode"]["type"], "not_one_of");
+    assert_eq!(token["constraints"]["mode"]["value"], json!(["admin"]));
+}
+
+#[test]
+fn check_call_enforces_not_equals_and_not_one_of() {
+    let token = mint_denylist_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "file_op",
+            "args": {"role": "user", "mode": "read"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied_equals = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "file_op",
+            "args": {"role": "admin", "mode": "read"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied_equals.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied_equals.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+
+    let denied_one_of = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "file_op",
+            "args": {"role": "user", "mode": "admin"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied_one_of.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied_one_of.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn attenuate_can_tighten_not_one_of() {
+    let token = mint_denylist_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "role": {"type": "not_one_of", "value": ["admin", "root"]},
+                "mode": {"type": "not_one_of", "value": ["admin", "root"]}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(attenuated["constraints"]["role"]["type"], "not_one_of");
+    assert_eq!(
+        attenuated["constraints"]["role"]["value"],
+        json!(["admin", "root"])
+    );
+    assert_eq!(
+        attenuated["constraints"]["mode"]["value"],
+        json!(["admin", "root"])
+    );
+}
+
+#[test]
+fn attenuate_rejects_loosening_not_one_of() {
+    let token = mint_denylist_token();
+    let grown = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "mode": {"type": "not_one_of", "value": ["admin", "root"]}
+            }
+        }),
+    );
+    let grown_token = grown.get("token").cloned().expect("grown token");
+
+    let looser = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": grown_token,
+            "constraints": {"mode": {"type": "not_one_of", "value": ["admin"]}}
+        }),
+    );
+    assert!(!looser.status.success());
+    assert!(
+        String::from_utf8_lossy(&looser.stderr).contains("attenuation"),
+        "dropping a forbidden value should fail closed: {}",
+        String::from_utf8_lossy(&looser.stderr)
+    );
+}
+
+#[test]
+fn policy_lint_rejects_empty_not_one_of() {
+    let path = write_temp_policy(
+        "empty-not-one-of",
+        r#"{
+            "version": "1",
+            "tools": [{
+                "name": "file_op",
+                "arg_keys": ["role"],
+                "constraints": {"role": {"type": "not_one_of", "value": []}}
+            }]
+        }"#,
+    );
+    let output = tg()
+        .args(["policy", "lint", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("empty suffix/contains/matches/not_one_of"),
+        "stdout={stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn mint_from_policy_accepts_not_equals_and_not_one_of() {
+    let path = write_temp_policy(
+        "denylist-grant",
+        r#"{
+            "version": "1",
+            "default_ttl_seconds": 60,
+            "tools": [{
+                "name": "file_op",
+                "arg_keys": ["role", "mode"],
+                "constraints": {
+                    "role": {"type": "not_equals", "value": "admin"},
+                    "mode": {"type": "not_one_of", "value": ["admin", "root"]}
+                }
+            }]
+        }"#,
+    );
+    let out = run_json(
+        &[
+            "mint",
+            "--policy",
+            path.to_str().unwrap(),
+            "--tool",
+            "file_op",
+        ],
+        &json!({
+            "secret": "cli-secret",
+            "current_time": 1700000000
+        }),
+    );
+    let token = &out["token"];
+    assert_eq!(token["tool_name"], "file_op");
+    assert_eq!(token["constraints"]["role"]["type"], "not_equals");
+    assert_eq!(token["constraints"]["role"]["value"], "admin");
+    assert_eq!(token["constraints"]["mode"]["type"], "not_one_of");
+    assert_eq!(
+        token["constraints"]["mode"]["value"],
+        json!(["admin", "root"])
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn mint_rejects_empty_not_one_of() {
+    let out = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "file_op",
+            "arg_keys": ["role"],
+            "expiry": 2000000000,
+            "constraints": {"role": {"type": "not_one_of", "value": []}}
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("empty suffix/contains/matches/not_one_of"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn attenuate_rejects_empty_not_one_of() {
+    let token = mint_denylist_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"mode": {"type": "not_one_of", "value": []}}
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("empty suffix/contains/matches/not_one_of"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

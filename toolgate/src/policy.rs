@@ -74,7 +74,7 @@ pub enum PolicyError {
     DuplicateTool { name: String },
     /// A constraint is attached to a key that is not in the grant's allowlist.
     ConstraintKeyNotAllowed { tool: String, key: String },
-    /// A suffix, contains, or matches constraint has an empty pattern.
+    /// A suffix, contains, matches, or empty NotOneOf constraint is rejected.
     EmptyConstraintPattern { tool: String, key: String },
     /// A TTL (default or per-grant) is present and zero.
     ZeroTtl {
@@ -115,7 +115,7 @@ impl std::fmt::Display for PolicyError {
             PolicyError::EmptyConstraintPattern { tool, key } => {
                 write!(
                     f,
-                    "empty suffix/contains/matches constraint for '{key}' on tool '{tool}' is rejected"
+                    "empty suffix/contains/matches/not_one_of constraint for '{key}' on tool '{tool}' is rejected"
                 )
             }
             PolicyError::ZeroTtl { tool: Some(tool) } => {
@@ -730,6 +730,57 @@ mod tests {
             Err(PolicyError::EmptyConstraintPattern {
                 tool: "read_file".into(),
                 key: "name".into()
+            })
+        );
+    }
+
+    #[test]
+    fn from_json_parses_not_equals_and_not_one_of() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 60,
+                "tools": [{
+                    "name": "file_op",
+                    "arg_keys": ["role", "mode"],
+                    "constraints": {
+                        "role": {"type": "not_equals", "value": "admin"},
+                        "mode": {"type": "not_one_of", "value": ["admin", "root"]}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        policy.validate().unwrap();
+        let grant = policy.grant("file_op").unwrap();
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("role"),
+            Some(&Constraint::NotEquals("admin".into()))
+        );
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("mode"),
+            Some(&Constraint::NotOneOf(vec!["admin".into(), "root".into()]))
+        );
+    }
+
+    #[test]
+    fn validate_empty_not_one_of_is_rejected() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "file_op",
+                    "arg_keys": ["role"],
+                    "constraints": {"role": {"type": "not_one_of", "value": []}}
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.validate(),
+            Err(PolicyError::EmptyConstraintPattern {
+                tool: "file_op".into(),
+                key: "role".into()
             })
         );
     }
