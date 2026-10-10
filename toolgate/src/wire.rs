@@ -70,18 +70,21 @@ fn encode_constraint_to_wire(buf: &mut Vec<u8>, key: &str, constraint: &Constrai
     let key_bytes = key.as_bytes();
     buf.extend_from_slice(&(key_bytes.len() as u16).to_be_bytes());
     buf.extend_from_slice(key_bytes);
+    encode_constraint_value_to_wire(buf, constraint);
+}
 
+/// Encode constraint type + data without a key (used for nested All/Any children).
+fn encode_constraint_value_to_wire(buf: &mut Vec<u8>, constraint: &Constraint) {
     match constraint {
         Constraint::Exact(value) => {
-            buf.push(0); // type = Exact
+            buf.push(0);
             let value_bytes = value.as_bytes();
             buf.extend_from_slice(&(value_bytes.len() as u16).to_be_bytes());
             buf.extend_from_slice(value_bytes);
         }
         Constraint::OneOf(values) => {
-            buf.push(1); // type = OneOf
+            buf.push(1);
             buf.extend_from_slice(&(values.len() as u16).to_be_bytes());
-            // Sort values for deterministic encoding
             let mut sorted: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
             sorted.sort();
             for value in sorted {
@@ -91,40 +94,40 @@ fn encode_constraint_to_wire(buf: &mut Vec<u8>, key: &str, constraint: &Constrai
             }
         }
         Constraint::Prefix(prefix) => {
-            buf.push(2); // type = Prefix
+            buf.push(2);
             encode_len_prefixed(buf, prefix);
         }
         Constraint::MaxLen(max) => {
-            buf.push(3); // type = MaxLen
+            buf.push(3);
             buf.extend_from_slice(&(*max as u64).to_be_bytes());
         }
         Constraint::IntRange { min, max } => {
-            buf.push(4); // type = IntRange
+            buf.push(4);
             buf.extend_from_slice(&min.to_be_bytes());
             buf.extend_from_slice(&max.to_be_bytes());
         }
         Constraint::Suffix(suffix) => {
-            buf.push(5); // type = Suffix
+            buf.push(5);
             encode_len_prefixed(buf, suffix);
         }
         Constraint::Contains(needle) => {
-            buf.push(6); // type = Contains
+            buf.push(6);
             encode_len_prefixed(buf, needle);
         }
         Constraint::MinLen(min) => {
-            buf.push(7); // type = MinLen
+            buf.push(7);
             buf.extend_from_slice(&(*min as u64).to_be_bytes());
         }
         Constraint::Matches(pattern) => {
-            buf.push(8); // type = Matches
+            buf.push(8);
             encode_len_prefixed(buf, pattern);
         }
         Constraint::NotEquals(value) => {
-            buf.push(9); // type = NotEquals
+            buf.push(9);
             encode_len_prefixed(buf, value);
         }
         Constraint::NotOneOf(values) => {
-            buf.push(10); // type = NotOneOf
+            buf.push(10);
             let mut sorted: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
             sorted.sort();
             sorted.dedup();
@@ -134,20 +137,34 @@ fn encode_constraint_to_wire(buf: &mut Vec<u8>, key: &str, constraint: &Constrai
             }
         }
         Constraint::NotContains(needle) => {
-            buf.push(11); // type = NotContains
+            buf.push(11);
             encode_len_prefixed(buf, needle);
         }
         Constraint::NotPrefix(prefix) => {
-            buf.push(12); // type = NotPrefix
+            buf.push(12);
             encode_len_prefixed(buf, prefix);
         }
         Constraint::NotSuffix(suffix) => {
-            buf.push(13); // type = NotSuffix
+            buf.push(13);
             encode_len_prefixed(buf, suffix);
         }
         Constraint::NotMatches(pattern) => {
-            buf.push(14); // type = NotMatches
+            buf.push(14);
             encode_len_prefixed(buf, pattern);
+        }
+        Constraint::All(children) => {
+            buf.push(15);
+            buf.extend_from_slice(&(children.len() as u16).to_be_bytes());
+            for child in children {
+                encode_constraint_value_to_wire(buf, child);
+            }
+        }
+        Constraint::Any(children) => {
+            buf.push(16);
+            buf.extend_from_slice(&(children.len() as u16).to_be_bytes());
+            for child in children {
+                encode_constraint_value_to_wire(buf, child);
+            }
         }
     }
 }
@@ -158,157 +175,104 @@ fn encode_len_prefixed(buf: &mut Vec<u8>, value: &str) {
     buf.extend_from_slice(bytes);
 }
 
+fn read_wire_bytes<'a>(data: &'a [u8], pos: &mut usize, len: usize) -> Result<&'a [u8], WireError> {
+    if *pos + len > data.len() {
+        return Err(WireError::UnexpectedEof);
+    }
+    let slice = &data[*pos..*pos + len];
+    *pos += len;
+    Ok(slice)
+}
+
+fn read_wire_u16(data: &[u8], pos: &mut usize) -> Result<usize, WireError> {
+    Ok(u16::from_be_bytes(read_wire_bytes(data, pos, 2)?.try_into().unwrap()) as usize)
+}
+
+fn read_wire_utf8(data: &[u8], pos: &mut usize) -> Result<String, WireError> {
+    let len = read_wire_u16(data, pos)?;
+    let bytes = read_wire_bytes(data, pos, len)?;
+    String::from_utf8(bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)
+}
+
 /// Decode a single constraint from wire format.
 fn decode_constraint_from_wire(
     data: &[u8],
     pos: &mut usize,
 ) -> Result<(String, Constraint), WireError> {
-    let read_bytes = |pos: &mut usize, len: usize| -> Result<&[u8], WireError> {
-        if *pos + len > data.len() {
-            return Err(WireError::UnexpectedEof);
-        }
-        let slice = &data[*pos..*pos + len];
-        *pos += len;
-        Ok(slice)
-    };
+    let key = read_wire_utf8(data, pos)?;
+    let constraint = decode_constraint_value_from_wire(data, pos)?;
+    Ok((key, constraint))
+}
 
-    // Key
-    let key_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
-    let key_bytes = read_bytes(pos, key_len)?;
-    let key = String::from_utf8(key_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
-
-    // Type
-    let constraint_type = *read_bytes(pos, 1)?.first().unwrap();
+/// Decode constraint type + data (used for nested All/Any children).
+fn decode_constraint_value_from_wire(
+    data: &[u8],
+    pos: &mut usize,
+) -> Result<Constraint, WireError> {
+    let constraint_type = *read_wire_bytes(data, pos, 1)?.first().unwrap();
 
     let constraint = match constraint_type {
-        0 => {
-            // Exact
-            let value_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
-            let value_bytes = read_bytes(pos, value_len)?;
-            let value =
-                String::from_utf8(value_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
-            Constraint::Exact(value)
-        }
+        0 => Constraint::Exact(read_wire_utf8(data, pos)?),
         1 => {
-            // OneOf
-            let count = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
+            let count = read_wire_u16(data, pos)?;
             let mut values = Vec::with_capacity(count);
             for _ in 0..count {
-                let value_len =
-                    u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
-                let value_bytes = read_bytes(pos, value_len)?;
-                let value =
-                    String::from_utf8(value_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
-                values.push(value);
+                values.push(read_wire_utf8(data, pos)?);
             }
             Constraint::OneOf(values)
         }
-        2 => {
-            // Prefix
-            let prefix_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
-            let prefix_bytes = read_bytes(pos, prefix_len)?;
-            let prefix =
-                String::from_utf8(prefix_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
-            Constraint::Prefix(prefix)
-        }
+        2 => Constraint::Prefix(read_wire_utf8(data, pos)?),
         3 => {
-            // MaxLen
-            let max = u64::from_be_bytes(read_bytes(pos, 8)?.try_into().unwrap()) as usize;
+            let max =
+                u64::from_be_bytes(read_wire_bytes(data, pos, 8)?.try_into().unwrap()) as usize;
             Constraint::MaxLen(max)
         }
         4 => {
-            // IntRange
-            let min = i64::from_be_bytes(read_bytes(pos, 8)?.try_into().unwrap());
-            let max = i64::from_be_bytes(read_bytes(pos, 8)?.try_into().unwrap());
+            let min = i64::from_be_bytes(read_wire_bytes(data, pos, 8)?.try_into().unwrap());
+            let max = i64::from_be_bytes(read_wire_bytes(data, pos, 8)?.try_into().unwrap());
             Constraint::IntRange { min, max }
         }
-        5 => {
-            // Suffix
-            let suffix_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
-            let suffix_bytes = read_bytes(pos, suffix_len)?;
-            let suffix =
-                String::from_utf8(suffix_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
-            Constraint::Suffix(suffix)
-        }
-        6 => {
-            // Contains
-            let needle_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
-            let needle_bytes = read_bytes(pos, needle_len)?;
-            let needle =
-                String::from_utf8(needle_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
-            Constraint::Contains(needle)
-        }
+        5 => Constraint::Suffix(read_wire_utf8(data, pos)?),
+        6 => Constraint::Contains(read_wire_utf8(data, pos)?),
         7 => {
-            // MinLen
-            let min = u64::from_be_bytes(read_bytes(pos, 8)?.try_into().unwrap()) as usize;
+            let min =
+                u64::from_be_bytes(read_wire_bytes(data, pos, 8)?.try_into().unwrap()) as usize;
             Constraint::MinLen(min)
         }
-        8 => {
-            // Matches
-            let pattern_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
-            let pattern_bytes = read_bytes(pos, pattern_len)?;
-            let pattern =
-                String::from_utf8(pattern_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
-            Constraint::Matches(pattern)
-        }
-        9 => {
-            // NotEquals
-            let value_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
-            let value_bytes = read_bytes(pos, value_len)?;
-            let value =
-                String::from_utf8(value_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
-            Constraint::NotEquals(value)
-        }
+        8 => Constraint::Matches(read_wire_utf8(data, pos)?),
+        9 => Constraint::NotEquals(read_wire_utf8(data, pos)?),
         10 => {
-            // NotOneOf
-            let count = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
+            let count = read_wire_u16(data, pos)?;
             let mut values = Vec::with_capacity(count);
             for _ in 0..count {
-                let value_len =
-                    u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
-                let value_bytes = read_bytes(pos, value_len)?;
-                let value =
-                    String::from_utf8(value_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
-                values.push(value);
+                values.push(read_wire_utf8(data, pos)?);
             }
             Constraint::NotOneOf(values)
         }
-        11 => {
-            // NotContains
-            let needle_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
-            let needle_bytes = read_bytes(pos, needle_len)?;
-            let needle =
-                String::from_utf8(needle_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
-            Constraint::NotContains(needle)
+        11 => Constraint::NotContains(read_wire_utf8(data, pos)?),
+        12 => Constraint::NotPrefix(read_wire_utf8(data, pos)?),
+        13 => Constraint::NotSuffix(read_wire_utf8(data, pos)?),
+        14 => Constraint::NotMatches(read_wire_utf8(data, pos)?),
+        15 => {
+            let count = read_wire_u16(data, pos)?;
+            let mut children = Vec::with_capacity(count);
+            for _ in 0..count {
+                children.push(decode_constraint_value_from_wire(data, pos)?);
+            }
+            Constraint::All(children)
         }
-        12 => {
-            // NotPrefix
-            let prefix_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
-            let prefix_bytes = read_bytes(pos, prefix_len)?;
-            let prefix =
-                String::from_utf8(prefix_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
-            Constraint::NotPrefix(prefix)
-        }
-        13 => {
-            // NotSuffix
-            let suffix_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
-            let suffix_bytes = read_bytes(pos, suffix_len)?;
-            let suffix =
-                String::from_utf8(suffix_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
-            Constraint::NotSuffix(suffix)
-        }
-        14 => {
-            // NotMatches
-            let pattern_len = u16::from_be_bytes(read_bytes(pos, 2)?.try_into().unwrap()) as usize;
-            let pattern_bytes = read_bytes(pos, pattern_len)?;
-            let pattern =
-                String::from_utf8(pattern_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
-            Constraint::NotMatches(pattern)
+        16 => {
+            let count = read_wire_u16(data, pos)?;
+            let mut children = Vec::with_capacity(count);
+            for _ in 0..count {
+                children.push(decode_constraint_value_from_wire(data, pos)?);
+            }
+            Constraint::Any(children)
         }
         _ => return Err(WireError::UnexpectedEof), // Invalid constraint type
     };
 
-    Ok((key, constraint))
+    Ok(constraint)
 }
 
 impl Token {

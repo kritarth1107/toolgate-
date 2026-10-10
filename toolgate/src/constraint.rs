@@ -74,7 +74,26 @@ pub enum Constraint {
     /// and never matches a value (fail closed).
     #[serde(rename = "not_matches")]
     NotMatches(String),
+    /// Value must satisfy every child constraint (AND).
+    ///
+    /// Nested [`All`] / [`Any`] trees are allowed up to
+    /// [`MAX_CONSTRAINT_NESTING`]. An empty `All` is rejected at
+    /// mint/validate and never matches a value (fail closed).
+    All(Vec<Constraint>),
+    /// Value must satisfy at least one child constraint (OR).
+    ///
+    /// Nested [`All`] / [`Any`] trees are allowed up to
+    /// [`MAX_CONSTRAINT_NESTING`]. An empty `Any` is rejected at
+    /// mint/validate and never matches a value (fail closed).
+    Any(Vec<Constraint>),
 }
+
+/// Maximum nesting depth of [`Constraint::All`] / [`Constraint::Any`] trees.
+///
+/// Depth is 1 for a single composite wrapping atomic constraints, and
+/// increases by one for each nested All/Any. Trees deeper than this are
+/// rejected at mint/validate to avoid pathological compositions.
+pub const MAX_CONSTRAINT_NESTING: usize = 8;
 
 impl Constraint {
     /// Check if a value satisfies this constraint.
@@ -108,12 +127,20 @@ impl Constraint {
             Constraint::NotSuffix(suffix) => !suffix.is_empty() && !value.ends_with(suffix),
             // Empty glob would forbid nothing; fail closed, same as Matches inverted.
             Constraint::NotMatches(pattern) => !pattern.is_empty() && !glob_match(pattern, value),
+            // Empty All/Any would match nothing / everything; fail closed.
+            Constraint::All(children) => {
+                !children.is_empty() && children.iter().all(|c| c.check(value))
+            }
+            Constraint::Any(children) => {
+                !children.is_empty() && children.iter().any(|c| c.check(value))
+            }
         }
     }
 
     /// Empty suffix/contains/matches/not_contains/not_prefix/not_suffix/
-    /// not_matches needles and empty NotOneOf denylists match nothing and
-    /// must not be treated as wildcards.
+    /// not_matches needles, empty NotOneOf denylists, and empty All/Any
+    /// composites match nothing and must not be treated as wildcards.
+    /// A composite that contains an empty child is also empty.
     pub fn is_empty_pattern(&self) -> bool {
         match self {
             Constraint::Suffix(value)
@@ -124,8 +151,30 @@ impl Constraint {
             | Constraint::NotSuffix(value)
             | Constraint::NotMatches(value) => value.is_empty(),
             Constraint::NotOneOf(denied) => denied.is_empty(),
+            Constraint::All(children) | Constraint::Any(children) => {
+                children.is_empty() || children.iter().any(|c| c.is_empty_pattern())
+            }
             _ => false,
         }
+    }
+
+    /// Nesting depth of All/Any composition. Atomic constraints are 0.
+    pub fn nesting_depth(&self) -> usize {
+        match self {
+            Constraint::All(children) | Constraint::Any(children) => {
+                1 + children
+                    .iter()
+                    .map(Constraint::nesting_depth)
+                    .max()
+                    .unwrap_or(0)
+            }
+            _ => 0,
+        }
+    }
+
+    /// True when All/Any nesting exceeds [`MAX_CONSTRAINT_NESTING`].
+    pub fn exceeds_max_nesting(&self) -> bool {
+        self.nesting_depth() > MAX_CONSTRAINT_NESTING
     }
 
     /// Check if `self` is at least as restrictive as `other`.

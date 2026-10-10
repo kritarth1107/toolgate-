@@ -354,6 +354,20 @@ fn encode_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
             buf.push(14); // type = NotMatches
             encode_len_prefixed(buf, pattern);
         }
+        Constraint::All(children) => {
+            buf.push(15); // type = All
+            buf.extend_from_slice(&(children.len() as u16).to_be_bytes());
+            for child in children {
+                encode_constraint(buf, child);
+            }
+        }
+        Constraint::Any(children) => {
+            buf.push(16); // type = Any
+            buf.extend_from_slice(&(children.len() as u16).to_be_bytes());
+            for child in children {
+                encode_constraint(buf, child);
+            }
+        }
     }
 }
 

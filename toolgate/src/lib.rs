@@ -83,7 +83,7 @@ pub use audit::{
     AuditError, AuditSink, Decision, JsonlAuditSink, MemoryAuditSink, Outcome, Redaction, REDACTED,
 };
 pub use clock::{Clock, FixedClock, InstantClock, SystemClock, VerifyTime};
-pub use constraint::{Constraint, Constraints};
+pub use constraint::{Constraint, Constraints, MAX_CONSTRAINT_NESTING};
 #[cfg(feature = "mcp")]
 pub use gate::{
     decide, decide_with_replay, denied_response, jsonrpc_error, parse_error_response,
