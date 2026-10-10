@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0] - 2026-10-10
+
+### Added
+- **`Constraint::NotContains(String)`**: value must not contain the forbidden UTF-8 substring (byte/UTF-8 contains check, same spirit as Contains)
+- **`Constraint::NotPrefix(String)`**: value must not start with the forbidden prefix (same spirit as Prefix)
+- CLI JSON forms `{"type":"not_contains","value":"..."}` and `{"type":"not_prefix","value":"..."}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6, MinLen=7, Matches=8, NotEquals=9, NotOneOf=10, NotContains=11, NotPrefix=12
+- Tokens without the new types still encode identically to 0.18.0
+
+### Notes
+- Attenuation only tightens: a new NotContains needle must be a substring of the old needle (shorter/equal forbids more); a new NotPrefix prefix must be a prefix of the old forbidden prefix
+- Exact may replace NotContains when the exact value does not contain the old needle, and may replace NotPrefix when the exact value does not start with the old forbidden prefix
+- Empty NotContains needles and empty NotPrefix prefixes are rejected at mint/validate and never match a value (fail closed)
+
 ## [0.18.0] - 2026-10-10
 
 ### Added

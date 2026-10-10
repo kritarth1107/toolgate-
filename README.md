@@ -7,7 +7,7 @@ A small, fast Rust library for issuing macaroon-style capability tokens for tool
 toolgate issues capability tokens that bind:
 - **Tool name**: which tool the token authorizes
 - **Argument keys**: an allowlist of permitted argument names
-- **Argument constraints** (optional): restrict argument values (prefix, suffix, contains, exact, one-of, not-equals, not-one-of, min/max length, int range, simple glob)
+- **Argument constraints** (optional): restrict argument values (prefix, suffix, contains, exact, one-of, not-equals, not-one-of, not-contains, not-prefix, min/max length, int range, simple glob)
 - **Expiry**: unix timestamp when the token becomes invalid
 - **Not-before (`nbf`)** (optional): unix timestamp before which the token is rejected
 - **Audience** (optional): restrict token to a specific client/service
@@ -174,12 +174,14 @@ constraints.insert("label".to_string(), Constraint::MinLen(3));
 constraints.insert("file".to_string(), Constraint::Matches("*.txt".to_string()));
 constraints.insert("role".to_string(), Constraint::NotEquals("admin".to_string()));
 constraints.insert("actor".to_string(), Constraint::NotOneOf(vec!["admin".into(), "root".into()]));
+constraints.insert("memo".to_string(), Constraint::NotContains("secret".to_string()));
+constraints.insert("dest".to_string(), Constraint::NotPrefix("/tmp/".to_string()));
 
 // Mint token with constraints
 let token = Token::mint_full(
     secret,
     "file_op",
-    vec!["path".into(), "name".into(), "note".into(), "mode".into(), "limit".into(), "query".into(), "label".into(), "file".into(), "role".into(), "actor".into()],
+    vec!["path".into(), "name".into(), "note".into(), "mode".into(), "limit".into(), "query".into(), "label".into(), "file".into(), "role".into(), "actor".into(), "memo".into(), "dest".into()],
     2000000000,
     None,  // audience
     None,  // kid
@@ -197,6 +199,8 @@ args.insert("label".to_string(), "abc".to_string());
 args.insert("file".to_string(), "notes.txt".to_string());
 args.insert("role".to_string(), "user".to_string());
 args.insert("actor".to_string(), "user".to_string());
+args.insert("memo".to_string(), "ok".to_string());
+args.insert("dest".to_string(), "/var/out".to_string());
 
 token.verify_call_with_args(
     secret,
@@ -221,9 +225,11 @@ token.verify_call_with_args(
 | `Matches(String)` | Value must match a simple `*` / `?` glob over Unicode scalars | `Matches("*.txt".into())` |
 | `NotEquals(String)` | Value must not equal the forbidden string | `NotEquals("admin".into())` |
 | `NotOneOf(Vec<String>)` | Value must not be any of the forbidden values | `NotOneOf(vec!["admin".into(), "root".into()])` |
+| `NotContains(String)` | Value must not contain the UTF-8 substring | `NotContains("secret".into())` |
+| `NotPrefix(String)` | Value must not start with the prefix | `NotPrefix("/tmp/".into())` |
 | `IntRange { min, max }` | Value must parse as integer in range | `IntRange { min: 1, max: 100 }` |
 
-JSON forms match the Rust names: `{"type":"not_equals","value":"admin"}` and `{"type":"not_one_of","value":["admin","root"]}`. `MinLen(0)` is valid and accepts the empty string. Empty suffix, contains, or matches patterns, and empty NotOneOf denylists, are rejected at mint/validate and never match a value.
+JSON forms match the Rust names: `{"type":"not_contains","value":"secret"}` and `{"type":"not_prefix","value":"/tmp/"}`. `MinLen(0)` is valid and accepts the empty string. Empty suffix, contains, matches, not-contains, or not-prefix patterns, and empty NotOneOf denylists, are rejected at mint/validate and never match a value.
 
 `Matches` is not a regex: only `*` (any sequence, including empty) and `?` (exactly one Unicode scalar) are special. `.` `[` `]` and every other character match literally. There are no character classes, `**` path semantics, or escape sequences.
 
@@ -254,6 +260,8 @@ Valid attenuation rules:
 - **Matches**: new pattern must equal the old pattern; tighten by replacing with Exact
 - **NotEquals**: new forbidden value must equal the old; may become NotOneOf if the new denylist still contains that value
 - **NotOneOf**: new denylist must be a **superset** of the old (more denials = tighter); dropping a forbidden value is rejected
+- **NotContains**: new forbidden needle must be a **substring of** the old needle (shorter/equal forbids more)
+- **NotPrefix**: new forbidden prefix must be a **prefix of** the old forbidden prefix (shorter/equal forbids more)
 - **IntRange**: new range must be within old range
 - **Exact**: can replace any constraint if the exact value satisfies it (for denylists, the exact value must not be forbidden)
 
@@ -500,14 +508,16 @@ The `tg` binary accepts JSON on stdin and outputs JSON.
 echo '{
   "secret": "my-secret",
   "tool_name": "read_file",
-  "arg_keys": ["path", "limit", "name", "role"],
+  "arg_keys": ["path", "limit", "name", "role", "memo", "dest"],
   "expiry": 2000000000,
   "audience": "client-123",
   "constraints": {
     "path": {"type": "prefix", "value": "/tmp/"},
     "limit": {"type": "int_range", "value": {"min": 1, "max": 100}},
     "name": {"type": "matches", "value": "*.txt"},
-    "role": {"type": "not_equals", "value": "admin"}
+    "role": {"type": "not_equals", "value": "admin"},
+    "memo": {"type": "not_contains", "value": "secret"},
+    "dest": {"type": "not_prefix", "value": "/tmp/"}
   },
   "generate_jti": true,
   "nbf": 1699990000,
@@ -820,6 +830,8 @@ Constraint type encoding:
 - `8` Matches: u16 length + UTF-8 pattern
 - `9` NotEquals: u16 length + UTF-8 value
 - `10` NotOneOf: u16 count + (for each, sorted unique: u16 length + UTF-8 value)
+- `11` NotContains: u16 length + UTF-8 needle
+- `12` NotPrefix: u16 length + UTF-8 prefix
 
 **Example without constraints, jti, nbf, or depth** (identical to v5/v4/v3):
 
