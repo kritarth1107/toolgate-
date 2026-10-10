@@ -75,8 +75,10 @@ pub enum PolicyError {
     /// A constraint is attached to a key that is not in the grant's allowlist.
     ConstraintKeyNotAllowed { tool: String, key: String },
     /// An empty suffix, contains, matches, NotOneOf, NotContains, NotPrefix,
-    /// NotSuffix, or NotMatches constraint is rejected.
+    /// NotSuffix, NotMatches, All, or Any constraint is rejected.
     EmptyConstraintPattern { tool: String, key: String },
+    /// An All/Any tree deeper than [`crate::MAX_CONSTRAINT_NESTING`] is rejected.
+    ConstraintNestingTooDeep { tool: String, key: String },
     /// A TTL (default or per-grant) is present and zero.
     ZeroTtl {
         /// `None` when the policy default TTL is zero; otherwise the grant name.
@@ -116,7 +118,14 @@ impl std::fmt::Display for PolicyError {
             PolicyError::EmptyConstraintPattern { tool, key } => {
                 write!(
                     f,
-                    "empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches constraint for '{key}' on tool '{tool}' is rejected"
+                    "empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any constraint for '{key}' on tool '{tool}' is rejected"
+                )
+            }
+            PolicyError::ConstraintNestingTooDeep { tool, key } => {
+                write!(
+                    f,
+                    "constraint nesting for '{key}' on tool '{tool}' exceeds maximum depth of {}",
+                    crate::MAX_CONSTRAINT_NESTING
                 )
             }
             PolicyError::ZeroTtl { tool: Some(tool) } => {
@@ -229,6 +238,12 @@ impl Policy {
                     }
                     if constraint.is_empty_pattern() {
                         errors.push(PolicyError::EmptyConstraintPattern {
+                            tool: grant.name.clone(),
+                            key: key.clone(),
+                        });
+                    }
+                    if constraint.exceeds_max_nesting() {
+                        errors.push(PolicyError::ConstraintNestingTooDeep {
                             tool: grant.name.clone(),
                             key: key.clone(),
                         });
@@ -900,6 +915,118 @@ mod tests {
             Err(PolicyError::EmptyConstraintPattern {
                 tool: "read_file".into(),
                 key: "file".into()
+            })
+        );
+    }
+
+    #[test]
+    fn from_json_parses_all_and_any() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 60,
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["path", "name"],
+                    "constraints": {
+                        "path": {
+                            "type": "all",
+                            "value": [
+                                {"type": "prefix", "value": "/tmp/"},
+                                {"type": "suffix", "value": ".txt"}
+                            ]
+                        },
+                        "name": {
+                            "type": "any",
+                            "value": [
+                                {"type": "suffix", "value": ".md"},
+                                {"type": "suffix", "value": ".txt"}
+                            ]
+                        }
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        policy.validate().unwrap();
+        let grant = policy.grant("read_file").unwrap();
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("path"),
+            Some(&Constraint::All(vec![
+                Constraint::Prefix("/tmp/".into()),
+                Constraint::Suffix(".txt".into())
+            ]))
+        );
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("name"),
+            Some(&Constraint::Any(vec![
+                Constraint::Suffix(".md".into()),
+                Constraint::Suffix(".txt".into())
+            ]))
+        );
+    }
+
+    #[test]
+    fn validate_empty_all_and_any_are_rejected() {
+        let all = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["path"],
+                    "constraints": {"path": {"type": "all", "value": []}}
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            all.validate(),
+            Err(PolicyError::EmptyConstraintPattern {
+                tool: "read_file".into(),
+                key: "path".into()
+            })
+        );
+
+        let any = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["name"],
+                    "constraints": {"name": {"type": "any", "value": []}}
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            any.validate(),
+            Err(PolicyError::EmptyConstraintPattern {
+                tool: "read_file".into(),
+                key: "name".into()
+            })
+        );
+    }
+
+    #[test]
+    fn validate_all_any_nesting_too_deep_is_rejected() {
+        let mut inner = serde_json::json!({"type": "prefix", "value": "/tmp/"});
+        for _ in 0..9 {
+            inner = serde_json::json!({"type": "all", "value": [inner]});
+        }
+        let doc = serde_json::json!({
+            "version": "1",
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["path"],
+                "constraints": {"path": inner}
+            }]
+        });
+        let policy = Policy::from_json(&doc.to_string()).unwrap();
+        assert_eq!(
+            policy.validate(),
+            Err(PolicyError::ConstraintNestingTooDeep {
+                tool: "read_file".into(),
+                key: "path".into()
             })
         );
     }
