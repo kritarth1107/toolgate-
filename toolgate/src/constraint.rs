@@ -248,6 +248,22 @@ impl Constraint {
                 !pattern.is_empty() && !glob_match(pattern, a)
             }
 
+            // Exact is subset of All if it satisfies every child
+            (Constraint::Exact(a), Constraint::All(children)) => {
+                !children.is_empty()
+                    && children
+                        .iter()
+                        .all(|c| Constraint::Exact(a.clone()).is_subset_of(c))
+            }
+
+            // Exact is subset of Any if it satisfies at least one child
+            (Constraint::Exact(a), Constraint::Any(children)) => {
+                !children.is_empty()
+                    && children
+                        .iter()
+                        .any(|c| Constraint::Exact(a.clone()).is_subset_of(c))
+            }
+
             // OneOf is subset of OneOf if new set is subset of old set
             (Constraint::OneOf(new), Constraint::OneOf(old)) => new.iter().all(|v| old.contains(v)),
 
@@ -305,6 +321,28 @@ impl Constraint {
             // OneOf is subset of NotMatches if every allowed value avoids the glob
             (Constraint::OneOf(values), Constraint::NotMatches(pattern)) => {
                 !pattern.is_empty() && values.iter().all(|v| !glob_match(pattern, v))
+            }
+
+            // OneOf is subset of All if every allowed value satisfies every child
+            (Constraint::OneOf(values), Constraint::All(children)) => {
+                !values.is_empty()
+                    && !children.is_empty()
+                    && values.iter().all(|v| {
+                        children
+                            .iter()
+                            .all(|c| Constraint::Exact(v.clone()).is_subset_of(c))
+                    })
+            }
+
+            // OneOf is subset of Any if every allowed value satisfies some child
+            (Constraint::OneOf(values), Constraint::Any(children)) => {
+                !values.is_empty()
+                    && !children.is_empty()
+                    && values.iter().all(|v| {
+                        children
+                            .iter()
+                            .any(|c| Constraint::Exact(v.clone()).is_subset_of(c))
+                    })
             }
 
             // Prefix is subset of Prefix if new prefix starts with (extends) old prefix
@@ -487,6 +525,64 @@ impl Constraint {
                 !pattern.is_empty()
                     && !denied.is_empty()
                     && denied.iter().all(|v| glob_match(pattern, v))
+            }
+
+            // All → All: each old child must still be covered by an
+            // equal-or-tighter new child. Extra children (more ANDs) are
+            // allowed and make the constraint stronger.
+            (Constraint::All(new), Constraint::All(old)) => {
+                !new.is_empty()
+                    && !old.is_empty()
+                    && old.iter().all(|o| new.iter().any(|n| n.is_subset_of(o)))
+            }
+
+            // Any → Any: each new child must tighten some old child
+            // (fewer ORs or tighter alternatives). Adding a new
+            // alternative is a widening.
+            (Constraint::Any(new), Constraint::Any(old)) => {
+                !new.is_empty()
+                    && !old.is_empty()
+                    && new.iter().all(|n| old.iter().any(|o| n.is_subset_of(o)))
+            }
+
+            // All may become Any only when every new alternative is as
+            // strong as the whole old All (no OR-widening).
+            (Constraint::Any(new), Constraint::All(old)) => {
+                !new.is_empty()
+                    && !old.is_empty()
+                    && new.iter().all(|n| old.iter().all(|o| n.is_subset_of(o)))
+            }
+
+            // Any may become All when the conjunction still implies at
+            // least one old alternative (AND is stronger than OR).
+            (Constraint::All(new), Constraint::Any(old)) => {
+                !new.is_empty()
+                    && !old.is_empty()
+                    && new.iter().any(|n| old.iter().any(|o| n.is_subset_of(o)))
+            }
+
+            // All may become a single child when that child alone covers
+            // every old child (as strong as the conjunction).
+            (new, Constraint::All(old)) => {
+                !old.is_empty() && old.iter().all(|o| new.is_subset_of(o))
+            }
+
+            // Any may become a single child when that child tightens
+            // some old alternative.
+            (new, Constraint::Any(old)) => {
+                !old.is_empty() && old.iter().any(|o| new.is_subset_of(o))
+            }
+
+            // A single constraint may become All when at least one new
+            // child is a tightening of the old constraint (more ANDs).
+            (Constraint::All(new), old) => {
+                !new.is_empty() && new.iter().any(|n| n.is_subset_of(old))
+            }
+
+            // A single constraint may become Any when every new
+            // alternative is a tightening of the old constraint.
+            (Constraint::Any(new), old) => {
+                !new.is_empty() && new.iter().all(|n| n.is_subset_of(old))
             }
 
             // Remaining cross-type pairs cannot be shown to be subsets
