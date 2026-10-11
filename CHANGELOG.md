@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.0] - 2026-10-11
+
+### Added
+- **`Constraint::FloatRange { min, max }`**: value must parse as a finite `f64` in the inclusive range
+- CLI JSON form `{"type":"float_range","value":{"min":...,"max":...}}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6, MinLen=7, Matches=8, NotEquals=9, NotOneOf=10, NotContains=11, NotPrefix=12, NotSuffix=13, NotMatches=14, All=15, Any=16, Not=17, FloatRange=18
+- Tokens without the new type still encode identically to 0.22.0
+
+### Notes
+- Wire encoding stores `min`/`max` as IEEE-754 `f64` big-endian bits (same two-bound `to_be_bytes` layout as IntRange, using `f64` instead of `i64`)
+- Attenuation only tightens: a new FloatRange must lie within the old range (`new_min >= old_min && new_max <= old_max`)
+- Exact may replace FloatRange when the exact string parses to a finite `f64` inside the old range
+- IntRange may replace FloatRange when every integer in the new range converts exactly to `f64` and lies inside the old interval; FloatRange replacing IntRange fails closed
+- Inverted (`min > max`) or non-finite bounds are rejected at mint/validate and never match a value (fail closed)
+- Values that do not parse as a finite `f64` (NaN, ±inf, non-numeric strings) fail closed at check time
+
 ## [0.22.0] - 2026-10-11
 
 ### Added
