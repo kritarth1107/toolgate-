@@ -536,7 +536,7 @@ The `tg` binary accepts JSON on stdin and outputs JSON.
 echo '{
   "secret": "my-secret",
   "tool_name": "read_file",
-  "arg_keys": ["path", "limit", "name", "role", "memo", "dest", "backup", "skip", "path_and_name", "tmp_or_var"],
+  "arg_keys": ["path", "limit", "name", "role", "memo", "dest", "backup", "skip", "path_and_name", "tmp_or_var", "not_tmp"],
   "expiry": 2000000000,
   "audience": "client-123",
   "constraints": {
@@ -549,7 +549,8 @@ echo '{
     "backup": {"type": "not_suffix", "value": ".bak"},
     "skip": {"type": "not_matches", "value": "*.tmp"},
     "path_and_name": {"type": "all", "value": [{"type": "prefix", "value": "/tmp/"}, {"type": "suffix", "value": ".txt"}]},
-    "tmp_or_var": {"type": "any", "value": [{"type": "prefix", "value": "/tmp/"}, {"type": "prefix", "value": "/var/"}]}
+    "tmp_or_var": {"type": "any", "value": [{"type": "prefix", "value": "/tmp/"}, {"type": "prefix", "value": "/var/"}]},
+    "not_tmp": {"type": "not", "value": {"type": "prefix", "value": "/tmp/"}}
   },
   "generate_jti": true,
   "nbf": 1699990000,
@@ -1015,6 +1016,7 @@ let info = check_tools_call(&verifier, &token, &request)?;
 
 ## Version History
 
+- **0.22.0**: `Constraint::Not` unary NOT over one child constraint, completing boolean algebra with All/Any, with fail-closed empty-pattern children, max nesting depth 8, and tighten-only attenuation (widening the inner constraint)
 - **0.21.0**: `Constraint::All` and `Constraint::Any` compose multiple atomic constraints on one key (AND / OR), with fail-closed empty composites, max nesting depth 8, and tighten-only attenuation
 - **0.20.0**: `Constraint::NotSuffix` and `Constraint::NotMatches` inverted argument constraints, with fail-closed empty patterns and tighten-only attenuation
 - **0.19.0**: `Constraint::NotContains` and `Constraint::NotPrefix` inverted argument constraints, with fail-closed empty needles and tighten-only attenuation
