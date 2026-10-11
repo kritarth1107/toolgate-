@@ -7,7 +7,7 @@ A small, fast Rust library for issuing macaroon-style capability tokens for tool
 toolgate issues capability tokens that bind:
 - **Tool name**: which tool the token authorizes
 - **Argument keys**: an allowlist of permitted argument names
-- **Argument constraints** (optional): restrict argument values (prefix, suffix, contains, exact, one-of, not-equals, not-one-of, not-contains, not-prefix, min/max length, int range, simple glob, All/Any composition)
+- **Argument constraints** (optional): restrict argument values (prefix, suffix, contains, exact, one-of, not-equals, not-one-of, not-contains, not-prefix, min/max length, int range, simple glob, All/Any/Not composition)
 - **Expiry**: unix timestamp when the token becomes invalid
 - **Not-before (`nbf`)** (optional): unix timestamp before which the token is rejected
 - **Audience** (optional): restrict token to a specific client/service
@@ -186,12 +186,15 @@ constraints.insert("tmp_or_var".to_string(), Constraint::Any(vec![
     Constraint::Prefix("/tmp/".to_string()),
     Constraint::Prefix("/var/".to_string()),
 ]));
+constraints.insert("not_tmp".to_string(), Constraint::Not(Box::new(
+    Constraint::Prefix("/tmp/".to_string()),
+)));
 
 // Mint token with constraints
 let token = Token::mint_full(
     secret,
     "file_op",
-    vec!["path".into(), "name".into(), "note".into(), "mode".into(), "limit".into(), "query".into(), "label".into(), "file".into(), "role".into(), "actor".into(), "memo".into(), "dest".into(), "backup".into(), "skip".into(), "path_and_name".into(), "tmp_or_var".into()],
+    vec!["path".into(), "name".into(), "note".into(), "mode".into(), "limit".into(), "query".into(), "label".into(), "file".into(), "role".into(), "actor".into(), "memo".into(), "dest".into(), "backup".into(), "skip".into(), "path_and_name".into(), "tmp_or_var".into(), "not_tmp".into()],
     2000000000,
     None,  // audience
     None,  // kid
@@ -215,6 +218,7 @@ args.insert("backup".to_string(), "notes.txt".to_string());
 args.insert("skip".to_string(), "notes.md".to_string());
 args.insert("path_and_name".to_string(), "/tmp/notes.txt".to_string());
 args.insert("tmp_or_var".to_string(), "/var/out".to_string());
+args.insert("not_tmp".to_string(), "/var/out".to_string());
 
 token.verify_call_with_args(
     secret,
@@ -245,9 +249,10 @@ token.verify_call_with_args(
 | `NotMatches(String)` | Value must not match a simple `*` / `?` glob over Unicode scalars | `NotMatches("*.tmp".into())` |
 | `All(Vec<Constraint>)` | Value must satisfy every child (AND) | `All(vec![Prefix("/tmp/".into()), Suffix(".txt".into())])` |
 | `Any(Vec<Constraint>)` | Value must satisfy at least one child (OR) | `Any(vec![Prefix("/tmp/".into()), Prefix("/var/".into())])` |
+| `Not(Box<Constraint>)` | Value must not satisfy the child (NOT) | `Not(Box::new(Prefix("/tmp/".into())))` |
 | `IntRange { min, max }` | Value must parse as integer in range | `IntRange { min: 1, max: 100 }` |
 
-JSON forms match the Rust names: `{"type":"all","value":[...]}` and `{"type":"any","value":[...]}` where children are existing constraint objects. `MinLen(0)` is valid and accepts the empty string. Empty suffix, contains, matches, not-contains, not-prefix, not-suffix, or not-matches patterns, empty NotOneOf denylists, and empty All/Any composites are rejected at mint/validate and never match a value. Nested All/Any trees deeper than `MAX_CONSTRAINT_NESTING` (8) are rejected at mint/validate.
+JSON forms match the Rust names: `{"type":"all","value":[...]}`, `{"type":"any","value":[...]}`, and `{"type":"not","value":{...}}` where children are existing constraint objects. `MinLen(0)` is valid and accepts the empty string. Empty suffix, contains, matches, not-contains, not-prefix, not-suffix, or not-matches patterns, empty NotOneOf denylists, empty All/Any composites, and a `Not` whose child is an empty pattern are rejected at mint/validate and never match a value. Nested All/Any/Not trees deeper than `MAX_CONSTRAINT_NESTING` (8) are rejected at mint/validate.
 
 `Matches` is not a regex: only `*` (any sequence, including empty) and `?` (exactly one Unicode scalar) are special. `.` `[` `]` and every other character match literally. There are no character classes, `**` path semantics, or escape sequences.
 
@@ -284,8 +289,9 @@ Valid attenuation rules:
 - **NotMatches**: new pattern must equal the old pattern; tighten by replacing with Exact
 - **All**: new children must cover every old child with an equal-or-tighter child; extra children (more ANDs) are allowed
 - **Any**: each new child must tighten some old alternative (fewer ORs or tighter alternatives)
+- **Not**: `Not(new)` tightens `Not(old)` when `old` is a subset of `new` (widening the inner constraint strengthens the outer negation)
 - **IntRange**: new range must be within old range
-- **Exact**: can replace any constraint if the exact value satisfies it (for denylists, the exact value must not be forbidden; for All, every child; for Any, at least one child)
+- **Exact**: can replace any constraint if the exact value satisfies it (for denylists, the exact value must not be forbidden; for All, every child; for Any, at least one child; for Not, the exact value must not satisfy the child)
 
 ## Key Rotation
 
@@ -862,6 +868,7 @@ Constraint type encoding:
 - `14` NotMatches: u16 length + UTF-8 pattern
 - `15` All: u16 count + (for each child: type + data)
 - `16` Any: u16 count + (for each child: type + data)
+- `17` Not: nested child type + data
 
 **Example without constraints, jti, nbf, or depth** (identical to v5/v4/v3):
 

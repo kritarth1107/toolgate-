@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0] - 2026-10-11
+
+### Added
+- **`Constraint::Not(Box<Constraint>)`**: value must not satisfy the child constraint (NOT composition)
+- CLI JSON form `{"type":"not","value":{...}}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6, MinLen=7, Matches=8, NotEquals=9, NotOneOf=10, NotContains=11, NotPrefix=12, NotSuffix=13, NotMatches=14, All=15, Any=16, Not=17
+- Tokens without the new type still encode identically to 0.21.0
+
+### Notes
+- Nested All/Any/Not trees are allowed up to depth 8 (`MAX_CONSTRAINT_NESTING`); deeper trees are rejected at mint/validate
+- Attenuation only tightens: `Not(new)` is a subset of `Not(old)` when `old` is a subset of `new` (widening the inner constraint strengthens the negation)
+- Exact may replace Not when the exact value does not satisfy the child; OneOf may replace Not when every allowed value avoids the child
+- Unclear cross-type pairs fail closed
+- A `Not` whose child is an empty pattern is rejected at mint/validate and never matches a value (fail closed)
+
 ## [0.21.0] - 2026-10-10
 
 ### Added
