@@ -3717,3 +3717,238 @@ fn mint_from_policy_accepts_float_range() {
     assert_eq!(token["constraints"]["score"]["value"]["min"], 0.5);
     let _ = fs::remove_file(&path);
 }
+
+fn mint_len_range_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "search",
+            "arg_keys": ["query"],
+            "expiry": 2000000000,
+            "constraints": {
+                "query": {"type": "len_range", "value": {"min": 1, "max": 16}}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+#[test]
+fn mint_accepts_len_range() {
+    let token = mint_len_range_token();
+    assert_eq!(token["constraints"]["query"]["type"], "len_range");
+    assert_eq!(token["constraints"]["query"]["value"]["min"], 1);
+    assert_eq!(token["constraints"]["query"]["value"]["max"], 16);
+}
+
+#[test]
+fn check_call_enforces_len_range() {
+    let token = mint_len_range_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "search",
+            "args": {"query": "hello"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "search",
+            "args": {"query": "this query is way too long"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+
+    let empty = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "search",
+            "args": {"query": ""},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(empty.get("authorized"), Some(&Value::Bool(false)));
+}
+
+#[test]
+fn attenuate_can_tighten_len_range() {
+    let token = mint_len_range_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "query": {"type": "len_range", "value": {"min": 3, "max": 8}}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(attenuated["constraints"]["query"]["type"], "len_range");
+    assert_eq!(attenuated["constraints"]["query"]["value"]["min"], 3);
+    assert_eq!(attenuated["constraints"]["query"]["value"]["max"], 8);
+}
+
+#[test]
+fn attenuate_rejects_loosening_len_range() {
+    let token = mint_len_range_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "query": {"type": "len_range", "value": {"min": 0, "max": 32}}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("attenuation"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn attenuate_exact_can_replace_len_range() {
+    let token = mint_len_range_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "query": {"type": "exact", "value": "hello"}
+            }
+        }),
+    );
+    assert_eq!(out["token"]["constraints"]["query"]["type"], "exact");
+    assert_eq!(out["token"]["constraints"]["query"]["value"], "hello");
+}
+
+#[test]
+fn mint_rejects_inverted_len_range() {
+    let out = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "search",
+            "arg_keys": ["query"],
+            "expiry": 2000000000,
+            "constraints": {
+                "query": {"type": "len_range", "value": {"min": 16, "max": 1}}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("len_range"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn attenuate_rejects_inverted_len_range() {
+    let token = mint_len_range_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "query": {"type": "len_range", "value": {"min": 16, "max": 1}}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("len_range"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn policy_lint_rejects_invalid_len_range() {
+    let path = write_temp_policy(
+        "invalid-len-range",
+        r#"{
+            "version": "1",
+            "tools": [{
+                "name": "search",
+                "arg_keys": ["query"],
+                "constraints": {
+                    "query": {"type": "len_range", "value": {"min": 16, "max": 1}}
+                }
+            }]
+        }"#,
+    );
+    let output = tg()
+        .args(["policy", "lint", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("len_range"),
+        "stdout={stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn mint_from_policy_accepts_len_range() {
+    let path = write_temp_policy(
+        "len-range-grant",
+        r#"{
+            "version": "1",
+            "default_ttl_seconds": 60,
+            "tools": [{
+                "name": "search",
+                "arg_keys": ["query"],
+                "constraints": {
+                    "query": {"type": "len_range", "value": {"min": 1, "max": 16}}
+                }
+            }]
+        }"#,
+    );
+    let out = run_json(
+        &[
+            "mint",
+            "--policy",
+            path.to_str().unwrap(),
+            "--tool",
+            "search",
+        ],
+        &json!({
+            "secret": "cli-secret",
+            "current_time": 1700000000
+        }),
+    );
+    let token = &out["token"];
+    assert_eq!(token["tool_name"], "search");
+    assert_eq!(token["constraints"]["query"]["type"], "len_range");
+    assert_eq!(token["constraints"]["query"]["value"]["min"], 1);
+    let _ = fs::remove_file(&path);
+}
