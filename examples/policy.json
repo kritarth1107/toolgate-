@@ -7,12 +7,13 @@
   "tools": [
     {
       "name": "read_file",
-      "arg_keys": ["path", "limit", "score", "query"],
+      "arg_keys": ["path", "limit", "score", "query", "title"],
       "constraints": {
         "path": { "type": "prefix", "value": "/tmp/" },
         "limit": { "type": "int_range", "value": { "min": 1, "max": 100 } },
         "score": { "type": "float_range", "value": { "min": 0.5, "max": 10.5 } },
-        "query": { "type": "len_range", "value": { "min": 1, "max": 16 } }
+        "query": { "type": "len_range", "value": { "min": 1, "max": 16 } },
+        "title": { "type": "char_len_range", "value": { "min": 1, "max": 16 } }
       }
     },
     {

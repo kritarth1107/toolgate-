@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.25.0] - 2026-10-11
+
+### Added
+- **`Constraint::CharLenRange { min, max }`**: value Unicode scalar count (`chars().count()`, not bytes) must satisfy `min <= count <= max` (inclusive)
+- CLI JSON form `{"type":"char_len_range","value":{"min":...,"max":...}}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6, MinLen=7, Matches=8, NotEquals=9, NotOneOf=10, NotContains=11, NotPrefix=12, NotSuffix=13, NotMatches=14, All=15, Any=16, Not=17, FloatRange=18, LenRange=19, CharLenRange=20
+- Tokens without the new type still encode identically to 0.24.0
+
+### Notes
+- Wire encoding stores `min`/`max` as `u64` big-endian counts (same length encoding style as LenRange/MaxLen/MinLen)
+- Attenuation only tightens: a new CharLenRange must lie within the old range (`new_min >= old_min && new_max <= old_max`)
+- Exact may replace CharLenRange when the exact value's Unicode scalar count lies inside the old range
+- OneOf may replace CharLenRange when every allowed value's char count is inside the old range
+- CharLenRange versus LenRange/MinLen/MaxLen fails closed; byte vs scalar length is not a safe subset in general
+- Inverted (`min > max`) bounds are rejected at mint/validate and never match a value (fail closed)
+- `CharLenRange { min: 0, max: N }` is valid and accepts the empty string when `N` allows it
+- Unclear cross-type pairs fail closed
+
 ## [0.24.0] - 2026-10-11
 
 ### Added
