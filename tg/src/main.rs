@@ -397,7 +397,7 @@ fn reject_empty_constraint_patterns(
         }
         if constraint.is_invalid_range() {
             return Err(format!(
-                "invalid float_range or len_range for '{key}' is rejected (min <= max required; float bounds must be finite)"
+                "invalid float_range, len_range, or char_len_range for '{key}' is rejected (min <= max required; float bounds must be finite)"
             )
             .into());
         }

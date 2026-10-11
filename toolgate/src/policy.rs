@@ -80,7 +80,7 @@ pub enum PolicyError {
     /// An All/Any/Not tree deeper than [`crate::MAX_CONSTRAINT_NESTING`] is rejected.
     ConstraintNestingTooDeep { tool: String, key: String },
     /// A FloatRange with non-finite bounds or `min > max`, or a LenRange
-    /// with `min > max`, is rejected.
+    /// or CharLenRange with `min > max`, is rejected.
     InvalidConstraintRange { tool: String, key: String },
     /// A TTL (default or per-grant) is present and zero.
     ZeroTtl {
@@ -134,7 +134,7 @@ impl std::fmt::Display for PolicyError {
             PolicyError::InvalidConstraintRange { tool, key } => {
                 write!(
                     f,
-                    "invalid float_range or len_range for '{key}' on tool '{tool}' is rejected (min <= max required; float bounds must be finite)"
+                    "invalid float_range, len_range, or char_len_range for '{key}' on tool '{tool}' is rejected (min <= max required; float bounds must be finite)"
                 )
             }
             PolicyError::ZeroTtl { tool: Some(tool) } => {
@@ -1095,6 +1095,54 @@ mod tests {
                     "arg_keys": ["query"],
                     "constraints": {
                         "query": {"type": "len_range", "value": {"min": 16, "max": 1}}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.validate(),
+            Err(PolicyError::InvalidConstraintRange {
+                tool: "search".into(),
+                key: "query".into()
+            })
+        );
+    }
+
+    #[test]
+    fn from_json_parses_char_len_range() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 60,
+                "tools": [{
+                    "name": "search",
+                    "arg_keys": ["query"],
+                    "constraints": {
+                        "query": {"type": "char_len_range", "value": {"min": 1, "max": 16}}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        policy.validate().unwrap();
+        let grant = policy.grant("search").unwrap();
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("query"),
+            Some(&Constraint::CharLenRange { min: 1, max: 16 })
+        );
+    }
+
+    #[test]
+    fn validate_inverted_char_len_range_is_rejected() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "search",
+                    "arg_keys": ["query"],
+                    "constraints": {
+                        "query": {"type": "char_len_range", "value": {"min": 16, "max": 1}}
                     }
                 }]
             }"#,
