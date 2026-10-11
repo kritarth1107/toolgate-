@@ -370,6 +370,10 @@ fn encode_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
                 encode_constraint(buf, child);
             }
         }
+        Constraint::Not(child) => {
+            buf.push(17); // type = Not
+            encode_constraint(buf, child);
+        }
     }
 }
 

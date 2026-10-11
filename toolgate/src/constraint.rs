@@ -1,9 +1,10 @@
 //! Argument value constraints for capability tokens.
 //!
 //! Constraints allow tokens to restrict not just which argument keys are allowed,
-//! but also what values those arguments may have. [`Constraint::All`] and
-//! [`Constraint::Any`] compose children as AND / OR. Serde JSON forms are
-//! `{"type":"all","value":[...]}` and `{"type":"any","value":[...]}`.
+//! but also what values those arguments may have. [`Constraint::All`],
+//! [`Constraint::Any`], and [`Constraint::Not`] compose children as AND / OR /
+//! NOT. Serde JSON forms are `{"type":"all","value":[...]}`,
+//! `{"type":"any","value":[...]}`, and `{"type":"not","value":{...}}`.
 
 use std::collections::BTreeMap;
 
@@ -78,7 +79,7 @@ pub enum Constraint {
     NotMatches(String),
     /// Value must satisfy every child constraint (AND).
     ///
-    /// Nested [`All`] / [`Any`] trees are allowed up to
+    /// Nested [`All`] / [`Any`] / [`Not`] trees are allowed up to
     /// [`MAX_CONSTRAINT_NESTING`]. An empty `All` is rejected at
     /// mint/validate and never matches a value (fail closed).
     ///
@@ -88,7 +89,7 @@ pub enum Constraint {
     All(Vec<Constraint>),
     /// Value must satisfy at least one child constraint (OR).
     ///
-    /// Nested [`All`] / [`Any`] trees are allowed up to
+    /// Nested [`All`] / [`Any`] / [`Not`] trees are allowed up to
     /// [`MAX_CONSTRAINT_NESTING`]. An empty `Any` is rejected at
     /// mint/validate and never matches a value (fail closed).
     ///
@@ -96,13 +97,25 @@ pub enum Constraint {
     /// existing constraint object.
     #[serde(rename = "any")]
     Any(Vec<Constraint>),
+    /// Value must not satisfy the child constraint (NOT).
+    ///
+    /// Nested [`All`] / [`Any`] / [`Not`] trees are allowed up to
+    /// [`MAX_CONSTRAINT_NESTING`]. There is no empty `Not` (always one
+    /// child). A `Not` whose child is an empty pattern is rejected at
+    /// mint/validate and never matches a value (fail closed).
+    ///
+    /// JSON: `{"type":"not","value":{...}}` where the child is an
+    /// existing constraint object.
+    #[serde(rename = "not")]
+    Not(Box<Constraint>),
 }
 
-/// Maximum nesting depth of [`Constraint::All`] / [`Constraint::Any`] trees.
+/// Maximum nesting depth of [`Constraint::All`] / [`Constraint::Any`] /
+/// [`Constraint::Not`] trees.
 ///
 /// Depth is 1 for a single composite wrapping atomic constraints, and
-/// increases by one for each nested All/Any. Trees deeper than this are
-/// rejected at mint/validate to avoid pathological compositions.
+/// increases by one for each nested All/Any/Not. Trees deeper than this
+/// are rejected at mint/validate to avoid pathological compositions.
 pub const MAX_CONSTRAINT_NESTING: usize = 8;
 
 impl Constraint {
@@ -144,13 +157,16 @@ impl Constraint {
             Constraint::Any(children) => {
                 !children.is_empty() && children.iter().any(|c| c.check(value))
             }
+            // Empty-pattern children would invert into a wildcard; fail closed.
+            Constraint::Not(child) => !child.is_empty_pattern() && !child.check(value),
         }
     }
 
     /// Empty suffix/contains/matches/not_contains/not_prefix/not_suffix/
-    /// not_matches needles, empty NotOneOf denylists, and empty All/Any
-    /// composites match nothing and must not be treated as wildcards.
-    /// A composite that contains an empty child is also empty.
+    /// not_matches needles, empty NotOneOf denylists, empty All/Any
+    /// composites, and a `Not` whose child is an empty pattern match
+    /// nothing and must not be treated as wildcards. A composite that
+    /// contains an empty child is also empty.
     pub fn is_empty_pattern(&self) -> bool {
         match self {
             Constraint::Suffix(value)
@@ -164,11 +180,12 @@ impl Constraint {
             Constraint::All(children) | Constraint::Any(children) => {
                 children.is_empty() || children.iter().any(|c| c.is_empty_pattern())
             }
+            Constraint::Not(child) => child.is_empty_pattern(),
             _ => false,
         }
     }
 
-    /// Nesting depth of All/Any composition. Atomic constraints are 0.
+    /// Nesting depth of All/Any/Not composition. Atomic constraints are 0.
     pub fn nesting_depth(&self) -> usize {
         match self {
             Constraint::All(children) | Constraint::Any(children) => {
@@ -178,11 +195,12 @@ impl Constraint {
                     .max()
                     .unwrap_or(0)
             }
+            Constraint::Not(child) => 1 + child.nesting_depth(),
             _ => 0,
         }
     }
 
-    /// True when All/Any nesting exceeds [`MAX_CONSTRAINT_NESTING`].
+    /// True when All/Any/Not nesting exceeds [`MAX_CONSTRAINT_NESTING`].
     pub fn exceeds_max_nesting(&self) -> bool {
         self.nesting_depth() > MAX_CONSTRAINT_NESTING
     }

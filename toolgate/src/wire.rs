@@ -166,6 +166,10 @@ fn encode_constraint_value_to_wire(buf: &mut Vec<u8>, constraint: &Constraint) {
                 encode_constraint_value_to_wire(buf, child);
             }
         }
+        Constraint::Not(child) => {
+            buf.push(17);
+            encode_constraint_value_to_wire(buf, child);
+        }
     }
 }
 
@@ -269,6 +273,7 @@ fn decode_constraint_value_from_wire(
             }
             Constraint::Any(children)
         }
+        17 => Constraint::Not(Box::new(decode_constraint_value_from_wire(data, pos)?)),
         _ => return Err(WireError::UnexpectedEof), // Invalid constraint type
     };
 
