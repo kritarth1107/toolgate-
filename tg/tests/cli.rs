@@ -3216,3 +3216,272 @@ fn attenuate_rejects_empty_all_and_any() {
         String::from_utf8_lossy(&any.stderr)
     );
 }
+
+fn mint_not_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["path"],
+            "expiry": 2000000000,
+            "constraints": {
+                "path": {
+                    "type": "not",
+                    "value": {"type": "prefix", "value": "/tmp/sub/"}
+                }
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+#[test]
+fn mint_accepts_not_constraint() {
+    let token = mint_not_token();
+    assert_eq!(token["constraints"]["path"]["type"], "not");
+    assert_eq!(token["constraints"]["path"]["value"]["type"], "prefix");
+    assert_eq!(token["constraints"]["path"]["value"]["value"], "/tmp/sub/");
+}
+
+#[test]
+fn check_call_enforces_not() {
+    let token = mint_not_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"path": "/var/out"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"path": "/tmp/sub/notes.txt"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn attenuate_can_tighten_not() {
+    let token = mint_not_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "path": {
+                    "type": "not",
+                    "value": {"type": "prefix", "value": "/tmp/"}
+                }
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(attenuated["constraints"]["path"]["type"], "not");
+    assert_eq!(
+        attenuated["constraints"]["path"]["value"]["value"],
+        "/tmp/"
+    );
+}
+
+#[test]
+fn attenuate_rejects_loosening_not() {
+    let token = mint_not_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "path": {
+                    "type": "not",
+                    "value": {"type": "prefix", "value": "/tmp/sub/pub/"}
+                }
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("attenuation"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn policy_lint_rejects_empty_not_child() {
+    let path = write_temp_policy(
+        "empty-not",
+        r#"{
+            "version": "1",
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["path"],
+                "constraints": {"path": {"type": "not", "value": {"type": "suffix", "value": ""}}}
+            }]
+        }"#,
+    );
+    let output = tg()
+        .args(["policy", "lint", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any/not"),
+        "stdout={stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn policy_lint_rejects_over_nested_not() {
+    let mut inner = serde_json::json!({"type": "prefix", "value": "/tmp/"});
+    for _ in 0..9 {
+        inner = serde_json::json!({"type": "not", "value": inner});
+    }
+    let doc = serde_json::json!({
+        "version": "1",
+        "tools": [{
+            "name": "read_file",
+            "arg_keys": ["path"],
+            "constraints": {"path": inner}
+        }]
+    });
+    let path = write_temp_policy("nested-not", &doc.to_string());
+    let output = tg()
+        .args(["policy", "lint", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("exceeds maximum depth"),
+        "stdout={stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn mint_from_policy_accepts_not() {
+    let path = write_temp_policy(
+        "not-grant",
+        r#"{
+            "version": "1",
+            "default_ttl_seconds": 60,
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["path"],
+                "constraints": {
+                    "path": {
+                        "type": "not",
+                        "value": {"type": "prefix", "value": "/tmp/"}
+                    }
+                }
+            }]
+        }"#,
+    );
+    let out = run_json(
+        &[
+            "mint",
+            "--policy",
+            path.to_str().unwrap(),
+            "--tool",
+            "read_file",
+        ],
+        &json!({
+            "secret": "cli-secret",
+            "current_time": 1700000000
+        }),
+    );
+    let token = &out["token"];
+    assert_eq!(token["tool_name"], "read_file");
+    assert_eq!(token["constraints"]["path"]["type"], "not");
+    assert_eq!(token["constraints"]["path"]["value"]["type"], "prefix");
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn mint_rejects_empty_not_child() {
+    let out = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["path"],
+            "expiry": 2000000000,
+            "constraints": {"path": {"type": "not", "value": {"type": "contains", "value": ""}}}
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any/not"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn mint_rejects_over_nested_not() {
+    let mut inner = serde_json::json!({"type": "prefix", "value": "/tmp/"});
+    for _ in 0..9 {
+        inner = serde_json::json!({"type": "not", "value": inner});
+    }
+    let out = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["path"],
+            "expiry": 2000000000,
+            "constraints": {"path": inner}
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("exceeds maximum depth"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn attenuate_rejects_empty_not_child() {
+    let token = mint_not_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"path": {"type": "not", "value": {"type": "suffix", "value": ""}}}
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any/not"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
