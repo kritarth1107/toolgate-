@@ -183,6 +183,12 @@ fn encode_constraint_value_to_wire(buf: &mut Vec<u8>, constraint: &Constraint) {
             buf.extend_from_slice(&(*min as u64).to_be_bytes());
             buf.extend_from_slice(&(*max as u64).to_be_bytes());
         }
+        // Two u64 big-endian scalar counts — same layout as LenRange.
+        Constraint::CharLenRange { min, max } => {
+            buf.push(20);
+            buf.extend_from_slice(&(*min as u64).to_be_bytes());
+            buf.extend_from_slice(&(*max as u64).to_be_bytes());
+        }
     }
 }
 

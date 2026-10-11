@@ -5,11 +5,14 @@
 //! [`Constraint::Any`], and [`Constraint::Not`] compose children as AND / OR /
 //! NOT. [`Constraint::FloatRange`] restricts a value to a finite inclusive
 //! `f64` interval. [`Constraint::LenRange`] restricts a value's byte length
-//! to an inclusive `usize` interval. Serde JSON forms are
+//! to an inclusive `usize` interval. [`Constraint::CharLenRange`] restricts
+//! a value's Unicode scalar count (`chars().count()`) to an inclusive
+//! `usize` interval. Serde JSON forms are
 //! `{"type":"all","value":[...]}`, `{"type":"any","value":[...]}`,
 //! `{"type":"not","value":{...}}`,
-//! `{"type":"float_range","value":{"min":...,"max":...}}`, and
-//! `{"type":"len_range","value":{"min":...,"max":...}}`.
+//! `{"type":"float_range","value":{"min":...,"max":...}}`,
+//! `{"type":"len_range","value":{"min":...,"max":...}}`, and
+//! `{"type":"char_len_range","value":{"min":...,"max":...}}`.
 
 use std::collections::BTreeMap;
 
@@ -130,6 +133,16 @@ pub enum Constraint {
     /// string when `N` allows it.
     #[serde(rename = "len_range")]
     LenRange { min: usize, max: usize },
+    /// Value Unicode scalar count must satisfy `min <= count <= max`
+    /// (inclusive).
+    ///
+    /// Count is `value.chars().count()`, not UTF-8 byte length. That is
+    /// a different unit from [`LenRange`], [`MaxLen`], and [`MinLen`].
+    /// Inverted bounds (`min > max`) are rejected at mint/validate and
+    /// never match a value (fail closed). `CharLenRange { min: 0, max: N }`
+    /// is valid and accepts the empty string when `N` allows it.
+    #[serde(rename = "char_len_range")]
+    CharLenRange { min: usize, max: usize },
 }
 
 impl PartialEq for Constraint {
@@ -181,6 +194,16 @@ impl PartialEq for Constraint {
                     max: a_max,
                 },
                 Constraint::LenRange {
+                    min: b_min,
+                    max: b_max,
+                },
+            ) => a_min == b_min && a_max == b_max,
+            (
+                Constraint::CharLenRange {
+                    min: a_min,
+                    max: a_max,
+                },
+                Constraint::CharLenRange {
                     min: b_min,
                     max: b_max,
                 },
@@ -251,6 +274,11 @@ impl Constraint {
             Constraint::LenRange { min, max } => {
                 len_range_is_valid(*min, *max) && value.len() >= *min && value.len() <= *max
             }
+            // Unicode scalar count, not bytes. Inverted bounds never match.
+            Constraint::CharLenRange { min, max } => {
+                let count = value.chars().count();
+                len_range_is_valid(*min, *max) && count >= *min && count <= *max
+            }
         }
     }
 
@@ -277,14 +305,16 @@ impl Constraint {
         }
     }
 
-    /// True when a [`Constraint::FloatRange`] or [`Constraint::LenRange`]
-    /// (or a composite containing one) has inverted bounds, or when a
-    /// FloatRange has non-finite bounds. Rejected at mint/validate and
-    /// never matches a value (fail closed).
+    /// True when a [`Constraint::FloatRange`], [`Constraint::LenRange`],
+    /// or [`Constraint::CharLenRange`] (or a composite containing one)
+    /// has inverted bounds, or when a FloatRange has non-finite bounds.
+    /// Rejected at mint/validate and never matches a value (fail closed).
     pub fn is_invalid_range(&self) -> bool {
         match self {
             Constraint::FloatRange { min, max } => !float_range_is_valid(*min, *max),
-            Constraint::LenRange { min, max } => !len_range_is_valid(*min, *max),
+            Constraint::LenRange { min, max } | Constraint::CharLenRange { min, max } => {
+                !len_range_is_valid(*min, *max)
+            }
             Constraint::All(children) | Constraint::Any(children) => {
                 children.iter().any(Constraint::is_invalid_range)
             }
