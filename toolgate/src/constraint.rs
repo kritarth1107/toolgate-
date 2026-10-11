@@ -1896,6 +1896,74 @@ mod tests {
     }
 
     #[test]
+    fn charlenrange_subset_of_charlenrange() {
+        let inner = Constraint::CharLenRange { min: 3, max: 8 };
+        let outer = Constraint::CharLenRange { min: 1, max: 16 };
+        assert!(inner.is_subset_of(&outer));
+        assert!(!outer.is_subset_of(&inner));
+        assert!(!Constraint::CharLenRange { min: 16, max: 1 }.is_subset_of(&outer));
+        assert!(!inner.is_subset_of(&Constraint::CharLenRange { min: 16, max: 1 }));
+    }
+
+    #[test]
+    fn exact_subset_of_charlenrange() {
+        let range = Constraint::CharLenRange { min: 2, max: 5 };
+        assert!(Constraint::Exact("hi".to_string()).is_subset_of(&range));
+        assert!(Constraint::Exact("hello".to_string()).is_subset_of(&range));
+        assert!(!Constraint::Exact("h".to_string()).is_subset_of(&range));
+        assert!(!Constraint::Exact("hello!".to_string()).is_subset_of(&range));
+        // "é" is one scalar; Exact may replace when the scalar count fits.
+        assert!(Constraint::Exact("é".to_string())
+            .is_subset_of(&Constraint::CharLenRange { min: 1, max: 1 }));
+        assert!(!Constraint::Exact("é".to_string())
+            .is_subset_of(&Constraint::CharLenRange { min: 2, max: 2 }));
+        assert!(!Constraint::Exact("hi".to_string())
+            .is_subset_of(&Constraint::CharLenRange { min: 5, max: 1 }));
+    }
+
+    #[test]
+    fn oneof_subset_of_charlenrange() {
+        let range = Constraint::CharLenRange { min: 2, max: 5 };
+        assert!(
+            Constraint::OneOf(vec!["hi".to_string(), "hello".to_string()]).is_subset_of(&range)
+        );
+        assert!(
+            !Constraint::OneOf(vec!["hi".to_string(), "hello!".to_string()]).is_subset_of(&range)
+        );
+        assert!(Constraint::OneOf(vec!["é".to_string(), "漢".to_string()])
+            .is_subset_of(&Constraint::CharLenRange { min: 1, max: 1 }));
+        assert!(
+            !Constraint::OneOf(vec!["é".to_string(), "café".to_string()])
+                .is_subset_of(&Constraint::CharLenRange { min: 1, max: 1 })
+        );
+        assert!(!Constraint::OneOf(vec![]).is_subset_of(&range));
+    }
+
+    #[test]
+    fn unclear_charlenrange_cross_type_pairs_fail_closed() {
+        let range = Constraint::CharLenRange { min: 2, max: 5 };
+        assert!(!range.is_subset_of(&Constraint::LenRange { min: 2, max: 5 }));
+        assert!(!Constraint::LenRange { min: 2, max: 5 }.is_subset_of(&range));
+        assert!(!range.is_subset_of(&Constraint::MinLen(2)));
+        assert!(!range.is_subset_of(&Constraint::MaxLen(5)));
+        assert!(!Constraint::MinLen(2).is_subset_of(&range));
+        assert!(!Constraint::MaxLen(5).is_subset_of(&range));
+        assert!(!range.is_subset_of(&Constraint::Prefix("/tmp/".to_string())));
+        assert!(!Constraint::Prefix("/tmp/".to_string()).is_subset_of(&range));
+        assert!(!range.is_subset_of(&Constraint::IntRange { min: 1, max: 10 }));
+        assert!(!Constraint::IntRange { min: 1, max: 10 }.is_subset_of(&range));
+        assert!(!range.is_subset_of(&Constraint::FloatRange {
+            min: 0.5,
+            max: 10.5
+        }));
+        assert!(!Constraint::FloatRange {
+            min: 0.5,
+            max: 10.5
+        }
+        .is_subset_of(&range));
+    }
+
+    #[test]
     fn json_exact() {
         let c = Constraint::Exact("hello".to_string());
         let json = serde_json::to_string(&c).unwrap();

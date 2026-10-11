@@ -1036,6 +1036,44 @@ mod tests {
     }
 
     #[test]
+    fn encoding_constraint_charlenrange() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "q".to_string(),
+            Constraint::CharLenRange { min: 3, max: 16 },
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x01, b'q', // key "q"
+            0x14, // type = CharLenRange
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, // u64 min 3
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, // u64 max 16
+        ]));
+    }
+
+    #[test]
+    fn encoding_without_charlenrange_identical_to_prior() {
+        // Tokens that do not use CharLenRange must keep the 0.24.0 bytes.
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("q".to_string(), Constraint::LenRange { min: 3, max: 16 });
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x01, b'q', // key "q"
+            0x13, // type = LenRange
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, // u64 min 3
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, // u64 max 16
+        ]));
+    }
+
+    #[test]
     fn encoding_without_lenrange_identical_to_prior() {
         // Tokens that do not use LenRange must keep the 0.23.0 bytes.
         use std::collections::BTreeMap;
