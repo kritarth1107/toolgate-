@@ -1720,6 +1720,22 @@ mod tests {
     }
 
     #[test]
+    fn json_lenrange() {
+        let c = Constraint::LenRange { min: 1, max: 16 };
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"len_range\""));
+        assert!(json.contains("\"min\":1"));
+        assert!(json.contains("\"max\":16"));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"len_range","value":{"min":0,"max":8}}"#).unwrap();
+        assert_eq!(from_cli, Constraint::LenRange { min: 0, max: 8 });
+    }
+
+    #[test]
     fn json_suffix() {
         let c = Constraint::Suffix(".txt".to_string());
         let json = serde_json::to_string(&c).unwrap();

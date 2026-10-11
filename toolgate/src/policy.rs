@@ -1062,6 +1062,54 @@ mod tests {
     }
 
     #[test]
+    fn from_json_parses_len_range() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 60,
+                "tools": [{
+                    "name": "search",
+                    "arg_keys": ["query"],
+                    "constraints": {
+                        "query": {"type": "len_range", "value": {"min": 1, "max": 16}}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        policy.validate().unwrap();
+        let grant = policy.grant("search").unwrap();
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("query"),
+            Some(&Constraint::LenRange { min: 1, max: 16 })
+        );
+    }
+
+    #[test]
+    fn validate_inverted_len_range_is_rejected() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "search",
+                    "arg_keys": ["query"],
+                    "constraints": {
+                        "query": {"type": "len_range", "value": {"min": 16, "max": 1}}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.validate(),
+            Err(PolicyError::InvalidConstraintRange {
+                tool: "search".into(),
+                key: "query".into()
+            })
+        );
+    }
+
+    #[test]
     fn validate_empty_all_and_any_are_rejected() {
         let all = Policy::from_json(
             r#"{
