@@ -75,9 +75,9 @@ pub enum PolicyError {
     /// A constraint is attached to a key that is not in the grant's allowlist.
     ConstraintKeyNotAllowed { tool: String, key: String },
     /// An empty suffix, contains, matches, NotOneOf, NotContains, NotPrefix,
-    /// NotSuffix, NotMatches, All, or Any constraint is rejected.
+    /// NotSuffix, NotMatches, All, Any, or Not constraint is rejected.
     EmptyConstraintPattern { tool: String, key: String },
-    /// An All/Any tree deeper than [`crate::MAX_CONSTRAINT_NESTING`] is rejected.
+    /// An All/Any/Not tree deeper than [`crate::MAX_CONSTRAINT_NESTING`] is rejected.
     ConstraintNestingTooDeep { tool: String, key: String },
     /// A TTL (default or per-grant) is present and zero.
     ZeroTtl {
@@ -118,7 +118,7 @@ impl std::fmt::Display for PolicyError {
             PolicyError::EmptyConstraintPattern { tool, key } => {
                 write!(
                     f,
-                    "empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any constraint for '{key}' on tool '{tool}' is rejected"
+                    "empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any/not constraint for '{key}' on tool '{tool}' is rejected"
                 )
             }
             PolicyError::ConstraintNestingTooDeep { tool, key } => {
@@ -967,6 +967,35 @@ mod tests {
     }
 
     #[test]
+    fn from_json_parses_not() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 60,
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["path"],
+                    "constraints": {
+                        "path": {
+                            "type": "not",
+                            "value": {"type": "prefix", "value": "/tmp/"}
+                        }
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        policy.validate().unwrap();
+        let grant = policy.grant("read_file").unwrap();
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("path"),
+            Some(&Constraint::Not(Box::new(Constraint::Prefix(
+                "/tmp/".into()
+            ))))
+        );
+    }
+
+    #[test]
     fn validate_empty_all_and_any_are_rejected() {
         let all = Policy::from_json(
             r#"{
@@ -1008,10 +1037,56 @@ mod tests {
     }
 
     #[test]
+    fn validate_empty_not_child_is_rejected() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["path"],
+                    "constraints": {"path": {"type": "not", "value": {"type": "suffix", "value": ""}}}
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.validate(),
+            Err(PolicyError::EmptyConstraintPattern {
+                tool: "read_file".into(),
+                key: "path".into()
+            })
+        );
+    }
+
+    #[test]
     fn validate_all_any_nesting_too_deep_is_rejected() {
         let mut inner = serde_json::json!({"type": "prefix", "value": "/tmp/"});
         for _ in 0..9 {
             inner = serde_json::json!({"type": "all", "value": [inner]});
+        }
+        let doc = serde_json::json!({
+            "version": "1",
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["path"],
+                "constraints": {"path": inner}
+            }]
+        });
+        let policy = Policy::from_json(&doc.to_string()).unwrap();
+        assert_eq!(
+            policy.validate(),
+            Err(PolicyError::ConstraintNestingTooDeep {
+                tool: "read_file".into(),
+                key: "path".into()
+            })
+        );
+    }
+
+    #[test]
+    fn validate_not_nesting_too_deep_is_rejected() {
+        let mut inner = serde_json::json!({"type": "prefix", "value": "/tmp/"});
+        for _ in 0..9 {
+            inner = serde_json::json!({"type": "not", "value": inner});
         }
         let doc = serde_json::json!({
             "version": "1",
