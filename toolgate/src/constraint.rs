@@ -1064,6 +1064,47 @@ mod tests {
     }
 
     #[test]
+    fn lenrange_check() {
+        let c = Constraint::LenRange { min: 2, max: 5 };
+        assert!(c.check("hi"));
+        assert!(c.check("hello"));
+        assert!(!c.check("h"));
+        assert!(!c.check("hello!"));
+        assert!(!c.check(""));
+    }
+
+    #[test]
+    fn lenrange_zero_min_allows_empty() {
+        let c = Constraint::LenRange { min: 0, max: 3 };
+        assert!(c.check(""));
+        assert!(c.check("x"));
+        assert!(c.check("abc"));
+        assert!(!c.check("abcd"));
+    }
+
+    #[test]
+    fn lenrange_uses_byte_length() {
+        // "é" is one Unicode scalar and two UTF-8 bytes.
+        let c = Constraint::LenRange { min: 2, max: 2 };
+        assert!(c.check("é"));
+        assert!(!Constraint::LenRange { min: 1, max: 1 }.check("é"));
+        assert!(!Constraint::LenRange { min: 3, max: 4 }.check("é"));
+    }
+
+    #[test]
+    fn lenrange_invalid_bounds_fail_closed() {
+        let inverted = Constraint::LenRange { min: 10, max: 1 };
+        assert!(inverted.is_invalid_range());
+        assert!(!inverted.check(""));
+        assert!(!inverted.check("hello"));
+        assert!(!inverted.check("abcdefghij"));
+        assert!(!Constraint::LenRange { min: 1, max: 16 }.is_invalid_range());
+        assert!(!Constraint::LenRange { min: 0, max: 0 }.is_invalid_range());
+        assert!(Constraint::LenRange { min: 0, max: 0 }.check(""));
+        assert!(!Constraint::LenRange { min: 0, max: 0 }.check("x"));
+    }
+
+    #[test]
     fn suffix_check() {
         let c = Constraint::Suffix(".txt".to_string());
         assert!(c.check("notes.txt"));
