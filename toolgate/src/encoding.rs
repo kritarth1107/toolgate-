@@ -20,7 +20,7 @@
 //! - constraints_count: u16
 //! - for each constraint (sorted by key):
 //!   - key: u16 length + UTF-8 bytes
-//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange)
+//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange)
 //!   - constraint_data: type-specific encoding
 //!
 //! Format v5 (backward-compatible extension):
@@ -58,6 +58,7 @@
 //! - FloatRange: IEEE-754 f64 min + f64 max (big-endian bits, same
 //!   `to_be_bytes` style as IntRange's i64 pair)
 //! - LenRange: u64 min + u64 max (same length encoding as MaxLen/MinLen)
+//! - CharLenRange: u64 min + u64 max (same length encoding as LenRange/MaxLen/MinLen)
 //!
 //! The v5 format appends jti after constraints. Tokens without jti
 //! encode identically to v4. Tokens without constraints and without jti
