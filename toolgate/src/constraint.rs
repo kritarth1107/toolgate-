@@ -292,6 +292,12 @@ impl Constraint {
                         .any(|c| Constraint::Exact(a.clone()).is_subset_of(c))
             }
 
+            // Exact is subset of Not if the exact value does not satisfy
+            // the child. Empty-pattern children fail closed.
+            (Constraint::Exact(a), Constraint::Not(child)) => {
+                !child.is_empty_pattern() && !Constraint::Exact(a.clone()).is_subset_of(child)
+            }
+
             // OneOf is subset of OneOf if new set is subset of old set
             (Constraint::OneOf(new), Constraint::OneOf(old)) => new.iter().all(|v| old.contains(v)),
 
@@ -371,6 +377,15 @@ impl Constraint {
                             .iter()
                             .any(|c| Constraint::Exact(v.clone()).is_subset_of(c))
                     })
+            }
+
+            // OneOf is subset of Not if every allowed value avoids the child
+            (Constraint::OneOf(values), Constraint::Not(child)) => {
+                !values.is_empty()
+                    && !child.is_empty_pattern()
+                    && values
+                        .iter()
+                        .all(|v| !Constraint::Exact(v.clone()).is_subset_of(child))
             }
 
             // Prefix is subset of Prefix if new prefix starts with (extends) old prefix
@@ -553,6 +568,12 @@ impl Constraint {
                 !pattern.is_empty()
                     && !denied.is_empty()
                     && denied.iter().all(|v| glob_match(pattern, v))
+            }
+
+            // Not → Not: widening the inner constraint strengthens the
+            // outer negation. Tightening the inner would loosen Not.
+            (Constraint::Not(new), Constraint::Not(old)) => {
+                !new.is_empty_pattern() && !old.is_empty_pattern() && old.is_subset_of(new)
             }
 
             // All → All: each old child must still be covered by an
