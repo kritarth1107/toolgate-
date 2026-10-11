@@ -1740,6 +1740,112 @@ mod tests {
     }
 
     #[test]
+    fn not_check() {
+        let c = Constraint::Not(Box::new(Constraint::Prefix("/tmp/".to_string())));
+        assert!(c.check("/var/out"));
+        assert!(c.check("notes.txt"));
+        assert!(!c.check("/tmp/a"));
+        assert!(!c.check("/tmp/"));
+    }
+
+    #[test]
+    fn nested_not_all_check() {
+        let c = Constraint::Not(Box::new(Constraint::All(vec![
+            Constraint::Prefix("/tmp/".to_string()),
+            Constraint::Suffix(".txt".to_string()),
+        ])));
+        assert!(c.check("/tmp/a.rs"));
+        assert!(c.check("/var/a.txt"));
+        assert!(!c.check("/tmp/a.txt"));
+    }
+
+    #[test]
+    fn not_with_empty_child_fails_closed() {
+        let c = Constraint::Not(Box::new(Constraint::Suffix(String::new())));
+        assert!(c.is_empty_pattern());
+        assert!(!c.check(""));
+        assert!(!c.check("anything"));
+        assert!(!c.check("/tmp/a"));
+    }
+
+    fn nest_not(depth: usize) -> Constraint {
+        let mut c = Constraint::Prefix("/tmp/".to_string());
+        for _ in 0..depth {
+            c = Constraint::Not(Box::new(c));
+        }
+        c
+    }
+
+    #[test]
+    fn not_nesting_depth_counts_like_all() {
+        assert_eq!(
+            Constraint::Not(Box::new(Constraint::Prefix("/tmp/".to_string()))).nesting_depth(),
+            1
+        );
+        assert_eq!(nest_not(8).nesting_depth(), 8);
+        assert_eq!(nest_not(9).nesting_depth(), 9);
+        assert!(!nest_not(8).exceeds_max_nesting());
+        assert!(nest_not(9).exceeds_max_nesting());
+    }
+
+    #[test]
+    fn not_subset_of_not_widens_inner() {
+        let old = Constraint::Not(Box::new(Constraint::Prefix("/tmp/sub/".to_string())));
+        let tighter = Constraint::Not(Box::new(Constraint::Prefix("/tmp/".to_string())));
+        let looser = Constraint::Not(Box::new(Constraint::Prefix("/tmp/sub/pub/".to_string())));
+        assert!(tighter.is_subset_of(&old));
+        assert!(!old.is_subset_of(&tighter));
+        assert!(!looser.is_subset_of(&old));
+        assert!(!Constraint::Not(Box::new(Constraint::Suffix(String::new()))).is_subset_of(&old));
+    }
+
+    #[test]
+    fn exact_subset_of_not() {
+        let not_tmp = Constraint::Not(Box::new(Constraint::Prefix("/tmp/".to_string())));
+        assert!(Constraint::Exact("/var/out".to_string()).is_subset_of(&not_tmp));
+        assert!(!Constraint::Exact("/tmp/a".to_string()).is_subset_of(&not_tmp));
+        assert!(
+            !Constraint::Exact("x".to_string()).is_subset_of(&Constraint::Not(Box::new(
+                Constraint::Suffix(String::new())
+            )))
+        );
+    }
+
+    #[test]
+    fn oneof_subset_of_not() {
+        let not_tmp = Constraint::Not(Box::new(Constraint::Prefix("/tmp/".to_string())));
+        assert!(
+            Constraint::OneOf(vec!["/var/a".to_string(), "/home/b".to_string()])
+                .is_subset_of(&not_tmp)
+        );
+        assert!(
+            !Constraint::OneOf(vec!["/var/a".to_string(), "/tmp/b".to_string()])
+                .is_subset_of(&not_tmp)
+        );
+        assert!(!Constraint::OneOf(vec![]).is_subset_of(&not_tmp));
+    }
+
+    #[test]
+    fn json_not() {
+        let c = Constraint::Not(Box::new(Constraint::Prefix("/tmp/".to_string())));
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"not\""));
+        assert!(json.contains("\"type\":\"prefix\""));
+        assert!(json.contains("\"/tmp/\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"not","value":{"type":"suffix","value":".bak"}}"#)
+                .unwrap();
+        assert_eq!(
+            from_cli,
+            Constraint::Not(Box::new(Constraint::Suffix(".bak".to_string())))
+        );
+    }
+
+    #[test]
     fn json_any() {
         let c = Constraint::Any(vec![
             Constraint::Prefix("/tmp/".to_string()),
