@@ -4,9 +4,12 @@
 //! but also what values those arguments may have. [`Constraint::All`],
 //! [`Constraint::Any`], and [`Constraint::Not`] compose children as AND / OR /
 //! NOT. [`Constraint::FloatRange`] restricts a value to a finite inclusive
-//! `f64` interval. Serde JSON forms are `{"type":"all","value":[...]}`,
-//! `{"type":"any","value":[...]}`, `{"type":"not","value":{...}}`, and
-//! `{"type":"float_range","value":{"min":...,"max":...}}`.
+//! `f64` interval. [`Constraint::LenRange`] restricts a value's byte length
+//! to an inclusive `usize` interval. Serde JSON forms are
+//! `{"type":"all","value":[...]}`, `{"type":"any","value":[...]}`,
+//! `{"type":"not","value":{...}}`,
+//! `{"type":"float_range","value":{"min":...,"max":...}}`, and
+//! `{"type":"len_range","value":{"min":...,"max":...}}`.
 
 use std::collections::BTreeMap;
 
@@ -118,6 +121,15 @@ pub enum Constraint {
     /// strings are rejected at check time.
     #[serde(rename = "float_range")]
     FloatRange { min: f64, max: f64 },
+    /// Value byte length must satisfy `min <= len <= max` (inclusive).
+    ///
+    /// `min` and `max` are UTF-8 byte lengths, the same unit as
+    /// [`MaxLen`] and [`MinLen`]. Inverted bounds (`min > max`) are
+    /// rejected at mint/validate and never match a value (fail closed).
+    /// `LenRange { min: 0, max: N }` is valid and accepts the empty
+    /// string when `N` allows it.
+    #[serde(rename = "len_range")]
+    LenRange { min: usize, max: usize },
 }
 
 impl PartialEq for Constraint {
@@ -163,6 +175,16 @@ impl PartialEq for Constraint {
                     max: b_max,
                 },
             ) => a_min.to_bits() == b_min.to_bits() && a_max.to_bits() == b_max.to_bits(),
+            (
+                Constraint::LenRange {
+                    min: a_min,
+                    max: a_max,
+                },
+                Constraint::LenRange {
+                    min: b_min,
+                    max: b_max,
+                },
+            ) => a_min == b_min && a_max == b_max,
             _ => false,
         }
     }
@@ -225,6 +247,10 @@ impl Constraint {
                 Some(n) if float_range_is_valid(*min, *max) => n >= *min && n <= *max,
                 _ => false,
             },
+            // Inverted bounds never match; otherwise require min <= len <= max.
+            Constraint::LenRange { min, max } => {
+                len_range_is_valid(*min, *max) && value.len() >= *min && value.len() <= *max
+            }
         }
     }
 
@@ -251,12 +277,14 @@ impl Constraint {
         }
     }
 
-    /// True when a [`Constraint::FloatRange`] (or a composite containing one)
-    /// has non-finite bounds or `min > max`. Rejected at mint/validate
-    /// and never matches a value (fail closed).
+    /// True when a [`Constraint::FloatRange`] or [`Constraint::LenRange`]
+    /// (or a composite containing one) has inverted bounds, or when a
+    /// FloatRange has non-finite bounds. Rejected at mint/validate and
+    /// never matches a value (fail closed).
     pub fn is_invalid_range(&self) -> bool {
         match self {
             Constraint::FloatRange { min, max } => !float_range_is_valid(*min, *max),
+            Constraint::LenRange { min, max } => !len_range_is_valid(*min, *max),
             Constraint::All(children) | Constraint::Any(children) => {
                 children.iter().any(Constraint::is_invalid_range)
             }
@@ -792,6 +820,11 @@ fn parse_finite_f64(value: &str) -> Option<f64> {
 /// Inclusive float bounds are valid only when both ends are finite and ordered.
 fn float_range_is_valid(min: f64, max: f64) -> bool {
     min.is_finite() && max.is_finite() && min <= max
+}
+
+/// Inclusive length bounds are valid only when they are ordered.
+fn len_range_is_valid(min: usize, max: usize) -> bool {
+    min <= max
 }
 
 /// Convert `n` to `f64` only when the integer is exactly representable.

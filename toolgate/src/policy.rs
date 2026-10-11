@@ -79,7 +79,8 @@ pub enum PolicyError {
     EmptyConstraintPattern { tool: String, key: String },
     /// An All/Any/Not tree deeper than [`crate::MAX_CONSTRAINT_NESTING`] is rejected.
     ConstraintNestingTooDeep { tool: String, key: String },
-    /// A FloatRange with non-finite bounds or `min > max` is rejected.
+    /// A FloatRange with non-finite bounds or `min > max`, or a LenRange
+    /// with `min > max`, is rejected.
     InvalidConstraintRange { tool: String, key: String },
     /// A TTL (default or per-grant) is present and zero.
     ZeroTtl {
@@ -133,7 +134,7 @@ impl std::fmt::Display for PolicyError {
             PolicyError::InvalidConstraintRange { tool, key } => {
                 write!(
                     f,
-                    "invalid float_range for '{key}' on tool '{tool}' is rejected (min/max must be finite and min <= max)"
+                    "invalid float_range or len_range for '{key}' on tool '{tool}' is rejected (min <= max required; float bounds must be finite)"
                 )
             }
             PolicyError::ZeroTtl { tool: Some(tool) } => {

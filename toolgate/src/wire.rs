@@ -17,7 +17,7 @@
 //! | audience | u16 length + UTF-8 bytes (0 = none) |
 //! | kid | u16 length + UTF-8 bytes (0 = none) |
 //! | constraints_count | u16 (0 = none) |
-//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange) |
+//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange) |
 //! | jti | u16 length + UTF-8 bytes (0 = none) |
 //! | nbf_flag | u8 (v5 only; 0 = none, 1 = present) |
 //! | nbf | u64 (v5 only, if nbf_flag = 1) |
@@ -177,6 +177,12 @@ fn encode_constraint_value_to_wire(buf: &mut Vec<u8>, constraint: &Constraint) {
             buf.extend_from_slice(&min.to_be_bytes());
             buf.extend_from_slice(&max.to_be_bytes());
         }
+        // Two u64 big-endian lengths — same unit/encoding as MaxLen/MinLen.
+        Constraint::LenRange { min, max } => {
+            buf.push(19);
+            buf.extend_from_slice(&(*min as u64).to_be_bytes());
+            buf.extend_from_slice(&(*max as u64).to_be_bytes());
+        }
     }
 }
 
@@ -285,6 +291,13 @@ fn decode_constraint_value_from_wire(
             let min = f64::from_be_bytes(read_wire_bytes(data, pos, 8)?.try_into().unwrap());
             let max = f64::from_be_bytes(read_wire_bytes(data, pos, 8)?.try_into().unwrap());
             Constraint::FloatRange { min, max }
+        }
+        19 => {
+            let min =
+                u64::from_be_bytes(read_wire_bytes(data, pos, 8)?.try_into().unwrap()) as usize;
+            let max =
+                u64::from_be_bytes(read_wire_bytes(data, pos, 8)?.try_into().unwrap()) as usize;
+            Constraint::LenRange { min, max }
         }
         _ => return Err(WireError::UnexpectedEof), // Invalid constraint type
     };
