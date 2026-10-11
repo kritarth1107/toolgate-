@@ -1012,6 +1012,45 @@ mod tests {
     }
 
     #[test]
+    fn encoding_constraint_lenrange() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("q".to_string(), Constraint::LenRange { min: 3, max: 16 });
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x01, b'q', // key "q"
+            0x13, // type = LenRange
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, // u64 min 3
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, // u64 max 16
+        ]));
+    }
+
+    #[test]
+    fn encoding_without_lenrange_identical_to_prior() {
+        // Tokens that do not use LenRange must keep the 0.23.0 bytes.
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "n".to_string(),
+            Constraint::FloatRange { min: 1.0, max: 2.0 },
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        // IEEE-754 f64 1.0 = 0x3FF0000000000000, 2.0 = 0x4000000000000000
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x01, b'n', // key "n"
+            0x12, // type = FloatRange
+            0x3F, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // min = 1.0
+            0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // max = 2.0
+        ]));
+    }
+
+    #[test]
     fn encoding_without_floatrange_identical_to_prior() {
         // Tokens that do not use FloatRange must keep the 0.22.0 bytes.
         use std::collections::BTreeMap;

@@ -3439,6 +3439,210 @@ mod tests {
     }
 
     #[test]
+    fn attenuation_can_narrow_lenrange() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "query".to_string(),
+            Constraint::LenRange { min: 1, max: 16 },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut narrower: BTreeMap<String, Constraint> = BTreeMap::new();
+        narrower.insert("query".to_string(), Constraint::LenRange { min: 3, max: 8 });
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(narrower))
+            .unwrap();
+
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("query"),
+            Some(&Constraint::LenRange { min: 3, max: 8 })
+        );
+        assert!(attenuated.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn attenuation_cannot_widen_lenrange() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::LenRange { min: 3, max: 8 });
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut wider: BTreeMap<String, Constraint> = BTreeMap::new();
+        wider.insert(
+            "query".to_string(),
+            Constraint::LenRange { min: 1, max: 16 },
+        );
+
+        let result = token.attenuate_with_constraints(SECRET, None, None, Some(wider));
+        assert_eq!(result, Err(TokenError::AttenuationWidens));
+    }
+
+    #[test]
+    fn attenuation_exact_can_replace_lenrange() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "query".to_string(),
+            Constraint::LenRange { min: 1, max: 16 },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut exact: BTreeMap<String, Constraint> = BTreeMap::new();
+        exact.insert("query".to_string(), Constraint::Exact("hello".to_string()));
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(exact))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("query"),
+            Some(&Constraint::Exact("hello".to_string()))
+        );
+    }
+
+    #[test]
+    fn attenuation_exact_cannot_replace_unsatisfied_lenrange() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::LenRange { min: 3, max: 8 });
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut exact: BTreeMap<String, Constraint> = BTreeMap::new();
+        exact.insert("query".to_string(), Constraint::Exact("hi".to_string()));
+
+        assert_eq!(
+            token.attenuate_with_constraints(SECRET, None, None, Some(exact)),
+            Err(TokenError::AttenuationWidens)
+        );
+    }
+
+    #[test]
+    fn attenuation_lenrange_can_replace_minlen_and_maxlen() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut min_constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        min_constraints.insert("query".to_string(), Constraint::MinLen(3));
+        let min_token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(min_constraints),
+        );
+        let mut from_min: BTreeMap<String, Constraint> = BTreeMap::new();
+        from_min.insert("query".to_string(), Constraint::LenRange { min: 3, max: 8 });
+        let attenuated = min_token
+            .attenuate_with_constraints(SECRET, None, None, Some(from_min))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("query"),
+            Some(&Constraint::LenRange { min: 3, max: 8 })
+        );
+
+        let mut max_constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        max_constraints.insert("query".to_string(), Constraint::MaxLen(16));
+        let max_token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(max_constraints),
+        );
+        let mut from_max: BTreeMap<String, Constraint> = BTreeMap::new();
+        from_max.insert("query".to_string(), Constraint::LenRange { min: 1, max: 8 });
+        let attenuated = max_token
+            .attenuate_with_constraints(SECRET, None, None, Some(from_max))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("query"),
+            Some(&Constraint::LenRange { min: 1, max: 8 })
+        );
+    }
+
+    #[test]
+    fn attenuation_inverted_lenrange_fails_closed() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "query".to_string(),
+            Constraint::LenRange { min: 1, max: 16 },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut inverted: BTreeMap<String, Constraint> = BTreeMap::new();
+        inverted.insert(
+            "query".to_string(),
+            Constraint::LenRange { min: 16, max: 1 },
+        );
+
+        assert_eq!(
+            token.attenuate_with_constraints(SECRET, None, None, Some(inverted)),
+            Err(TokenError::AttenuationWidens)
+        );
+    }
+
+    #[test]
     fn attenuation_can_tighten_suffix() {
         use crate::constraint::Constraint;
         use std::collections::BTreeMap;
@@ -4184,6 +4388,113 @@ mod tests {
         assert!(matches!(
             result,
             Err(TokenError::ConstraintViolation { key }) if key == "score"
+        ));
+    }
+
+    #[test]
+    fn verify_call_with_args_lenrange_satisfied() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::LenRange { min: 2, max: 5 });
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("query".to_string(), "hello".to_string());
+
+        assert!(token
+            .verify_call_with_args(SECRET, 1999999999, "search", &args, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_call_with_args_lenrange_violated() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::LenRange { min: 2, max: 5 });
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("query".to_string(), "toolong".to_string());
+
+        let result = token.verify_call_with_args(SECRET, 1999999999, "search", &args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { key }) if key == "query"
+        ));
+    }
+
+    #[test]
+    fn verify_call_with_args_lenrange_zero_allows_empty() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::LenRange { min: 0, max: 3 });
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("query".to_string(), String::new());
+
+        assert!(token
+            .verify_call_with_args(SECRET, 1999999999, "search", &args, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_call_with_args_invalid_lenrange_fail_closed() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert(
+            "query".to_string(),
+            Constraint::LenRange { min: 10, max: 1 },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("query".to_string(), "hello".to_string());
+
+        let result = token.verify_call_with_args(SECRET, 1999999999, "search", &args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { key }) if key == "query"
         ));
     }
 

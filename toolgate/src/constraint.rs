@@ -661,15 +661,25 @@ impl Constraint {
             // old min and the old max is still respected (only when the
             // old max is usize::MAX, i.e. equivalent to an unbounded max).
             // Otherwise fold the raise into a tighter LenRange.
-            (Constraint::MinLen(new), Constraint::LenRange { min: old_min, max: old_max }) => {
+            (
+                Constraint::MinLen(new),
+                Constraint::LenRange {
+                    min: old_min,
+                    max: old_max,
+                },
+            ) => {
                 len_range_is_valid(*old_min, *old_max) && *new >= *old_min && *old_max == usize::MAX
             }
 
             // MaxLen may replace LenRange when the old min is 0 (still
             // respected by MaxLen) and the new max is within the old max.
-            (Constraint::MaxLen(new), Constraint::LenRange { min: old_min, max: old_max }) => {
-                len_range_is_valid(*old_min, *old_max) && *old_min == 0 && *new <= *old_max
-            }
+            (
+                Constraint::MaxLen(new),
+                Constraint::LenRange {
+                    min: old_min,
+                    max: old_max,
+                },
+            ) => len_range_is_valid(*old_min, *old_max) && *old_min == 0 && *new <= *old_max,
 
             // Cross-type comparisons that don't make sense as subsets
             (Constraint::OneOf(_), Constraint::Exact(_)) => false,
@@ -1677,6 +1687,95 @@ mod tests {
         assert!(!Constraint::IntRange { min: 1, max: 11 }.is_subset_of(&range));
         // FloatRange accepting "5.0" is not a subset of IntRange (fail closed).
         assert!(!range.is_subset_of(&Constraint::IntRange { min: 1, max: 10 }));
+    }
+
+    #[test]
+    fn lenrange_subset_of_lenrange() {
+        let inner = Constraint::LenRange { min: 3, max: 8 };
+        let outer = Constraint::LenRange { min: 1, max: 16 };
+        assert!(inner.is_subset_of(&outer));
+        assert!(!outer.is_subset_of(&inner));
+        assert!(!Constraint::LenRange { min: 16, max: 1 }.is_subset_of(&outer));
+        assert!(!inner.is_subset_of(&Constraint::LenRange { min: 16, max: 1 }));
+    }
+
+    #[test]
+    fn exact_subset_of_lenrange() {
+        let range = Constraint::LenRange { min: 2, max: 5 };
+        assert!(Constraint::Exact("hi".to_string()).is_subset_of(&range));
+        assert!(Constraint::Exact("hello".to_string()).is_subset_of(&range));
+        assert!(!Constraint::Exact("h".to_string()).is_subset_of(&range));
+        assert!(!Constraint::Exact("hello!".to_string()).is_subset_of(&range));
+        assert!(!Constraint::Exact("hi".to_string())
+            .is_subset_of(&Constraint::LenRange { min: 5, max: 1 }));
+    }
+
+    #[test]
+    fn oneof_subset_of_lenrange() {
+        let range = Constraint::LenRange { min: 2, max: 5 };
+        assert!(
+            Constraint::OneOf(vec!["hi".to_string(), "hello".to_string()]).is_subset_of(&range)
+        );
+        assert!(
+            !Constraint::OneOf(vec!["hi".to_string(), "hello!".to_string()]).is_subset_of(&range)
+        );
+        assert!(!Constraint::OneOf(vec![]).is_subset_of(&range));
+    }
+
+    #[test]
+    fn lenrange_may_replace_minlen_and_maxlen() {
+        let min = Constraint::MinLen(3);
+        let max = Constraint::MaxLen(16);
+        assert!(Constraint::LenRange { min: 3, max: 8 }.is_subset_of(&min));
+        assert!(Constraint::LenRange { min: 5, max: 16 }.is_subset_of(&min));
+        assert!(!Constraint::LenRange { min: 2, max: 8 }.is_subset_of(&min));
+        assert!(Constraint::LenRange { min: 0, max: 8 }.is_subset_of(&max));
+        assert!(Constraint::LenRange { min: 3, max: 16 }.is_subset_of(&max));
+        assert!(!Constraint::LenRange { min: 0, max: 20 }.is_subset_of(&max));
+        assert!(!Constraint::LenRange { min: 8, max: 3 }.is_subset_of(&min));
+    }
+
+    #[test]
+    fn minlen_and_maxlen_may_replace_lenrange_when_other_bound_holds() {
+        let unbounded = Constraint::LenRange {
+            min: 3,
+            max: usize::MAX,
+        };
+        assert!(Constraint::MinLen(3).is_subset_of(&unbounded));
+        assert!(Constraint::MinLen(8).is_subset_of(&unbounded));
+        assert!(!Constraint::MinLen(2).is_subset_of(&unbounded));
+
+        let bounded = Constraint::LenRange { min: 3, max: 16 };
+        assert!(!Constraint::MinLen(8).is_subset_of(&bounded));
+
+        let from_zero = Constraint::LenRange { min: 0, max: 16 };
+        assert!(Constraint::MaxLen(16).is_subset_of(&from_zero));
+        assert!(Constraint::MaxLen(8).is_subset_of(&from_zero));
+        assert!(!Constraint::MaxLen(20).is_subset_of(&from_zero));
+        assert!(!Constraint::MaxLen(8).is_subset_of(&bounded));
+    }
+
+    #[test]
+    fn unclear_lenrange_cross_type_pairs_fail_closed() {
+        let range = Constraint::LenRange { min: 2, max: 5 };
+        assert!(!range.is_subset_of(&Constraint::Prefix("/tmp/".to_string())));
+        assert!(!Constraint::Prefix("/tmp/".to_string()).is_subset_of(&range));
+        assert!(!range.is_subset_of(&Constraint::IntRange { min: 1, max: 10 }));
+        assert!(!Constraint::IntRange { min: 1, max: 10 }.is_subset_of(&range));
+        assert!(!range.is_subset_of(&Constraint::FloatRange {
+            min: 0.5,
+            max: 10.5
+        }));
+        assert!(!Constraint::FloatRange {
+            min: 0.5,
+            max: 10.5
+        }
+        .is_subset_of(&range));
+        // LenRange{2,5} tightens MinLen(2) / MaxLen(5); loosening those fails closed.
+        assert!(!range.is_subset_of(&Constraint::MinLen(3)));
+        assert!(!range.is_subset_of(&Constraint::MaxLen(4)));
+        assert!(!Constraint::MinLen(2).is_subset_of(&range));
+        assert!(!Constraint::MaxLen(5).is_subset_of(&range));
     }
 
     #[test]

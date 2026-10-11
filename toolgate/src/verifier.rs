@@ -569,6 +569,43 @@ mod tests {
     }
 
     #[test]
+    fn verifier_matches_lenrange() {
+        let mut constraints = BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::LenRange { min: 2, max: 5 });
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut good = BTreeMap::new();
+        good.insert("query".to_string(), "hello".to_string());
+        let mut bad = BTreeMap::new();
+        bad.insert("query".to_string(), "toolong".to_string());
+
+        assert_eq!(
+            Verifier::new(SECRET)
+                .at(1999999999)
+                .verify_call_with_args(&token, "search", &good),
+            token.verify_call_with_args(SECRET, 1999999999, "search", &good, None)
+        );
+        assert!(Verifier::new(SECRET)
+            .at(1999999999)
+            .verify_call_with_args(&token, "search", &good)
+            .is_ok());
+        assert!(matches!(
+            Verifier::new(SECRET)
+                .at(1999999999)
+                .verify_call_with_args(&token, "search", &bad),
+            Err(TokenError::ConstraintViolation { key }) if key == "query"
+        ));
+    }
+
+    #[test]
     fn verifier_matches_keyring() {
         let mut keyring = Keyring::new();
         keyring.add("key-1", SECRET.to_vec());
