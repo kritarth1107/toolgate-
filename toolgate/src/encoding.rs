@@ -20,7 +20,7 @@
 //! - constraints_count: u16
 //! - for each constraint (sorted by key):
 //!   - key: u16 length + UTF-8 bytes
-//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not)
+//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange)
 //!   - constraint_data: type-specific encoding
 //!
 //! Format v5 (backward-compatible extension):
@@ -55,6 +55,8 @@
 //! - All: u16 count + (for each child: constraint type + data)
 //! - Any: u16 count + (for each child: constraint type + data)
 //! - Not: nested child constraint type + data
+//! - FloatRange: IEEE-754 f64 min + f64 max (big-endian bits, same
+//!   `to_be_bytes` style as IntRange's i64 pair)
 //!
 //! The v5 format appends jti after constraints. Tokens without jti
 //! encode identically to v4. Tokens without constraints and without jti
@@ -374,6 +376,13 @@ fn encode_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
         Constraint::Not(child) => {
             buf.push(17); // type = Not
             encode_constraint(buf, child);
+        }
+        // IEEE-754 f64 big-endian bits — same two-bound layout as IntRange
+        // (`to_be_bytes` of each endpoint) but using f64 rather than i64.
+        Constraint::FloatRange { min, max } => {
+            buf.push(18); // type = FloatRange
+            buf.extend_from_slice(&min.to_be_bytes());
+            buf.extend_from_slice(&max.to_be_bytes());
         }
     }
 }

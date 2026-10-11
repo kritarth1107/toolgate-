@@ -17,7 +17,7 @@
 //! | audience | u16 length + UTF-8 bytes (0 = none) |
 //! | kid | u16 length + UTF-8 bytes (0 = none) |
 //! | constraints_count | u16 (0 = none) |
-//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not) |
+//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange) |
 //! | jti | u16 length + UTF-8 bytes (0 = none) |
 //! | nbf_flag | u8 (v5 only; 0 = none, 1 = present) |
 //! | nbf | u64 (v5 only, if nbf_flag = 1) |
@@ -170,6 +170,13 @@ fn encode_constraint_value_to_wire(buf: &mut Vec<u8>, constraint: &Constraint) {
             buf.push(17);
             encode_constraint_value_to_wire(buf, child);
         }
+        // IEEE-754 f64 big-endian bits — same two-bound layout as IntRange
+        // (`to_be_bytes` of each endpoint) but using f64 rather than i64.
+        Constraint::FloatRange { min, max } => {
+            buf.push(18);
+            buf.extend_from_slice(&min.to_be_bytes());
+            buf.extend_from_slice(&max.to_be_bytes());
+        }
     }
 }
 
@@ -274,6 +281,11 @@ fn decode_constraint_value_from_wire(
             Constraint::Any(children)
         }
         17 => Constraint::Not(Box::new(decode_constraint_value_from_wire(data, pos)?)),
+        18 => {
+            let min = f64::from_be_bytes(read_wire_bytes(data, pos, 8)?.try_into().unwrap());
+            let max = f64::from_be_bytes(read_wire_bytes(data, pos, 8)?.try_into().unwrap());
+            Constraint::FloatRange { min, max }
+        }
         _ => return Err(WireError::UnexpectedEof), // Invalid constraint type
     };
 

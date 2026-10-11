@@ -79,6 +79,8 @@ pub enum PolicyError {
     EmptyConstraintPattern { tool: String, key: String },
     /// An All/Any/Not tree deeper than [`crate::MAX_CONSTRAINT_NESTING`] is rejected.
     ConstraintNestingTooDeep { tool: String, key: String },
+    /// A FloatRange with non-finite bounds or `min > max` is rejected.
+    InvalidConstraintRange { tool: String, key: String },
     /// A TTL (default or per-grant) is present and zero.
     ZeroTtl {
         /// `None` when the policy default TTL is zero; otherwise the grant name.
@@ -126,6 +128,12 @@ impl std::fmt::Display for PolicyError {
                     f,
                     "constraint nesting for '{key}' on tool '{tool}' exceeds maximum depth of {}",
                     crate::MAX_CONSTRAINT_NESTING
+                )
+            }
+            PolicyError::InvalidConstraintRange { tool, key } => {
+                write!(
+                    f,
+                    "invalid float_range for '{key}' on tool '{tool}' is rejected (min/max must be finite and min <= max)"
                 )
             }
             PolicyError::ZeroTtl { tool: Some(tool) } => {
@@ -244,6 +252,12 @@ impl Policy {
                     }
                     if constraint.exceeds_max_nesting() {
                         errors.push(PolicyError::ConstraintNestingTooDeep {
+                            tool: grant.name.clone(),
+                            key: key.clone(),
+                        });
+                    }
+                    if constraint.is_invalid_range() {
+                        errors.push(PolicyError::InvalidConstraintRange {
                             tool: grant.name.clone(),
                             key: key.clone(),
                         });

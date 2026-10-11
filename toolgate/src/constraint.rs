@@ -3,8 +3,10 @@
 //! Constraints allow tokens to restrict not just which argument keys are allowed,
 //! but also what values those arguments may have. [`Constraint::All`],
 //! [`Constraint::Any`], and [`Constraint::Not`] compose children as AND / OR /
-//! NOT. Serde JSON forms are `{"type":"all","value":[...]}`,
-//! `{"type":"any","value":[...]}`, and `{"type":"not","value":{...}}`.
+//! NOT. [`Constraint::FloatRange`] restricts a value to a finite inclusive
+//! `f64` interval. Serde JSON forms are `{"type":"all","value":[...]}`,
+//! `{"type":"any","value":[...]}`, `{"type":"not","value":{...}}`, and
+//! `{"type":"float_range","value":{"min":...,"max":...}}`.
 
 use std::collections::BTreeMap;
 
@@ -12,7 +14,7 @@ use std::collections::BTreeMap;
 ///
 /// When a token has a constraint attached to an argument key, any call using
 /// that key must provide a value that satisfies the constraint.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum Constraint {
     /// Value must match exactly.
@@ -108,7 +110,65 @@ pub enum Constraint {
     /// existing constraint object.
     #[serde(rename = "not")]
     Not(Box<Constraint>),
+    /// Value must parse as a finite `f64` in the given range (inclusive).
+    ///
+    /// `min` and `max` must themselves be finite and satisfy `min <= max`;
+    /// inverted or non-finite bounds are rejected at mint/validate and
+    /// never match a value (fail closed). NaN, ±inf, and non-numeric
+    /// strings are rejected at check time.
+    #[serde(rename = "float_range")]
+    FloatRange { min: f64, max: f64 },
 }
+
+impl PartialEq for Constraint {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Constraint::Exact(a), Constraint::Exact(b)) => a == b,
+            (Constraint::OneOf(a), Constraint::OneOf(b)) => a == b,
+            (Constraint::Prefix(a), Constraint::Prefix(b)) => a == b,
+            (Constraint::MaxLen(a), Constraint::MaxLen(b)) => a == b,
+            (
+                Constraint::IntRange {
+                    min: a_min,
+                    max: a_max,
+                },
+                Constraint::IntRange {
+                    min: b_min,
+                    max: b_max,
+                },
+            ) => a_min == b_min && a_max == b_max,
+            (Constraint::Suffix(a), Constraint::Suffix(b)) => a == b,
+            (Constraint::Contains(a), Constraint::Contains(b)) => a == b,
+            (Constraint::MinLen(a), Constraint::MinLen(b)) => a == b,
+            (Constraint::Matches(a), Constraint::Matches(b)) => a == b,
+            (Constraint::NotEquals(a), Constraint::NotEquals(b)) => a == b,
+            (Constraint::NotOneOf(a), Constraint::NotOneOf(b)) => a == b,
+            (Constraint::NotContains(a), Constraint::NotContains(b)) => a == b,
+            (Constraint::NotPrefix(a), Constraint::NotPrefix(b)) => a == b,
+            (Constraint::NotSuffix(a), Constraint::NotSuffix(b)) => a == b,
+            (Constraint::NotMatches(a), Constraint::NotMatches(b)) => a == b,
+            (Constraint::All(a), Constraint::All(b)) => a == b,
+            (Constraint::Any(a), Constraint::Any(b)) => a == b,
+            (Constraint::Not(a), Constraint::Not(b)) => a == b,
+            // Compare IEEE-754 bit patterns so Eq is reflexive even if a
+            // non-finite bound is constructed in memory (those values are
+            // still rejected at mint/validate).
+            (
+                Constraint::FloatRange {
+                    min: a_min,
+                    max: a_max,
+                },
+                Constraint::FloatRange {
+                    min: b_min,
+                    max: b_max,
+                },
+            ) => a_min.to_bits() == b_min.to_bits() && a_max.to_bits() == b_max.to_bits(),
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Constraint {}
 
 /// Maximum nesting depth of [`Constraint::All`] / [`Constraint::Any`] /
 /// [`Constraint::Not`] trees.
@@ -159,6 +219,12 @@ impl Constraint {
             }
             // Empty-pattern children would invert into a wildcard; fail closed.
             Constraint::Not(child) => !child.is_empty_pattern() && !child.check(value),
+            // Non-finite bounds or min > max never match; values must parse
+            // as a finite f64 inside the inclusive interval.
+            Constraint::FloatRange { min, max } => match parse_finite_f64(value) {
+                Some(n) if float_range_is_valid(*min, *max) => n >= *min && n <= *max,
+                _ => false,
+            },
         }
     }
 
@@ -181,6 +247,20 @@ impl Constraint {
                 children.is_empty() || children.iter().any(|c| c.is_empty_pattern())
             }
             Constraint::Not(child) => child.is_empty_pattern(),
+            _ => false,
+        }
+    }
+
+    /// True when a [`Constraint::FloatRange`] (or a composite containing one)
+    /// has non-finite bounds or `min > max`. Rejected at mint/validate
+    /// and never matches a value (fail closed).
+    pub fn is_invalid_range(&self) -> bool {
+        match self {
+            Constraint::FloatRange { min, max } => !float_range_is_valid(*min, *max),
+            Constraint::All(children) | Constraint::Any(children) => {
+                children.iter().any(Constraint::is_invalid_range)
+            }
+            Constraint::Not(child) => child.is_invalid_range(),
             _ => false,
         }
     }
@@ -235,6 +315,15 @@ impl Constraint {
                     n >= *min && n <= *max
                 } else {
                     false
+                }
+            }
+
+            // Exact is subset of FloatRange if the value parses as a finite
+            // f64 inside the inclusive interval.
+            (Constraint::Exact(a), Constraint::FloatRange { min, max }) => {
+                match parse_finite_f64(a) {
+                    Some(n) if float_range_is_valid(*min, *max) => n >= *min && n <= *max,
+                    _ => false,
                 }
             }
 
@@ -325,6 +414,17 @@ impl Constraint {
                         false
                     }
                 })
+            }
+
+            // OneOf is subset of FloatRange if every allowed value parses as
+            // a finite f64 inside the inclusive interval.
+            (Constraint::OneOf(values), Constraint::FloatRange { min, max }) => {
+                float_range_is_valid(*min, *max)
+                    && !values.is_empty()
+                    && values.iter().all(|v| match parse_finite_f64(v) {
+                        Some(n) => n >= *min && n <= *max,
+                        None => false,
+                    })
             }
 
             // OneOf is subset of Suffix if every allowed value ends with the suffix
@@ -426,6 +526,49 @@ impl Constraint {
                     max: old_max,
                 },
             ) => new_min >= old_min && new_max <= old_max,
+
+            // FloatRange is subset of FloatRange if the new interval is
+            // within the old one. Invalid (non-finite or inverted) bounds
+            // fail closed.
+            (
+                Constraint::FloatRange {
+                    min: new_min,
+                    max: new_max,
+                },
+                Constraint::FloatRange {
+                    min: old_min,
+                    max: old_max,
+                },
+            ) => {
+                float_range_is_valid(*new_min, *new_max)
+                    && float_range_is_valid(*old_min, *old_max)
+                    && *new_min >= *old_min
+                    && *new_max <= *old_max
+            }
+
+            // IntRange may replace FloatRange when every integer in the
+            // new range converts exactly to f64 and lies inside the old
+            // interval. Endpoints that cannot be represented exactly in
+            // f64 are unclear and fail closed.
+            (
+                Constraint::IntRange {
+                    min: new_min,
+                    max: new_max,
+                },
+                Constraint::FloatRange {
+                    min: old_min,
+                    max: old_max,
+                },
+            ) => {
+                if !float_range_is_valid(*old_min, *old_max) || new_min > new_max {
+                    false
+                } else {
+                    match (i64_as_exact_f64(*new_min), i64_as_exact_f64(*new_max)) {
+                        (Some(lo), Some(hi)) => lo >= *old_min && hi <= *old_max,
+                        _ => false,
+                    }
+                }
+            }
 
             // IntRange to MaxLen: all integers in range must fit in max length
             (Constraint::IntRange { min, max }, Constraint::MaxLen(max_len)) => {
@@ -637,6 +780,27 @@ impl Constraint {
             // Remaining cross-type pairs cannot be shown to be subsets
             _ => false,
         }
+    }
+}
+
+/// Parse `value` as a finite `f64`. Rejects non-numeric strings, NaN, and ±inf.
+fn parse_finite_f64(value: &str) -> Option<f64> {
+    let n: f64 = value.parse().ok()?;
+    n.is_finite().then_some(n)
+}
+
+/// Inclusive float bounds are valid only when both ends are finite and ordered.
+fn float_range_is_valid(min: f64, max: f64) -> bool {
+    min.is_finite() && max.is_finite() && min <= max
+}
+
+/// Convert `n` to `f64` only when the integer is exactly representable.
+fn i64_as_exact_f64(n: i64) -> Option<f64> {
+    let f = n as f64;
+    if f.is_finite() && f as i64 == n {
+        Some(f)
+    } else {
+        None
     }
 }
 
