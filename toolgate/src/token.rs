@@ -2866,6 +2866,45 @@ mod tests {
     }
 
     #[test]
+    fn attenuation_oneof_can_replace_not() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "path".to_string(),
+            Constraint::Not(Box::new(Constraint::Prefix("/tmp/".to_string()))),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut oneof: BTreeMap<String, Constraint> = BTreeMap::new();
+        oneof.insert(
+            "path".to_string(),
+            Constraint::OneOf(vec!["/var/a".to_string(), "/home/b".to_string()]),
+        );
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(oneof))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("path"),
+            Some(&Constraint::OneOf(vec![
+                "/var/a".to_string(),
+                "/home/b".to_string()
+            ]))
+        );
+    }
+
+    #[test]
     fn attenuation_exact_cannot_replace_unsatisfied_not() {
         use crate::constraint::Constraint;
         use std::collections::BTreeMap;

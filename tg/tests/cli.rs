@@ -3296,10 +3296,7 @@ fn attenuate_can_tighten_not() {
     );
     let attenuated = &out["token"];
     assert_eq!(attenuated["constraints"]["path"]["type"], "not");
-    assert_eq!(
-        attenuated["constraints"]["path"]["value"]["value"],
-        "/tmp/"
-    );
+    assert_eq!(attenuated["constraints"]["path"]["value"]["value"], "/tmp/");
 }
 
 #[test]

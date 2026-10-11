@@ -17,7 +17,7 @@
       "name": "list_dir",
       "arg_keys": ["path"],
       "constraints": {
-        "path": { "type": "prefix", "value": "/tmp/" }
+        "path": { "type": "not", "value": { "type": "prefix", "value": "/etc/" } }
       },
       "ttl_seconds": 300,
       "max_depth": 1

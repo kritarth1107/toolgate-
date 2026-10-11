@@ -948,6 +948,33 @@ mod tests {
     }
 
     #[test]
+    fn encoding_constraint_not_nested_all() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "path".to_string(),
+            Constraint::Not(Box::new(Constraint::All(vec![
+                Constraint::Prefix("/tmp/".to_string()),
+                Constraint::Suffix(".txt".to_string()),
+            ]))),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'p', b'a', b't', b'h', // key "path"
+            0x11, // type = Not
+            0x0F, // type = All
+            0x00, 0x02, // 2 children
+            0x02, // Prefix
+            0x00, 0x05, b'/', b't', b'm', b'p', b'/', // "/tmp/"
+            0x05, // Suffix
+            0x00, 0x04, b'.', b't', b'x', b't', // ".txt"
+        ]));
+    }
+
+    #[test]
     fn encoding_without_not_identical_to_prior() {
         // Tokens that do not use Not must keep the 0.21.0 bytes.
         use std::collections::BTreeMap;

@@ -1826,6 +1826,33 @@ mod tests {
     }
 
     #[test]
+    fn nested_not_any_check() {
+        let c = Constraint::Not(Box::new(Constraint::Any(vec![
+            Constraint::Prefix("/tmp/".to_string()),
+            Constraint::Prefix("/var/".to_string()),
+        ])));
+        assert!(c.check("/home/c"));
+        assert!(!c.check("/tmp/a"));
+        assert!(!c.check("/var/b"));
+    }
+
+    #[test]
+    fn not_is_not_subset_of_not_prefix() {
+        let not = Constraint::Not(Box::new(Constraint::Prefix("/tmp/".to_string())));
+        let not_prefix = Constraint::NotPrefix("/tmp/".to_string());
+        assert!(!not.is_subset_of(&not_prefix));
+        assert!(!not_prefix.is_subset_of(&not));
+    }
+
+    #[test]
+    fn not_not_does_not_collapse_to_inner() {
+        let inner = Constraint::Prefix("/tmp/".to_string());
+        let double = Constraint::Not(Box::new(Constraint::Not(Box::new(inner.clone()))));
+        assert!(!double.is_subset_of(&inner));
+        assert!(!inner.is_subset_of(&double));
+    }
+
+    #[test]
     fn json_not() {
         let c = Constraint::Not(Box::new(Constraint::Prefix("/tmp/".to_string())));
         let json = serde_json::to_string(&c).unwrap();
