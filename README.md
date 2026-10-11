@@ -171,6 +171,7 @@ constraints.insert("mode".to_string(), Constraint::OneOf(vec!["read".into(), "li
 constraints.insert("limit".to_string(), Constraint::IntRange { min: 1, max: 100 });
 constraints.insert("score".to_string(), Constraint::FloatRange { min: 0.5, max: 10.5 });
 constraints.insert("query".to_string(), Constraint::MaxLen(256));
+constraints.insert("snippet".to_string(), Constraint::LenRange { min: 1, max: 16 });
 constraints.insert("label".to_string(), Constraint::MinLen(3));
 constraints.insert("file".to_string(), Constraint::Matches("*.txt".to_string()));
 constraints.insert("role".to_string(), Constraint::NotEquals("admin".to_string()));
@@ -195,7 +196,7 @@ constraints.insert("not_tmp".to_string(), Constraint::Not(Box::new(
 let token = Token::mint_full(
     secret,
     "file_op",
-    vec!["path".into(), "name".into(), "note".into(), "mode".into(), "limit".into(), "score".into(), "query".into(), "label".into(), "file".into(), "role".into(), "actor".into(), "memo".into(), "dest".into(), "backup".into(), "skip".into(), "path_and_name".into(), "tmp_or_var".into(), "not_tmp".into()],
+    vec!["path".into(), "name".into(), "note".into(), "mode".into(), "limit".into(), "score".into(), "query".into(), "snippet".into(), "label".into(), "file".into(), "role".into(), "actor".into(), "memo".into(), "dest".into(), "backup".into(), "skip".into(), "path_and_name".into(), "tmp_or_var".into(), "not_tmp".into()],
     2000000000,
     None,  // audience
     None,  // kid
@@ -210,6 +211,7 @@ args.insert("note".to_string(), "draft-notes".to_string());
 args.insert("mode".to_string(), "read".to_string());
 args.insert("limit".to_string(), "50".to_string());
 args.insert("score".to_string(), "2.5".to_string());
+args.insert("snippet".to_string(), "hello".to_string());
 args.insert("label".to_string(), "abc".to_string());
 args.insert("file".to_string(), "notes.txt".to_string());
 args.insert("role".to_string(), "user".to_string());
@@ -254,8 +256,9 @@ token.verify_call_with_args(
 | `Not(Box<Constraint>)` | Value must not satisfy the child (NOT) | `Not(Box::new(Prefix("/tmp/".into())))` |
 | `IntRange { min, max }` | Value must parse as integer in range | `IntRange { min: 1, max: 100 }` |
 | `FloatRange { min, max }` | Value must parse as a finite `f64` in range | `FloatRange { min: 0.5, max: 10.5 }` |
+| `LenRange { min, max }` | Value byte length must satisfy `min <= len <= max` | `LenRange { min: 1, max: 16 }` |
 
-JSON forms match the Rust names: `{"type":"all","value":[...]}`, `{"type":"any","value":[...]}`, `{"type":"not","value":{...}}`, and `{"type":"float_range","value":{"min":...,"max":...}}` where children are existing constraint objects. `MinLen(0)` is valid and accepts the empty string. Empty suffix, contains, matches, not-contains, not-prefix, not-suffix, or not-matches patterns, empty NotOneOf denylists, empty All/Any composites, a `Not` whose child is an empty pattern, and FloatRange bounds that are non-finite or have `min > max` are rejected at mint/validate and never match a value. Nested All/Any/Not trees deeper than `MAX_CONSTRAINT_NESTING` (8) are rejected at mint/validate.
+JSON forms match the Rust names: `{"type":"all","value":[...]}`, `{"type":"any","value":[...]}`, `{"type":"not","value":{...}}`, `{"type":"float_range","value":{"min":...,"max":...}}`, and `{"type":"len_range","value":{"min":...,"max":...}}` where children are existing constraint objects. `MinLen(0)` is valid and accepts the empty string. `LenRange { min: 0, max: N }` is valid and accepts the empty string when `N` allows it. Empty suffix, contains, matches, not-contains, not-prefix, not-suffix, or not-matches patterns, empty NotOneOf denylists, empty All/Any composites, a `Not` whose child is an empty pattern, FloatRange bounds that are non-finite or have `min > max`, and LenRange bounds with `min > max` are rejected at mint/validate and never match a value. Nested All/Any/Not trees deeper than `MAX_CONSTRAINT_NESTING` (8) are rejected at mint/validate.
 
 `Matches` is not a regex: only `*` (any sequence, including empty) and `?` (exactly one Unicode scalar) are special. `.` `[` `]` and every other character match literally. There are no character classes, `**` path semantics, or escape sequences.
 
@@ -295,7 +298,8 @@ Valid attenuation rules:
 - **Not**: `Not(new)` tightens `Not(old)` when `old` is a subset of `new` (widening the inner constraint strengthens the outer negation)
 - **IntRange**: new range must be within old range
 - **FloatRange**: new range must be within old range; inverted or non-finite bounds fail closed
-- **Exact**: can replace any constraint if the exact value satisfies it (for denylists, the exact value must not be forbidden; for All, every child; for Any, at least one child; for Not, the exact value must not satisfy the child; for FloatRange, the exact string must parse as a finite `f64` inside the old range)
+- **LenRange**: new range must be within old range (`new_min >= old_min && new_max <= old_max`); inverted bounds fail closed. LenRange may replace MinLen/MaxLen by adding the missing bound. MinLen may replace LenRange only when the old max is still respected (`usize::MAX`); MaxLen may replace LenRange only when the old min is 0
+- **Exact**: can replace any constraint if the exact value satisfies it (for denylists, the exact value must not be forbidden; for All, every child; for Any, at least one child; for Not, the exact value must not satisfy the child; for FloatRange, the exact string must parse as a finite `f64` inside the old range; for LenRange, the exact value's byte length must lie inside the old range)
 
 ## Key Rotation
 
@@ -540,13 +544,14 @@ The `tg` binary accepts JSON on stdin and outputs JSON.
 echo '{
   "secret": "my-secret",
   "tool_name": "read_file",
-  "arg_keys": ["path", "limit", "score", "name", "role", "memo", "dest", "backup", "skip", "path_and_name", "tmp_or_var", "not_tmp"],
+  "arg_keys": ["path", "limit", "score", "query", "name", "role", "memo", "dest", "backup", "skip", "path_and_name", "tmp_or_var", "not_tmp"],
   "expiry": 2000000000,
   "audience": "client-123",
   "constraints": {
     "path": {"type": "prefix", "value": "/tmp/"},
     "limit": {"type": "int_range", "value": {"min": 1, "max": 100}},
     "score": {"type": "float_range", "value": {"min": 0.5, "max": 10.5}},
+    "query": {"type": "len_range", "value": {"min": 1, "max": 16}},
     "name": {"type": "matches", "value": "*.txt"},
     "role": {"type": "not_equals", "value": "admin"},
     "memo": {"type": "not_contains", "value": "secret"},
@@ -876,6 +881,7 @@ Constraint type encoding:
 - `16` Any: u16 count + (for each child: type + data)
 - `17` Not: nested child type + data
 - `18` FloatRange: IEEE-754 f64 min + f64 max (big-endian bits)
+- `19` LenRange: u64 min + u64 max (same length encoding as MaxLen/MinLen)
 
 **Example without constraints, jti, nbf, or depth** (identical to v5/v4/v3):
 
@@ -1022,6 +1028,7 @@ let info = check_tools_call(&verifier, &token, &request)?;
 
 ## Version History
 
+- **0.24.0**: `Constraint::LenRange` inclusive byte-length interval (canonical/wire tag 19), with fail-closed inverted bounds and tighten-only attenuation
 - **0.23.0**: `Constraint::FloatRange` inclusive finite `f64` interval (canonical/wire tag 18), with fail-closed non-finite or inverted bounds and tighten-only attenuation
 - **0.22.0**: `Constraint::Not` unary NOT over one child constraint, completing boolean algebra with All/Any, with fail-closed empty-pattern children, max nesting depth 8, and tighten-only attenuation (widening the inner constraint)
 - **0.21.0**: `Constraint::All` and `Constraint::Any` compose multiple atomic constraints on one key (AND / OR), with fail-closed empty composites, max nesting depth 8, and tighten-only attenuation
