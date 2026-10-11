@@ -3482,3 +3482,238 @@ fn attenuate_rejects_empty_not_child() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+fn mint_float_range_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "score_tool",
+            "arg_keys": ["score"],
+            "expiry": 2000000000,
+            "constraints": {
+                "score": {"type": "float_range", "value": {"min": 0.5, "max": 10.5}}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+#[test]
+fn mint_accepts_float_range() {
+    let token = mint_float_range_token();
+    assert_eq!(token["constraints"]["score"]["type"], "float_range");
+    assert_eq!(token["constraints"]["score"]["value"]["min"], 0.5);
+    assert_eq!(token["constraints"]["score"]["value"]["max"], 10.5);
+}
+
+#[test]
+fn check_call_enforces_float_range() {
+    let token = mint_float_range_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "score_tool",
+            "args": {"score": "2.5"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "score_tool",
+            "args": {"score": "20"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+
+    let nan = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "score_tool",
+            "args": {"score": "NaN"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(nan.get("authorized"), Some(&Value::Bool(false)));
+}
+
+#[test]
+fn attenuate_can_tighten_float_range() {
+    let token = mint_float_range_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "score": {"type": "float_range", "value": {"min": 1.0, "max": 5.0}}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(attenuated["constraints"]["score"]["type"], "float_range");
+    assert_eq!(attenuated["constraints"]["score"]["value"]["min"], 1.0);
+    assert_eq!(attenuated["constraints"]["score"]["value"]["max"], 5.0);
+}
+
+#[test]
+fn attenuate_rejects_loosening_float_range() {
+    let token = mint_float_range_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "score": {"type": "float_range", "value": {"min": 0.0, "max": 20.0}}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("attenuation"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn attenuate_exact_can_replace_float_range() {
+    let token = mint_float_range_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "score": {"type": "exact", "value": "2.5"}
+            }
+        }),
+    );
+    assert_eq!(out["token"]["constraints"]["score"]["type"], "exact");
+    assert_eq!(out["token"]["constraints"]["score"]["value"], "2.5");
+}
+
+#[test]
+fn mint_rejects_inverted_float_range() {
+    let out = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "score_tool",
+            "arg_keys": ["score"],
+            "expiry": 2000000000,
+            "constraints": {
+                "score": {"type": "float_range", "value": {"min": 10.5, "max": 0.5}}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("invalid float_range"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn attenuate_rejects_inverted_float_range() {
+    let token = mint_float_range_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "score": {"type": "float_range", "value": {"min": 10.5, "max": 0.5}}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("invalid float_range"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn policy_lint_rejects_invalid_float_range() {
+    let path = write_temp_policy(
+        "invalid-float-range",
+        r#"{
+            "version": "1",
+            "tools": [{
+                "name": "score_tool",
+                "arg_keys": ["score"],
+                "constraints": {
+                    "score": {"type": "float_range", "value": {"min": 10.5, "max": 0.5}}
+                }
+            }]
+        }"#,
+    );
+    let output = tg()
+        .args(["policy", "lint", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("invalid float_range"),
+        "stdout={stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn mint_from_policy_accepts_float_range() {
+    let path = write_temp_policy(
+        "float-range-grant",
+        r#"{
+            "version": "1",
+            "default_ttl_seconds": 60,
+            "tools": [{
+                "name": "score_tool",
+                "arg_keys": ["score"],
+                "constraints": {
+                    "score": {"type": "float_range", "value": {"min": 0.5, "max": 10.5}}
+                }
+            }]
+        }"#,
+    );
+    let out = run_json(
+        &[
+            "mint",
+            "--policy",
+            path.to_str().unwrap(),
+            "--tool",
+            "score_tool",
+        ],
+        &json!({
+            "secret": "cli-secret",
+            "current_time": 1700000000
+        }),
+    );
+    let token = &out["token"];
+    assert_eq!(token["tool_name"], "score_tool");
+    assert_eq!(token["constraints"]["score"]["type"], "float_range");
+    assert_eq!(token["constraints"]["score"]["value"]["min"], 0.5);
+    let _ = fs::remove_file(&path);
+}

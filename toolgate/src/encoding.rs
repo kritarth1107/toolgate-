@@ -662,6 +662,27 @@ mod tests {
     }
 
     #[test]
+    fn encoding_constraint_floatrange() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "n".to_string(),
+            Constraint::FloatRange { min: 1.0, max: 2.0 },
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        // IEEE-754 f64 1.0 = 0x3FF0000000000000, 2.0 = 0x4000000000000000
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x01, b'n', // key "n"
+            0x12, // type = FloatRange
+            0x3F, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // min = 1.0
+            0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // max = 2.0
+        ]));
+    }
+
+    #[test]
     fn encoding_constraint_suffix() {
         use std::collections::BTreeMap;
         let mut constraints: Constraints = BTreeMap::new();
@@ -980,6 +1001,27 @@ mod tests {
             0x00, 0x05, b'/', b't', b'm', b'p', b'/', // "/tmp/"
             0x05, // Suffix
             0x00, 0x04, b'.', b't', b'x', b't', // ".txt"
+        ]));
+    }
+
+    #[test]
+    fn encoding_without_floatrange_identical_to_prior() {
+        // Tokens that do not use FloatRange must keep the 0.22.0 bytes.
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "path".to_string(),
+            Constraint::Not(Box::new(Constraint::Prefix("/tmp/".to_string()))),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'p', b'a', b't', b'h', // key "path"
+            0x11, // type = Not
+            0x02, // type = Prefix
+            0x00, 0x05, b'/', b't', b'm', b'p', b'/', // "/tmp/"
         ]));
     }
 

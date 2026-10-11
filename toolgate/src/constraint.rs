@@ -915,6 +915,56 @@ mod tests {
     }
 
     #[test]
+    fn floatrange_check() {
+        let c = Constraint::FloatRange {
+            min: 0.5,
+            max: 10.5,
+        };
+        assert!(c.check("0.5"));
+        assert!(c.check("10.5"));
+        assert!(c.check("1"));
+        assert!(c.check("1.0"));
+        assert!(c.check("1e1"));
+        assert!(!c.check("0.49"));
+        assert!(!c.check("10.51"));
+        assert!(!c.check("abc"));
+        assert!(!c.check(""));
+        assert!(!c.check("NaN"));
+        assert!(!c.check("nan"));
+        assert!(!c.check("inf"));
+        assert!(!c.check("-inf"));
+        assert!(!c.check("Infinity"));
+        assert!(!c.check("+inf"));
+    }
+
+    #[test]
+    fn floatrange_invalid_bounds_fail_closed() {
+        let inverted = Constraint::FloatRange {
+            min: 10.0,
+            max: 1.0,
+        };
+        let nan = Constraint::FloatRange {
+            min: f64::NAN,
+            max: 1.0,
+        };
+        let inf = Constraint::FloatRange {
+            min: 0.0,
+            max: f64::INFINITY,
+        };
+        assert!(inverted.is_invalid_range());
+        assert!(nan.is_invalid_range());
+        assert!(inf.is_invalid_range());
+        assert!(!inverted.check("5"));
+        assert!(!nan.check("1"));
+        assert!(!inf.check("1"));
+        assert!(!Constraint::FloatRange {
+            min: 0.5,
+            max: 10.5
+        }
+        .is_invalid_range());
+    }
+
+    #[test]
     fn suffix_check() {
         let c = Constraint::Suffix(".txt".to_string());
         assert!(c.check("notes.txt"));
@@ -1431,6 +1481,65 @@ mod tests {
     // ===== JSON serde tests =====
 
     #[test]
+    fn floatrange_subset_of_floatrange() {
+        let inner = Constraint::FloatRange { min: 1.0, max: 5.0 };
+        let outer = Constraint::FloatRange {
+            min: 0.5,
+            max: 10.5,
+        };
+        assert!(inner.is_subset_of(&outer));
+        assert!(!outer.is_subset_of(&inner));
+        assert!(!Constraint::FloatRange {
+            min: 10.0,
+            max: 1.0
+        }
+        .is_subset_of(&outer));
+        assert!(!inner.is_subset_of(&Constraint::FloatRange {
+            min: f64::NAN,
+            max: 10.0
+        }));
+    }
+
+    #[test]
+    fn exact_subset_of_floatrange() {
+        let range = Constraint::FloatRange {
+            min: 0.5,
+            max: 10.5,
+        };
+        assert!(Constraint::Exact("1.5".to_string()).is_subset_of(&range));
+        assert!(Constraint::Exact("0.5".to_string()).is_subset_of(&range));
+        assert!(Constraint::Exact("10".to_string()).is_subset_of(&range));
+        assert!(!Constraint::Exact("0.4".to_string()).is_subset_of(&range));
+        assert!(!Constraint::Exact("abc".to_string()).is_subset_of(&range));
+        assert!(!Constraint::Exact("NaN".to_string()).is_subset_of(&range));
+        assert!(!Constraint::Exact("inf".to_string()).is_subset_of(&range));
+    }
+
+    #[test]
+    fn oneof_subset_of_floatrange() {
+        let range = Constraint::FloatRange {
+            min: 0.5,
+            max: 10.5,
+        };
+        assert!(Constraint::OneOf(vec!["1.0".to_string(), "2.5".to_string()]).is_subset_of(&range));
+        assert!(!Constraint::OneOf(vec!["1.0".to_string(), "20".to_string()]).is_subset_of(&range));
+        assert!(!Constraint::OneOf(vec![]).is_subset_of(&range));
+    }
+
+    #[test]
+    fn intrange_may_replace_floatrange_when_contained() {
+        let range = Constraint::FloatRange {
+            min: 0.5,
+            max: 10.5,
+        };
+        assert!(Constraint::IntRange { min: 1, max: 10 }.is_subset_of(&range));
+        assert!(!Constraint::IntRange { min: 0, max: 10 }.is_subset_of(&range));
+        assert!(!Constraint::IntRange { min: 1, max: 11 }.is_subset_of(&range));
+        // FloatRange accepting "5.0" is not a subset of IntRange (fail closed).
+        assert!(!range.is_subset_of(&Constraint::IntRange { min: 1, max: 10 }));
+    }
+
+    #[test]
     fn json_exact() {
         let c = Constraint::Exact("hello".to_string());
         let json = serde_json::to_string(&c).unwrap();
@@ -1483,6 +1592,32 @@ mod tests {
 
         let parsed: Constraint = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, c);
+    }
+
+    #[test]
+    fn json_floatrange() {
+        let c = Constraint::FloatRange {
+            min: -1.5,
+            max: 2.25,
+        };
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"float_range\""));
+        assert!(json.contains("\"min\":-1.5"));
+        assert!(json.contains("\"max\":2.25"));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"float_range","value":{"min":0.5,"max":10.5}}"#)
+                .unwrap();
+        assert_eq!(
+            from_cli,
+            Constraint::FloatRange {
+                min: 0.5,
+                max: 10.5
+            }
+        );
     }
 
     #[test]

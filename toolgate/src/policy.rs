@@ -1010,6 +1010,57 @@ mod tests {
     }
 
     #[test]
+    fn from_json_parses_float_range() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 60,
+                "tools": [{
+                    "name": "score_tool",
+                    "arg_keys": ["score"],
+                    "constraints": {
+                        "score": {"type": "float_range", "value": {"min": 0.5, "max": 10.5}}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        policy.validate().unwrap();
+        let grant = policy.grant("score_tool").unwrap();
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("score"),
+            Some(&Constraint::FloatRange {
+                min: 0.5,
+                max: 10.5
+            })
+        );
+    }
+
+    #[test]
+    fn validate_inverted_float_range_is_rejected() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "score_tool",
+                    "arg_keys": ["score"],
+                    "constraints": {
+                        "score": {"type": "float_range", "value": {"min": 10.5, "max": 0.5}}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.validate(),
+            Err(PolicyError::InvalidConstraintRange {
+                tool: "score_tool".into(),
+                key: "score".into()
+            })
+        );
+    }
+
+    #[test]
     fn validate_empty_all_and_any_are_rejected() {
         let all = Policy::from_json(
             r#"{

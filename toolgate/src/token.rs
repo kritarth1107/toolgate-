@@ -3220,6 +3220,225 @@ mod tests {
     }
 
     #[test]
+    fn attenuation_can_narrow_floatrange() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "score".to_string(),
+            Constraint::FloatRange {
+                min: 0.5,
+                max: 10.5,
+            },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "score_tool",
+            vec!["score".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut narrower: BTreeMap<String, Constraint> = BTreeMap::new();
+        narrower.insert(
+            "score".to_string(),
+            Constraint::FloatRange { min: 1.0, max: 5.0 },
+        );
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(narrower))
+            .unwrap();
+
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("score"),
+            Some(&Constraint::FloatRange { min: 1.0, max: 5.0 })
+        );
+        assert!(attenuated.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn attenuation_cannot_widen_floatrange() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "score".to_string(),
+            Constraint::FloatRange { min: 1.0, max: 5.0 },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "score_tool",
+            vec!["score".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut wider: BTreeMap<String, Constraint> = BTreeMap::new();
+        wider.insert(
+            "score".to_string(),
+            Constraint::FloatRange {
+                min: 0.5,
+                max: 10.5,
+            },
+        );
+
+        let result = token.attenuate_with_constraints(SECRET, None, None, Some(wider));
+        assert_eq!(result, Err(TokenError::AttenuationWidens));
+    }
+
+    #[test]
+    fn attenuation_exact_can_replace_floatrange() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "score".to_string(),
+            Constraint::FloatRange {
+                min: 0.5,
+                max: 10.5,
+            },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "score_tool",
+            vec!["score".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut exact: BTreeMap<String, Constraint> = BTreeMap::new();
+        exact.insert("score".to_string(), Constraint::Exact("2.5".to_string()));
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(exact))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("score"),
+            Some(&Constraint::Exact("2.5".to_string()))
+        );
+    }
+
+    #[test]
+    fn attenuation_exact_cannot_replace_unsatisfied_floatrange() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "score".to_string(),
+            Constraint::FloatRange {
+                min: 0.5,
+                max: 10.5,
+            },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "score_tool",
+            vec!["score".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut exact: BTreeMap<String, Constraint> = BTreeMap::new();
+        exact.insert("score".to_string(), Constraint::Exact("20".to_string()));
+
+        assert_eq!(
+            token.attenuate_with_constraints(SECRET, None, None, Some(exact)),
+            Err(TokenError::AttenuationWidens)
+        );
+    }
+
+    #[test]
+    fn attenuation_intrange_can_replace_floatrange() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "score".to_string(),
+            Constraint::FloatRange {
+                min: 0.5,
+                max: 10.5,
+            },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "score_tool",
+            vec!["score".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut ints: BTreeMap<String, Constraint> = BTreeMap::new();
+        ints.insert(
+            "score".to_string(),
+            Constraint::IntRange { min: 1, max: 10 },
+        );
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(ints))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("score"),
+            Some(&Constraint::IntRange { min: 1, max: 10 })
+        );
+    }
+
+    #[test]
+    fn attenuation_floatrange_cannot_replace_intrange() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "limit".to_string(),
+            Constraint::IntRange { min: 1, max: 10 },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "fetch",
+            vec!["limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut floats: BTreeMap<String, Constraint> = BTreeMap::new();
+        floats.insert(
+            "limit".to_string(),
+            Constraint::FloatRange {
+                min: 1.0,
+                max: 10.0,
+            },
+        );
+
+        assert_eq!(
+            token.attenuate_with_constraints(SECRET, None, None, Some(floats)),
+            Err(TokenError::AttenuationWidens)
+        );
+    }
+
+    #[test]
     fn attenuation_can_tighten_suffix() {
         use crate::constraint::Constraint;
         use std::collections::BTreeMap;
@@ -3834,6 +4053,137 @@ mod tests {
         assert!(matches!(
             result,
             Err(TokenError::ConstraintViolation { key }) if key == "limit"
+        ));
+    }
+
+    #[test]
+    fn verify_call_with_args_floatrange_satisfied() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert(
+            "score".to_string(),
+            Constraint::FloatRange {
+                min: 0.5,
+                max: 10.5,
+            },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "score_tool",
+            vec!["score".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("score".to_string(), "2.5".to_string());
+
+        assert!(token
+            .verify_call_with_args(SECRET, 1999999999, "score_tool", &args, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_call_with_args_floatrange_violated() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert(
+            "score".to_string(),
+            Constraint::FloatRange {
+                min: 0.5,
+                max: 10.5,
+            },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "score_tool",
+            vec!["score".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("score".to_string(), "20".to_string());
+
+        let result = token.verify_call_with_args(SECRET, 1999999999, "score_tool", &args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { key }) if key == "score"
+        ));
+    }
+
+    #[test]
+    fn verify_call_with_args_floatrange_rejects_nan_inf() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert(
+            "score".to_string(),
+            Constraint::FloatRange {
+                min: 0.5,
+                max: 10.5,
+            },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "score_tool",
+            vec!["score".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        for value in ["NaN", "inf", "-inf", "abc"] {
+            let mut args = std::collections::BTreeMap::new();
+            args.insert("score".to_string(), value.to_string());
+            let result = token.verify_call_with_args(SECRET, 1999999999, "score_tool", &args, None);
+            assert!(
+                matches!(result, Err(TokenError::ConstraintViolation { key }) if key == "score"),
+                "value {value:?} should fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn verify_call_with_args_invalid_floatrange_fail_closed() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert(
+            "score".to_string(),
+            Constraint::FloatRange {
+                min: 10.0,
+                max: 1.0,
+            },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "score_tool",
+            vec!["score".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("score".to_string(), "5".to_string());
+
+        let result = token.verify_call_with_args(SECRET, 1999999999, "score_tool", &args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { key }) if key == "score"
         ));
     }
 

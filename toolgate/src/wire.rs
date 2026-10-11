@@ -1116,6 +1116,37 @@ mod tests {
     }
 
     #[test]
+    fn wire_roundtrip_constraint_floatrange() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "score".to_string(),
+            Constraint::FloatRange {
+                min: -1.5,
+                max: 2.25,
+            },
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "score_tool",
+            vec!["score".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
     fn wire_roundtrip_constraint_not() {
         use crate::constraint::Constraint;
         use std::collections::BTreeMap;

@@ -526,6 +526,49 @@ mod tests {
     }
 
     #[test]
+    fn verifier_matches_floatrange() {
+        let mut constraints = BTreeMap::new();
+        constraints.insert(
+            "score".to_string(),
+            Constraint::FloatRange {
+                min: 0.5,
+                max: 10.5,
+            },
+        );
+        let token = Token::mint_full(
+            SECRET,
+            "score_tool",
+            vec!["score".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut good = BTreeMap::new();
+        good.insert("score".to_string(), "2.5".to_string());
+        let mut bad = BTreeMap::new();
+        bad.insert("score".to_string(), "20".to_string());
+
+        assert_eq!(
+            Verifier::new(SECRET)
+                .at(1999999999)
+                .verify_call_with_args(&token, "score_tool", &good),
+            token.verify_call_with_args(SECRET, 1999999999, "score_tool", &good, None)
+        );
+        assert!(Verifier::new(SECRET)
+            .at(1999999999)
+            .verify_call_with_args(&token, "score_tool", &good)
+            .is_ok());
+        assert!(matches!(
+            Verifier::new(SECRET)
+                .at(1999999999)
+                .verify_call_with_args(&token, "score_tool", &bad),
+            Err(TokenError::ConstraintViolation { key }) if key == "score"
+        ));
+    }
+
+    #[test]
     fn verifier_matches_keyring() {
         let mut keyring = Keyring::new();
         keyring.add("key-1", SECRET.to_vec());
