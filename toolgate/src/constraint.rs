@@ -355,6 +355,12 @@ impl Constraint {
                 }
             }
 
+            // Exact is subset of LenRange if the value's byte length lies
+            // inside the inclusive interval.
+            (Constraint::Exact(a), Constraint::LenRange { min, max }) => {
+                len_range_is_valid(*min, *max) && a.len() >= *min && a.len() <= *max
+            }
+
             // Exact is subset of Suffix if the value ends with the suffix
             (Constraint::Exact(a), Constraint::Suffix(suffix)) => {
                 !suffix.is_empty() && a.ends_with(suffix)
@@ -453,6 +459,14 @@ impl Constraint {
                         Some(n) => n >= *min && n <= *max,
                         None => false,
                     })
+            }
+
+            // OneOf is subset of LenRange if every allowed value's length
+            // lies inside the inclusive interval.
+            (Constraint::OneOf(values), Constraint::LenRange { min, max }) => {
+                len_range_is_valid(*min, *max)
+                    && !values.is_empty()
+                    && values.iter().all(|v| v.len() >= *min && v.len() <= *max)
             }
 
             // OneOf is subset of Suffix if every allowed value ends with the suffix
@@ -603,6 +617,58 @@ impl Constraint {
                 let min_str = min.to_string();
                 let max_str = max.to_string();
                 min_str.len() <= *max_len && max_str.len() <= *max_len
+            }
+
+            // LenRange is subset of LenRange if the new interval is within
+            // the old one. Inverted bounds fail closed.
+            (
+                Constraint::LenRange {
+                    min: new_min,
+                    max: new_max,
+                },
+                Constraint::LenRange {
+                    min: old_min,
+                    max: old_max,
+                },
+            ) => {
+                len_range_is_valid(*new_min, *new_max)
+                    && len_range_is_valid(*old_min, *old_max)
+                    && *new_min >= *old_min
+                    && *new_max <= *old_max
+            }
+
+            // LenRange may replace MinLen by adding an upper bound while
+            // keeping or raising the minimum.
+            (
+                Constraint::LenRange {
+                    min: new_min,
+                    max: new_max,
+                },
+                Constraint::MinLen(old),
+            ) => len_range_is_valid(*new_min, *new_max) && *new_min >= *old,
+
+            // LenRange may replace MaxLen by adding a lower bound while
+            // keeping or lowering the maximum.
+            (
+                Constraint::LenRange {
+                    min: new_min,
+                    max: new_max,
+                },
+                Constraint::MaxLen(old),
+            ) => len_range_is_valid(*new_min, *new_max) && *new_max <= *old,
+
+            // MinLen may replace LenRange when the new min is at least the
+            // old min and the old max is still respected (only when the
+            // old max is usize::MAX, i.e. equivalent to an unbounded max).
+            // Otherwise fold the raise into a tighter LenRange.
+            (Constraint::MinLen(new), Constraint::LenRange { min: old_min, max: old_max }) => {
+                len_range_is_valid(*old_min, *old_max) && *new >= *old_min && *old_max == usize::MAX
+            }
+
+            // MaxLen may replace LenRange when the old min is 0 (still
+            // respected by MaxLen) and the new max is within the old max.
+            (Constraint::MaxLen(new), Constraint::LenRange { min: old_min, max: old_max }) => {
+                len_range_is_valid(*old_min, *old_max) && *old_min == 0 && *new <= *old_max
             }
 
             // Cross-type comparisons that don't make sense as subsets
