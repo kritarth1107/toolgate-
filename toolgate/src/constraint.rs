@@ -1185,6 +1185,53 @@ mod tests {
     }
 
     #[test]
+    fn charlenrange_check() {
+        let c = Constraint::CharLenRange { min: 2, max: 5 };
+        assert!(c.check("hi"));
+        assert!(c.check("hello"));
+        assert!(!c.check("h"));
+        assert!(!c.check("hello!"));
+        assert!(!c.check(""));
+    }
+
+    #[test]
+    fn charlenrange_zero_min_allows_empty() {
+        let c = Constraint::CharLenRange { min: 0, max: 3 };
+        assert!(c.check(""));
+        assert!(c.check("x"));
+        assert!(c.check("abc"));
+        assert!(!c.check("abcd"));
+    }
+
+    #[test]
+    fn charlenrange_uses_scalar_count_not_bytes() {
+        // "é" is one Unicode scalar and two UTF-8 bytes.
+        let c = Constraint::CharLenRange { min: 1, max: 1 };
+        assert!(c.check("é"));
+        assert!(!Constraint::CharLenRange { min: 2, max: 2 }.check("é"));
+        assert!(!Constraint::CharLenRange { min: 0, max: 0 }.check("é"));
+        // "日本語" is three scalars and nine UTF-8 bytes.
+        assert!(Constraint::CharLenRange { min: 3, max: 3 }.check("日本語"));
+        assert!(!Constraint::CharLenRange { min: 9, max: 9 }.check("日本語"));
+        // "café" is four scalars; byte length is five.
+        assert!(Constraint::CharLenRange { min: 4, max: 4 }.check("café"));
+        assert!(!Constraint::CharLenRange { min: 5, max: 5 }.check("café"));
+    }
+
+    #[test]
+    fn charlenrange_invalid_bounds_fail_closed() {
+        let inverted = Constraint::CharLenRange { min: 10, max: 1 };
+        assert!(inverted.is_invalid_range());
+        assert!(!inverted.check(""));
+        assert!(!inverted.check("hello"));
+        assert!(!inverted.check("abcdefghij"));
+        assert!(!Constraint::CharLenRange { min: 1, max: 16 }.is_invalid_range());
+        assert!(!Constraint::CharLenRange { min: 0, max: 0 }.is_invalid_range());
+        assert!(Constraint::CharLenRange { min: 0, max: 0 }.check(""));
+        assert!(!Constraint::CharLenRange { min: 0, max: 0 }.check("x"));
+    }
+
+    #[test]
     fn suffix_check() {
         let c = Constraint::Suffix(".txt".to_string());
         assert!(c.check("notes.txt"));
