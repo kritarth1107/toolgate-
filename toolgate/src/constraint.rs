@@ -391,6 +391,13 @@ impl Constraint {
                 len_range_is_valid(*min, *max) && a.len() >= *min && a.len() <= *max
             }
 
+            // Exact is subset of CharLenRange if the value's Unicode
+            // scalar count lies inside the inclusive interval.
+            (Constraint::Exact(a), Constraint::CharLenRange { min, max }) => {
+                let count = a.chars().count();
+                len_range_is_valid(*min, *max) && count >= *min && count <= *max
+            }
+
             // Exact is subset of Suffix if the value ends with the suffix
             (Constraint::Exact(a), Constraint::Suffix(suffix)) => {
                 !suffix.is_empty() && a.ends_with(suffix)
@@ -497,6 +504,17 @@ impl Constraint {
                 len_range_is_valid(*min, *max)
                     && !values.is_empty()
                     && values.iter().all(|v| v.len() >= *min && v.len() <= *max)
+            }
+
+            // OneOf is subset of CharLenRange if every allowed value's
+            // Unicode scalar count lies inside the inclusive interval.
+            (Constraint::OneOf(values), Constraint::CharLenRange { min, max }) => {
+                len_range_is_valid(*min, *max)
+                    && !values.is_empty()
+                    && values.iter().all(|v| {
+                        let count = v.chars().count();
+                        count >= *min && count <= *max
+                    })
             }
 
             // OneOf is subset of Suffix if every allowed value ends with the suffix
@@ -710,6 +728,28 @@ impl Constraint {
                     max: old_max,
                 },
             ) => len_range_is_valid(*old_min, *old_max) && *old_min == 0 && *new <= *old_max,
+
+            // CharLenRange is subset of CharLenRange if the new interval
+            // is within the old one. Inverted bounds fail closed.
+            (
+                Constraint::CharLenRange {
+                    min: new_min,
+                    max: new_max,
+                },
+                Constraint::CharLenRange {
+                    min: old_min,
+                    max: old_max,
+                },
+            ) => {
+                len_range_is_valid(*new_min, *new_max)
+                    && len_range_is_valid(*old_min, *old_max)
+                    && *new_min >= *old_min
+                    && *new_max <= *old_max
+            }
+
+            // CharLenRange vs LenRange/MinLen/MaxLen is not a safe subset
+            // in general (byte length vs Unicode scalar count). Fail closed
+            // unless the replacement is Exact/OneOf, handled above.
 
             // Cross-type comparisons that don't make sense as subsets
             (Constraint::OneOf(_), Constraint::Exact(_)) => false,
