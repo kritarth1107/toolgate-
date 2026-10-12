@@ -7,7 +7,7 @@ A small, fast Rust library for issuing macaroon-style capability tokens for tool
 toolgate issues capability tokens that bind:
 - **Tool name**: which tool the token authorizes
 - **Argument keys**: an allowlist of permitted argument names
-- **Argument constraints** (optional): restrict argument values (prefix, suffix, prefix-one-of, suffix-one-of, contains, exact, one-of, not-equals, not-one-of, not-contains, not-prefix, min/max length, int range, float range, simple glob, All/Any/Not composition)
+- **Argument constraints** (optional): restrict argument values (prefix, suffix, prefix-one-of, suffix-one-of, contains, contains-any/none, exact, one-of, not-equals, not-one-of, not-contains, not-prefix, min/max length, int range, float range, simple glob, matches-any/none, All/Any/Not composition)
 - **Expiry**: unix timestamp when the token becomes invalid
 - **Not-before (`nbf`)** (optional): unix timestamp before which the token is rejected
 - **Audience** (optional): restrict token to a specific client/service
@@ -25,7 +25,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-toolgate = "0.26"
+toolgate = "0.28"
 ```
 
 Or install the CLI:
@@ -171,6 +171,8 @@ constraints.insert("ext".to_string(), Constraint::SuffixOneOf(vec![".txt".into()
 constraints.insert("note".to_string(), Constraint::Contains("draft".to_string()));
 constraints.insert("needles".to_string(), Constraint::ContainsAny(vec!["tmp".into(), "var".into()]));
 constraints.insert("memo_block".to_string(), Constraint::ContainsNone(vec!["secret".into(), "password".into()]));
+constraints.insert("names".to_string(), Constraint::MatchesAny(vec!["*.txt".into(), "*.md".into()]));
+constraints.insert("blocked".to_string(), Constraint::MatchesNone(vec!["*.tmp".into(), "*.bak".into()]));
 constraints.insert("mode".to_string(), Constraint::OneOf(vec!["read".into(), "list".into()]));
 constraints.insert("limit".to_string(), Constraint::IntRange { min: 1, max: 100 });
 constraints.insert("score".to_string(), Constraint::FloatRange { min: 0.5, max: 10.5 });
@@ -201,7 +203,7 @@ constraints.insert("not_tmp".to_string(), Constraint::Not(Box::new(
 let token = Token::mint_full(
     secret,
     "file_op",
-    vec!["path".into(), "name".into(), "note".into(), "needles".into(), "memo_block".into(), "mode".into(), "limit".into(), "score".into(), "query".into(), "snippet".into(), "label".into(), "file".into(), "role".into(), "actor".into(), "memo".into(), "dest".into(), "backup".into(), "skip".into(), "path_and_name".into(), "tmp_or_var".into(), "not_tmp".into()],
+    vec!["path".into(), "name".into(), "note".into(), "needles".into(), "memo_block".into(), "names".into(), "blocked".into(), "mode".into(), "limit".into(), "score".into(), "query".into(), "snippet".into(), "label".into(), "file".into(), "role".into(), "actor".into(), "memo".into(), "dest".into(), "backup".into(), "skip".into(), "path_and_name".into(), "tmp_or_var".into(), "not_tmp".into()],
     2000000000,
     None,  // audience
     None,  // kid
@@ -215,6 +217,8 @@ args.insert("name".to_string(), "test.txt".to_string());
 args.insert("note".to_string(), "draft-notes".to_string());
 args.insert("needles".to_string(), "/tmp/draft".to_string());
 args.insert("memo_block".to_string(), "ok".to_string());
+args.insert("names".to_string(), "notes.txt".to_string());
+args.insert("blocked".to_string(), "notes.txt".to_string());
 args.insert("mode".to_string(), "read".to_string());
 args.insert("limit".to_string(), "50".to_string());
 args.insert("score".to_string(), "2.5".to_string());
@@ -256,6 +260,8 @@ token.verify_call_with_args(
 | `MaxLen(usize)` | Value must have at most N bytes | `MaxLen(256)` |
 | `MinLen(usize)` | Value must have at least N bytes | `MinLen(3)` |
 | `Matches(String)` | Value must match a simple `*` / `?` glob over Unicode scalars | `Matches("*.txt".into())` |
+| `MatchesAny(Vec<String>)` | Value must match at least one listed `*` / `?` glob | `MatchesAny(vec!["*.txt".into(), "*.md".into()])` |
+| `MatchesNone(Vec<String>)` | Value must match none of the listed `*` / `?` globs | `MatchesNone(vec!["*.tmp".into(), "*.bak".into()])` |
 | `NotEquals(String)` | Value must not equal the forbidden string | `NotEquals("admin".into())` |
 | `NotOneOf(Vec<String>)` | Value must not be any of the forbidden values | `NotOneOf(vec!["admin".into(), "root".into()])` |
 | `NotContains(String)` | Value must not contain the UTF-8 substring | `NotContains("secret".into())` |
@@ -270,7 +276,7 @@ token.verify_call_with_args(
 | `LenRange { min, max }` | Value byte length must satisfy `min <= len <= max` | `LenRange { min: 1, max: 16 }` |
 | `CharLenRange { min, max }` | Value Unicode scalar count must satisfy `min <= count <= max` | `CharLenRange { min: 1, max: 16 }` |
 
-JSON forms match the Rust names: `{"type":"all","value":[...]}`, `{"type":"any","value":[...]}`, `{"type":"not","value":{...}}`, `{"type":"float_range","value":{"min":...,"max":...}}`, `{"type":"len_range","value":{"min":...,"max":...}}`, `{"type":"char_len_range","value":{"min":...,"max":...}}`, `{"type":"prefix_one_of","value":["/tmp/","/var/"]}`, `{"type":"suffix_one_of","value":[".txt",".md"]}`, `{"type":"contains_any","value":["tmp","var"]}`, and `{"type":"contains_none","value":["secret","password"]}` where children are existing constraint objects. `MinLen(0)` is valid and accepts the empty string. `LenRange { min: 0, max: N }` and `CharLenRange { min: 0, max: N }` are valid and accept the empty string when `N` allows it. Empty suffix, contains, matches, not-contains, not-prefix, not-suffix, or not-matches patterns, empty NotOneOf denylists, empty PrefixOneOf, SuffixOneOf, ContainsAny, or ContainsNone lists (or a list containing an empty member), empty All/Any composites, a `Not` whose child is an empty pattern, FloatRange bounds that are non-finite or have `min > max`, and LenRange or CharLenRange bounds with `min > max` are rejected at mint/validate and never match a value. Nested All/Any/Not trees deeper than `MAX_CONSTRAINT_NESTING` (8) are rejected at mint/validate.
+JSON forms match the Rust names: `{"type":"all","value":[...]}`, `{"type":"any","value":[...]}`, `{"type":"not","value":{...}}`, `{"type":"float_range","value":{"min":...,"max":...}}`, `{"type":"len_range","value":{"min":...,"max":...}}`, `{"type":"char_len_range","value":{"min":...,"max":...}}`, `{"type":"prefix_one_of","value":["/tmp/","/var/"]}`, `{"type":"suffix_one_of","value":[".txt",".md"]}`, `{"type":"contains_any","value":["tmp","var"]}`, `{"type":"contains_none","value":["secret","password"]}`, `{"type":"matches_any","value":["*.txt","*.md"]}`, and `{"type":"matches_none","value":["*.tmp","*.bak"]}` where children are existing constraint objects. `MinLen(0)` is valid and accepts the empty string. `LenRange { min: 0, max: N }` and `CharLenRange { min: 0, max: N }` are valid and accept the empty string when `N` allows it. Empty suffix, contains, matches, not-contains, not-prefix, not-suffix, or not-matches patterns, empty NotOneOf denylists, empty PrefixOneOf, SuffixOneOf, ContainsAny, ContainsNone, MatchesAny, or MatchesNone lists (or a list containing an empty member), empty All/Any composites, a `Not` whose child is an empty pattern, FloatRange bounds that are non-finite or have `min > max`, and LenRange or CharLenRange bounds with `min > max` are rejected at mint/validate and never match a value. Nested All/Any/Not trees deeper than `MAX_CONSTRAINT_NESTING` (8) are rejected at mint/validate.
 
 `Matches` is not a regex: only `*` (any sequence, including empty) and `?` (exactly one Unicode scalar) are special. `.` `[` `]` and every other character match literally. There are no character classes, `**` path semantics, or escape sequences.
 
@@ -302,13 +308,15 @@ Valid attenuation rules:
 - **OneOf**: new set must be a subset of the old set
 - **MaxLen**: new max must be ≤ old max
 - **MinLen**: new min must be ≥ old min
-- **Matches**: new pattern must equal the old pattern; tighten by replacing with Exact
+- **Matches**: new pattern must equal the old pattern; tighten by replacing with Exact or a specializing MatchesAny
+- **MatchesAny**: every new pattern must specialize/narrow some parent glob (`L(child) ⊆ L(parent)`); the child may only shrink the allowed set
+- **MatchesNone**: every old glob must stay covered by a new denial that is at least as broad (`L(old) ⊆ L(new)`); extra denials are allowed
 - **NotEquals**: new forbidden value must equal the old; may become NotOneOf if the new denylist still contains that value
 - **NotOneOf**: new denylist must be a **superset** of the old (more denials = tighter); dropping a forbidden value is rejected
 - **NotContains**: new forbidden needle must be a **substring of** the old needle (shorter/equal forbids more)
 - **NotPrefix**: new forbidden prefix must be a **prefix of** the old forbidden prefix (shorter/equal forbids more)
 - **NotSuffix**: new forbidden suffix must be a **suffix of** the old forbidden suffix (shorter/equal forbids more)
-- **NotMatches**: new pattern must equal the old pattern; tighten by replacing with Exact
+- **NotMatches**: new pattern must equal the old pattern; tighten by replacing with Exact or a covering MatchesNone
 - **All**: new children must cover every old child with an equal-or-tighter child; extra children (more ANDs) are allowed
 - **Any**: each new child must tighten some old alternative (fewer ORs or tighter alternatives)
 - **Not**: `Not(new)` tightens `Not(old)` when `old` is a subset of `new` (widening the inner constraint strengthens the outer negation)
@@ -316,7 +324,7 @@ Valid attenuation rules:
 - **FloatRange**: new range must be within old range; inverted or non-finite bounds fail closed
 - **LenRange**: new range must be within old range (`new_min >= old_min && new_max <= old_max`); inverted bounds fail closed. LenRange may replace MinLen/MaxLen by adding the missing bound. MinLen may replace LenRange only when the old max is still respected (`usize::MAX`); MaxLen may replace LenRange only when the old min is 0
 - **CharLenRange**: new range must be within old range (`new_min >= old_min && new_max <= old_max`); inverted bounds fail closed. CharLenRange versus LenRange/MinLen/MaxLen fails closed (byte vs scalar length is not a safe subset)
-- **Exact**: can replace any constraint if the exact value satisfies it (for denylists, the exact value must not be forbidden; for All, every child; for Any, at least one child; for Not, the exact value must not satisfy the child; for FloatRange, the exact string must parse as a finite `f64` inside the old range; for LenRange, the exact value's byte length must lie inside the old range; for CharLenRange, the exact value's Unicode scalar count must lie inside the old range; for PrefixOneOf, the exact value must start with a listed prefix; for SuffixOneOf, the exact value must end with a listed suffix; for ContainsAny, the exact value must contain a listed needle; for ContainsNone, the exact value must contain none of the listed needles)
+- **Exact**: can replace any constraint if the exact value satisfies it (for denylists, the exact value must not be forbidden; for All, every child; for Any, at least one child; for Not, the exact value must not satisfy the child; for FloatRange, the exact string must parse as a finite `f64` inside the old range; for LenRange, the exact value's byte length must lie inside the old range; for CharLenRange, the exact value's Unicode scalar count must lie inside the old range; for PrefixOneOf, the exact value must start with a listed prefix; for SuffixOneOf, the exact value must end with a listed suffix; for ContainsAny, the exact value must contain a listed needle; for ContainsNone, the exact value must contain none of the listed needles; for MatchesAny, the exact value must match a listed glob; for MatchesNone, the exact value must match none of the listed globs)
 
 ## Key Rotation
 
@@ -561,7 +569,7 @@ The `tg` binary accepts JSON on stdin and outputs JSON.
 echo '{
   "secret": "my-secret",
   "tool_name": "read_file",
-  "arg_keys": ["path", "roots", "limit", "score", "query", "title", "name", "ext", "needles", "memo_block", "role", "memo", "dest", "backup", "skip", "path_and_name", "tmp_or_var", "not_tmp"],
+  "arg_keys": ["path", "roots", "limit", "score", "query", "title", "name", "ext", "needles", "memo_block", "names", "blocked", "role", "memo", "dest", "backup", "skip", "path_and_name", "tmp_or_var", "not_tmp"],
   "expiry": 2000000000,
   "audience": "client-123",
   "constraints": {
@@ -570,6 +578,8 @@ echo '{
     "ext": {"type": "suffix_one_of", "value": [".txt", ".md"]},
     "needles": {"type": "contains_any", "value": ["tmp", "var"]},
     "memo_block": {"type": "contains_none", "value": ["secret", "password"]},
+    "names": {"type": "matches_any", "value": ["*.txt", "*.md"]},
+    "blocked": {"type": "matches_none", "value": ["*.tmp", "*.bak"]},
     "limit": {"type": "int_range", "value": {"min": 1, "max": 100}},
     "score": {"type": "float_range", "value": {"min": 0.5, "max": 10.5}},
     "query": {"type": "len_range", "value": {"min": 1, "max": 16}},
@@ -909,6 +919,8 @@ Constraint type encoding:
 - `22` SuffixOneOf: u16 count + (for each, sorted unique: u16 length + UTF-8 suffix)
 - `23` ContainsAny: u16 count + (for each, sorted unique: u16 length + UTF-8 needle)
 - `24` ContainsNone: u16 count + (for each, sorted unique: u16 length + UTF-8 needle)
+- `25` MatchesAny: u16 count + (for each, sorted unique: u16 length + UTF-8 pattern)
+- `26` MatchesNone: u16 count + (for each, sorted unique: u16 length + UTF-8 pattern)
 
 **Example without constraints, jti, nbf, or depth** (identical to v5/v4/v3):
 
@@ -1055,6 +1067,7 @@ let info = check_tools_call(&verifier, &token, &request)?;
 
 ## Version History
 
+- **0.28.0**: `Constraint::MatchesAny` and `Constraint::MatchesNone` (canonical/wire tags 25 and 26), with fail-closed empty lists/members and tighten-only attenuation
 - **0.27.0**: `Constraint::ContainsAny` and `Constraint::ContainsNone` (canonical/wire tags 23 and 24), with fail-closed empty lists/members and tighten-only attenuation
 - **0.26.0**: `Constraint::PrefixOneOf` and `Constraint::SuffixOneOf` (canonical/wire tags 21 and 22), with fail-closed empty lists/members and tighten-only attenuation
 - **0.25.0**: `Constraint::CharLenRange` inclusive Unicode scalar-count interval (canonical/wire tag 20), with fail-closed inverted bounds and tighten-only attenuation
