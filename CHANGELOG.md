@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.28.0] - 2026-10-12
+
+### Added
+- **`Constraint::MatchesAny(Vec<String>)`**: value must match at least one listed `*` / `?` glob (same glob semantics as `Matches`, not a regex)
+- **`Constraint::MatchesNone(Vec<String>)`**: value must match none of the listed `*` / `?` globs
+- CLI JSON forms `{"type":"matches_any","value":["*.txt","*.md"]}` and `{"type":"matches_none","value":["*.tmp","*.bak"]}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6, MinLen=7, Matches=8, NotEquals=9, NotOneOf=10, NotContains=11, NotPrefix=12, NotSuffix=13, NotMatches=14, All=15, Any=16, Not=17, FloatRange=18, LenRange=19, CharLenRange=20, PrefixOneOf=21, SuffixOneOf=22, ContainsAny=23, ContainsNone=24, MatchesAny=25, MatchesNone=26
+- Tokens without the new types still encode identically to 0.27.0
+
+### Notes
+- Stored and encoded as sorted unique strings (same spirit as OneOf / NotOneOf / ContainsAny): u8 type + u16 count + each len-prefixed string
+- Attenuation only tightens: MatchesAny children must specialize some parent glob (`L(child) ⊆ L(parent)`) and may only shrink/narrow the allowed set; MatchesNone must cover every parent glob with a denial that is at least as broad (`L(old) ⊆ L(new)`) and may add extra denials
+- Exact may replace MatchesAny/MatchesNone when the exact value matches a listed glob / matches none of them
+- OneOf may replace MatchesAny/MatchesNone when every allowed value satisfies the same rule
+- Matches/MatchesAny may replace each other when every remaining pattern specializes a parent glob
+- NotMatches/MatchesNone may replace each other when the new denials still cover the old ones
+- Empty lists and empty members are rejected at mint/validate and never match a value (fail closed)
+- Unclear cross-type pairs fail closed
+
 ## [0.27.0] - 2026-10-12
 
 ### Added
