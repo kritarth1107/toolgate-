@@ -75,8 +75,9 @@ pub enum PolicyError {
     /// A constraint is attached to a key that is not in the grant's allowlist.
     ConstraintKeyNotAllowed { tool: String, key: String },
     /// An empty suffix, contains, matches, NotOneOf, PrefixOneOf,
-    /// SuffixOneOf, ContainsAny, ContainsNone, NotContains, NotPrefix,
-    /// NotSuffix, NotMatches, All, Any, or Not constraint is rejected.
+    /// SuffixOneOf, ContainsAny, ContainsNone, MatchesAny, MatchesNone,
+    /// NotContains, NotPrefix, NotSuffix, NotMatches, All, Any, or Not
+    /// constraint is rejected.
     EmptyConstraintPattern { tool: String, key: String },
     /// An All/Any/Not tree deeper than [`crate::MAX_CONSTRAINT_NESTING`] is rejected.
     ConstraintNestingTooDeep { tool: String, key: String },
@@ -122,7 +123,7 @@ impl std::fmt::Display for PolicyError {
             PolicyError::EmptyConstraintPattern { tool, key } => {
                 write!(
                     f,
-                    "empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any/not/prefix_one_of/suffix_one_of/contains_any/contains_none constraint for '{key}' on tool '{tool}' is rejected"
+                    "empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any/not/prefix_one_of/suffix_one_of/contains_any/contains_none/matches_any/matches_none constraint for '{key}' on tool '{tool}' is rejected"
                 )
             }
             PolicyError::ConstraintNestingTooDeep { tool, key } => {
@@ -1393,6 +1394,79 @@ mod tests {
                 "secret".into(),
                 "password".into()
             ]))
+        );
+    }
+
+    #[test]
+    fn from_json_parses_matches_any_and_matches_none() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 60,
+                "tools": [{
+                    "name": "file_op",
+                    "arg_keys": ["file", "skip"],
+                    "constraints": {
+                        "file": {"type": "matches_any", "value": ["*.txt", "*.md"]},
+                        "skip": {"type": "matches_none", "value": ["*.tmp", "*.bak"]}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        policy.validate().unwrap();
+        let grant = policy.grant("file_op").unwrap();
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("file"),
+            Some(&Constraint::MatchesAny(vec!["*.txt".into(), "*.md".into()]))
+        );
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("skip"),
+            Some(&Constraint::MatchesNone(vec![
+                "*.tmp".into(),
+                "*.bak".into()
+            ]))
+        );
+    }
+
+    #[test]
+    fn validate_empty_matches_any_and_matches_none_are_rejected() {
+        let empty_list = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["file"],
+                    "constraints": {"file": {"type": "matches_any", "value": []}}
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            empty_list.validate(),
+            Err(PolicyError::EmptyConstraintPattern {
+                tool: "read_file".into(),
+                key: "file".into()
+            })
+        );
+
+        let empty_member = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["skip"],
+                    "constraints": {"skip": {"type": "matches_none", "value": ["*.tmp", ""]}}
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            empty_member.validate(),
+            Err(PolicyError::EmptyConstraintPattern {
+                tool: "read_file".into(),
+                key: "skip".into()
+            })
         );
     }
 
