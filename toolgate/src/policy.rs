@@ -74,8 +74,9 @@ pub enum PolicyError {
     DuplicateTool { name: String },
     /// A constraint is attached to a key that is not in the grant's allowlist.
     ConstraintKeyNotAllowed { tool: String, key: String },
-    /// An empty suffix, contains, matches, NotOneOf, NotContains, NotPrefix,
-    /// NotSuffix, NotMatches, All, Any, or Not constraint is rejected.
+    /// An empty suffix, contains, matches, NotOneOf, PrefixOneOf,
+    /// SuffixOneOf, NotContains, NotPrefix, NotSuffix, NotMatches, All,
+    /// Any, or Not constraint is rejected.
     EmptyConstraintPattern { tool: String, key: String },
     /// An All/Any/Not tree deeper than [`crate::MAX_CONSTRAINT_NESTING`] is rejected.
     ConstraintNestingTooDeep { tool: String, key: String },
@@ -121,7 +122,7 @@ impl std::fmt::Display for PolicyError {
             PolicyError::EmptyConstraintPattern { tool, key } => {
                 write!(
                     f,
-                    "empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any/not constraint for '{key}' on tool '{tool}' is rejected"
+                    "empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any/not/prefix_one_of/suffix_one_of constraint for '{key}' on tool '{tool}' is rejected"
                 )
             }
             PolicyError::ConstraintNestingTooDeep { tool, key } => {
@@ -1286,6 +1287,79 @@ mod tests {
             Err(PolicyError::EmptyConstraintPattern {
                 tool: "file_op".into(),
                 key: "role".into()
+            })
+        );
+    }
+
+    #[test]
+    fn from_json_parses_prefix_one_of_and_suffix_one_of() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 60,
+                "tools": [{
+                    "name": "file_op",
+                    "arg_keys": ["path", "name"],
+                    "constraints": {
+                        "path": {"type": "prefix_one_of", "value": ["/tmp/", "/var/"]},
+                        "name": {"type": "suffix_one_of", "value": [".txt", ".md"]}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        policy.validate().unwrap();
+        let grant = policy.grant("file_op").unwrap();
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("path"),
+            Some(&Constraint::PrefixOneOf(vec![
+                "/tmp/".into(),
+                "/var/".into()
+            ]))
+        );
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("name"),
+            Some(&Constraint::SuffixOneOf(vec![".txt".into(), ".md".into()]))
+        );
+    }
+
+    #[test]
+    fn validate_empty_prefix_one_of_and_suffix_one_of_are_rejected() {
+        let empty_list = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["path"],
+                    "constraints": {"path": {"type": "prefix_one_of", "value": []}}
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            empty_list.validate(),
+            Err(PolicyError::EmptyConstraintPattern {
+                tool: "read_file".into(),
+                key: "path".into()
+            })
+        );
+
+        let empty_member = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "write_file",
+                    "arg_keys": ["name"],
+                    "constraints": {"name": {"type": "suffix_one_of", "value": [".txt", ""]}}
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            empty_member.validate(),
+            Err(PolicyError::EmptyConstraintPattern {
+                tool: "write_file".into(),
+                key: "name".into()
             })
         );
     }

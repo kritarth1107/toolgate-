@@ -385,7 +385,7 @@ fn reject_empty_constraint_patterns(
     for (key, constraint) in constraints {
         if constraint.is_empty_pattern() {
             return Err(format!(
-                "empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any/not constraint for '{key}' is rejected"
+                "empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any/not/prefix_one_of/suffix_one_of constraint for '{key}' is rejected"
             )
             .into());
         }

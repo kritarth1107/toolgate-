@@ -4187,3 +4187,270 @@ fn mint_from_policy_accepts_char_len_range() {
     assert_eq!(token["constraints"]["query"]["value"]["min"], 1);
     let _ = fs::remove_file(&path);
 }
+
+fn mint_prefix_one_of_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["path"],
+            "expiry": 2000000000,
+            "constraints": {
+                "path": {"type": "prefix_one_of", "value": ["/tmp/", "/var/"]}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+fn mint_suffix_one_of_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "write_file",
+            "arg_keys": ["name"],
+            "expiry": 2000000000,
+            "constraints": {
+                "name": {"type": "suffix_one_of", "value": [".txt", ".md"]}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+#[test]
+fn mint_accepts_prefix_one_of_and_suffix_one_of() {
+    let prefix = mint_prefix_one_of_token();
+    assert_eq!(prefix["constraints"]["path"]["type"], "prefix_one_of");
+    assert_eq!(
+        prefix["constraints"]["path"]["value"],
+        json!(["/tmp/", "/var/"])
+    );
+
+    let suffix = mint_suffix_one_of_token();
+    assert_eq!(suffix["constraints"]["name"]["type"], "suffix_one_of");
+    assert_eq!(
+        suffix["constraints"]["name"]["value"],
+        json!([".txt", ".md"])
+    );
+}
+
+#[test]
+fn check_call_enforces_prefix_one_of() {
+    let token = mint_prefix_one_of_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"path": "/var/log/app"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"path": "/home/x"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn check_call_enforces_suffix_one_of() {
+    let token = mint_suffix_one_of_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "write_file",
+            "args": {"name": "notes.md"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "write_file",
+            "args": {"name": "notes.rs"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn attenuate_can_tighten_prefix_one_of() {
+    let token = mint_prefix_one_of_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "path": {"type": "prefix_one_of", "value": ["/tmp/sub/"]}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(attenuated["constraints"]["path"]["type"], "prefix_one_of");
+    assert_eq!(
+        attenuated["constraints"]["path"]["value"],
+        json!(["/tmp/sub/"])
+    );
+}
+
+#[test]
+fn attenuate_rejects_widening_prefix_one_of() {
+    let token = mint_prefix_one_of_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "path": {"type": "prefix_one_of", "value": ["/", "/tmp/", "/var/"]}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("attenuation"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn mint_rejects_empty_prefix_one_of() {
+    let out = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["path"],
+            "expiry": 2000000000,
+            "constraints": {
+                "path": {"type": "prefix_one_of", "value": []}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("prefix_one_of"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn mint_rejects_empty_suffix_one_of_member() {
+    let out = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "write_file",
+            "arg_keys": ["name"],
+            "expiry": 2000000000,
+            "constraints": {
+                "name": {"type": "suffix_one_of", "value": [".txt", ""]}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("suffix_one_of"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn policy_lint_rejects_empty_prefix_one_of() {
+    let path = write_temp_policy(
+        "empty-prefix-one-of",
+        r#"{
+            "version": "1",
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["path"],
+                "constraints": {
+                    "path": {"type": "prefix_one_of", "value": []}
+                }
+            }]
+        }"#,
+    );
+    let output = tg()
+        .args(["policy", "lint", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("prefix_one_of"),
+        "stdout={stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn mint_from_policy_accepts_prefix_one_of() {
+    let path = write_temp_policy(
+        "prefix-one-of-grant",
+        r#"{
+            "version": "1",
+            "default_ttl_seconds": 60,
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["path"],
+                "constraints": {
+                    "path": {"type": "prefix_one_of", "value": ["/tmp/", "/var/"]}
+                }
+            }]
+        }"#,
+    );
+    let out = run_json(
+        &[
+            "mint",
+            "--policy",
+            path.to_str().unwrap(),
+            "--tool",
+            "read_file",
+        ],
+        &json!({
+            "secret": "cli-secret",
+            "current_time": 1700000000
+        }),
+    );
+    let token = &out["token"];
+    assert_eq!(token["tool_name"], "read_file");
+    assert_eq!(token["constraints"]["path"]["type"], "prefix_one_of");
+    let _ = fs::remove_file(&path);
+}
