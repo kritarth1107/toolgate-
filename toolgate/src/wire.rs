@@ -197,6 +197,14 @@ fn encode_constraint_value_to_wire(buf: &mut Vec<u8>, constraint: &Constraint) {
             buf.push(22);
             encode_sorted_unique_strings(buf, values);
         }
+        Constraint::ContainsAny(values) => {
+            buf.push(23);
+            encode_sorted_unique_strings(buf, values);
+        }
+        Constraint::ContainsNone(values) => {
+            buf.push(24);
+            encode_sorted_unique_strings(buf, values);
+        }
     }
 }
 
@@ -341,6 +349,8 @@ fn decode_constraint_value_from_wire(
         }
         21 => Constraint::PrefixOneOf(read_wire_string_list(data, pos)?),
         22 => Constraint::SuffixOneOf(read_wire_string_list(data, pos)?),
+        23 => Constraint::ContainsAny(read_wire_string_list(data, pos)?),
+        24 => Constraint::ContainsNone(read_wire_string_list(data, pos)?),
         _ => return Err(WireError::UnexpectedEof), // Invalid constraint type
     };
 

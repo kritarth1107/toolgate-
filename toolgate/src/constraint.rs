@@ -13,12 +13,17 @@
 //! `{"type":"float_range","value":{"min":...,"max":...}}`,
 //! `{"type":"len_range","value":{"min":...,"max":...}}`,
 //! `{"type":"char_len_range","value":{"min":...,"max":...}}`,
-//! `{"type":"prefix_one_of","value":["/tmp/","/var/"]}`, and
-//! `{"type":"suffix_one_of","value":[".txt",".md"]}`.
+//! `{"type":"prefix_one_of","value":["/tmp/","/var/"]}`,
+//! `{"type":"suffix_one_of","value":[".txt",".md"]}`,
+//! `{"type":"contains_any","value":["tmp","var"]}`, and
+//! `{"type":"contains_none","value":["secret","password"]}`.
 //! [`Constraint::PrefixOneOf`] requires the value to start with at least
 //! one listed UTF-8 prefix. [`Constraint::SuffixOneOf`] requires the value
-//! to end with at least one listed UTF-8 suffix. Empty lists and empty
-//! members are rejected at mint/validate and never match (fail closed).
+//! to end with at least one listed UTF-8 suffix. [`Constraint::ContainsAny`]
+//! requires the value to contain at least one listed UTF-8 needle.
+//! [`Constraint::ContainsNone`] requires the value to contain none of the
+//! listed UTF-8 needles. Empty lists and empty members are rejected at
+//! mint/validate and never match (fail closed).
 
 use std::collections::BTreeMap;
 
@@ -171,6 +176,28 @@ pub enum Constraint {
     /// JSON: `{"type":"suffix_one_of","value":[".txt",".md"]}`
     #[serde(rename = "suffix_one_of")]
     SuffixOneOf(Vec<String>),
+    /// Value must contain at least one of the listed UTF-8 substrings.
+    ///
+    /// Stored and encoded as sorted unique strings, the same spirit as [`OneOf`].
+    /// An empty list is rejected at mint/validate and never matches a
+    /// value (fail closed). An empty string in the list is rejected at
+    /// mint/validate and never matches (fail closed); an empty needle
+    /// would otherwise be a wildcard, the same spirit as [`Contains`].
+    ///
+    /// JSON: `{"type":"contains_any","value":["tmp","var"]}`
+    #[serde(rename = "contains_any")]
+    ContainsAny(Vec<String>),
+    /// Value must contain none of the listed UTF-8 substrings.
+    ///
+    /// Stored and encoded as sorted unique strings, the same spirit as [`NotOneOf`].
+    /// An empty list is rejected at mint/validate and never matches a
+    /// value (fail closed). An empty string in the list is rejected at
+    /// mint/validate and never matches (fail closed); an empty needle
+    /// would otherwise forbid nothing, the same spirit as [`NotContains`].
+    ///
+    /// JSON: `{"type":"contains_none","value":["secret","password"]}`
+    #[serde(rename = "contains_none")]
+    ContainsNone(Vec<String>),
 }
 
 impl PartialEq for Constraint {
@@ -238,6 +265,8 @@ impl PartialEq for Constraint {
             ) => a_min == b_min && a_max == b_max,
             (Constraint::PrefixOneOf(a), Constraint::PrefixOneOf(b)) => a == b,
             (Constraint::SuffixOneOf(a), Constraint::SuffixOneOf(b)) => a == b,
+            (Constraint::ContainsAny(a), Constraint::ContainsAny(b)) => a == b,
+            (Constraint::ContainsNone(a), Constraint::ContainsNone(b)) => a == b,
             _ => false,
         }
     }
@@ -317,15 +346,22 @@ impl Constraint {
             Constraint::SuffixOneOf(suffixes) => {
                 string_list_is_valid(suffixes) && suffixes.iter().any(|s| value.ends_with(s))
             }
+            Constraint::ContainsAny(needles) => {
+                string_list_is_valid(needles) && needles.iter().any(|n| value.contains(n))
+            }
+            Constraint::ContainsNone(needles) => {
+                string_list_is_valid(needles) && needles.iter().all(|n| !value.contains(n))
+            }
         }
     }
 
     /// Empty suffix/contains/matches/not_contains/not_prefix/not_suffix/
-    /// not_matches needles, empty NotOneOf denylists, empty PrefixOneOf
-    /// or SuffixOneOf lists (or a list containing an empty member), empty
-    /// All/Any composites, and a `Not` whose child is an empty pattern
-    /// match nothing and must not be treated as wildcards. A composite
-    /// that contains an empty child is also empty.
+    /// not_matches needles, empty NotOneOf denylists, empty PrefixOneOf,
+    /// SuffixOneOf, ContainsAny, or ContainsNone lists (or a list
+    /// containing an empty member), empty All/Any composites, and a
+    /// `Not` whose child is an empty pattern match nothing and must not
+    /// be treated as wildcards. A composite that contains an empty child
+    /// is also empty.
     pub fn is_empty_pattern(&self) -> bool {
         match self {
             Constraint::Suffix(value)
@@ -336,9 +372,10 @@ impl Constraint {
             | Constraint::NotSuffix(value)
             | Constraint::NotMatches(value) => value.is_empty(),
             Constraint::NotOneOf(denied) => denied.is_empty(),
-            Constraint::PrefixOneOf(values) | Constraint::SuffixOneOf(values) => {
-                !string_list_is_valid(values)
-            }
+            Constraint::PrefixOneOf(values)
+            | Constraint::SuffixOneOf(values)
+            | Constraint::ContainsAny(values)
+            | Constraint::ContainsNone(values) => !string_list_is_valid(values),
             Constraint::All(children) | Constraint::Any(children) => {
                 children.is_empty() || children.iter().any(|c| c.is_empty_pattern())
             }
@@ -450,6 +487,18 @@ impl Constraint {
             // at least one listed suffix.
             (Constraint::Exact(a), Constraint::SuffixOneOf(suffixes)) => {
                 string_list_is_valid(suffixes) && suffixes.iter().any(|s| a.ends_with(s))
+            }
+
+            // Exact is subset of ContainsAny if the value contains
+            // at least one listed needle.
+            (Constraint::Exact(a), Constraint::ContainsAny(needles)) => {
+                string_list_is_valid(needles) && needles.iter().any(|n| a.contains(n))
+            }
+
+            // Exact is subset of ContainsNone if the value contains
+            // none of the listed needles.
+            (Constraint::Exact(a), Constraint::ContainsNone(needles)) => {
+                string_list_is_valid(needles) && needles.iter().all(|n| !a.contains(n))
             }
 
             // Exact is subset of Suffix if the value ends with the suffix
@@ -591,6 +640,24 @@ impl Constraint {
                         .all(|v| suffixes.iter().any(|s| v.ends_with(s)))
             }
 
+            // OneOf is subset of ContainsAny if every allowed value
+            // contains at least one listed needle.
+            (Constraint::OneOf(values), Constraint::ContainsAny(needles)) => {
+                string_list_is_valid(needles)
+                    && !values.is_empty()
+                    && values.iter().all(|v| needles.iter().any(|n| v.contains(n)))
+            }
+
+            // OneOf is subset of ContainsNone if every allowed value
+            // avoids every listed needle.
+            (Constraint::OneOf(values), Constraint::ContainsNone(needles)) => {
+                string_list_is_valid(needles)
+                    && !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|v| needles.iter().all(|n| !v.contains(n)))
+            }
+
             // OneOf is subset of Suffix if every allowed value ends with the suffix
             (Constraint::OneOf(values), Constraint::Suffix(suffix)) => {
                 !suffix.is_empty() && values.iter().all(|v| v.ends_with(suffix))
@@ -689,6 +756,24 @@ impl Constraint {
                 string_list_is_valid(prefixes)
                     && !needle.is_empty()
                     && prefixes.iter().all(|p| p.contains(needle))
+            }
+
+            // Prefix is subset of ContainsAny if the prefix already
+            // contains at least one listed needle.
+            (Constraint::Prefix(prefix), Constraint::ContainsAny(needles)) => {
+                !prefix.is_empty()
+                    && string_list_is_valid(needles)
+                    && needles.iter().any(|n| prefix.contains(n))
+            }
+
+            // PrefixOneOf is subset of ContainsAny if every listed prefix
+            // already contains at least one listed needle.
+            (Constraint::PrefixOneOf(prefixes), Constraint::ContainsAny(needles)) => {
+                string_list_is_valid(prefixes)
+                    && string_list_is_valid(needles)
+                    && prefixes
+                        .iter()
+                        .all(|p| needles.iter().any(|n| p.contains(n)))
             }
 
             // Prefix is subset of MaxLen if... well, prefix doesn't constrain length
@@ -907,9 +992,58 @@ impl Constraint {
                     && suffixes.iter().all(|s| s.contains(needle))
             }
 
+            // Suffix is subset of ContainsAny if the suffix already
+            // contains at least one listed needle.
+            (Constraint::Suffix(suffix), Constraint::ContainsAny(needles)) => {
+                !suffix.is_empty()
+                    && string_list_is_valid(needles)
+                    && needles.iter().any(|n| suffix.contains(n))
+            }
+
+            // SuffixOneOf is subset of ContainsAny if every listed suffix
+            // already contains at least one listed needle.
+            (Constraint::SuffixOneOf(suffixes), Constraint::ContainsAny(needles)) => {
+                string_list_is_valid(suffixes)
+                    && string_list_is_valid(needles)
+                    && suffixes
+                        .iter()
+                        .all(|s| needles.iter().any(|n| s.contains(n)))
+            }
+
             // Contains is subset of Contains if new needle contains (specializes) old needle
             (Constraint::Contains(new), Constraint::Contains(old)) => {
                 !new.is_empty() && !old.is_empty() && new.contains(old)
+            }
+
+            // Contains is subset of ContainsAny if the needle specializes
+            // some listed parent needle.
+            (Constraint::Contains(needle), Constraint::ContainsAny(old)) => {
+                !needle.is_empty()
+                    && string_list_is_valid(old)
+                    && old.iter().any(|parent| needle.contains(parent))
+            }
+
+            // ContainsAny may replace Contains when every child needle
+            // specializes the old needle.
+            (Constraint::ContainsAny(new), Constraint::Contains(old)) => {
+                !old.is_empty()
+                    && string_list_is_valid(new)
+                    && new.iter().all(|child| child.contains(old))
+            }
+
+            // ContainsAny → ContainsAny: every child needle must contain
+            // (specialize) some parent needle. The child may only
+            // shrink/narrow the allowed set.
+            (Constraint::ContainsAny(new), Constraint::ContainsAny(old)) => {
+                contains_any_tightens(new, old)
+            }
+
+            // ContainsNone → ContainsNone: every old needle must be
+            // covered by a new needle that is a substring of it
+            // (shorter/equal forbids more). Extra needles (more denials)
+            // are allowed.
+            (Constraint::ContainsNone(new), Constraint::ContainsNone(old)) => {
+                contains_none_tightens(new, old)
             }
 
             // NotEquals → NotEquals only if the forbidden value is unchanged
@@ -929,6 +1063,23 @@ impl Constraint {
             // (shorter/equal needle forbids more values)
             (Constraint::NotContains(new), Constraint::NotContains(old)) => {
                 !new.is_empty() && !old.is_empty() && old.contains(new)
+            }
+
+            // NotContains is subset of ContainsNone when avoiding the
+            // needle still forbids every listed parent needle.
+            (Constraint::NotContains(needle), Constraint::ContainsNone(old)) => {
+                !needle.is_empty()
+                    && string_list_is_valid(old)
+                    && old.iter().all(|parent| parent.contains(needle))
+            }
+
+            // ContainsNone may replace NotContains when some new needle
+            // is a substring of the old (covers that denial); extra
+            // needles tighten further.
+            (Constraint::ContainsNone(new), Constraint::NotContains(old)) => {
+                !old.is_empty()
+                    && string_list_is_valid(new)
+                    && new.iter().any(|child| old.contains(child))
             }
 
             // NotPrefix → NotPrefix if the new prefix is a prefix of the old
@@ -973,6 +1124,20 @@ impl Constraint {
                 !needle.is_empty()
                     && !denied.is_empty()
                     && denied.iter().all(|v| v.contains(needle))
+            }
+
+            // ContainsNone may replace NotEquals when avoiding some
+            // needle still forbids that exact value.
+            (Constraint::ContainsNone(needles), Constraint::NotEquals(forbidden)) => {
+                string_list_is_valid(needles) && needles.iter().any(|n| forbidden.contains(n))
+            }
+
+            // ContainsNone may replace NotOneOf when every denied value
+            // contains at least one needle.
+            (Constraint::ContainsNone(needles), Constraint::NotOneOf(denied)) => {
+                string_list_is_valid(needles)
+                    && !denied.is_empty()
+                    && denied.iter().all(|v| needles.iter().any(|n| v.contains(n)))
             }
 
             // NotPrefix may replace NotOneOf when every denied value starts
@@ -1127,10 +1292,32 @@ fn len_range_is_valid(min: usize, max: usize) -> bool {
     min <= max
 }
 
-/// PrefixOneOf / SuffixOneOf lists are valid only when non-empty and
-/// every member is a non-empty string (empty members are wildcards).
+/// PrefixOneOf / SuffixOneOf / ContainsAny / ContainsNone lists are
+/// valid only when non-empty and every member is a non-empty string
+/// (empty members are wildcards or empty denials).
 fn string_list_is_valid(values: &[String]) -> bool {
     !values.is_empty() && values.iter().all(|s| !s.is_empty())
+}
+
+/// Every child needle contains (specializes) some parent needle.
+/// Empty lists fail closed.
+fn contains_any_tightens(new: &[String], old: &[String]) -> bool {
+    string_list_is_valid(new)
+        && string_list_is_valid(old)
+        && new
+            .iter()
+            .all(|child| old.iter().any(|parent| child.contains(parent)))
+}
+
+/// Every old needle is covered by a new needle that is a substring of
+/// it (shorter/equal forbids more). Extra new needles are allowed.
+/// Empty lists fail closed.
+fn contains_none_tightens(new: &[String], old: &[String]) -> bool {
+    string_list_is_valid(new)
+        && string_list_is_valid(old)
+        && old
+            .iter()
+            .all(|parent| new.iter().any(|child| parent.contains(child)))
 }
 
 /// Every child prefix equals some parent prefix or is a strict

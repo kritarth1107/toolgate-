@@ -408,6 +408,14 @@ fn encode_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
             buf.push(22); // type = SuffixOneOf
             encode_sorted_unique_strings(buf, values);
         }
+        Constraint::ContainsAny(values) => {
+            buf.push(23); // type = ContainsAny
+            encode_sorted_unique_strings(buf, values);
+        }
+        Constraint::ContainsNone(values) => {
+            buf.push(24); // type = ContainsNone
+            encode_sorted_unique_strings(buf, values);
+        }
     }
 }
 
