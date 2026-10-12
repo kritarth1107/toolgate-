@@ -17,7 +17,7 @@
 //! | audience | u16 length + UTF-8 bytes (0 = none) |
 //! | kid | u16 length + UTF-8 bytes (0 = none) |
 //! | constraints_count | u16 (0 = none) |
-//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone) |
+//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone) |
 //! | jti | u16 length + UTF-8 bytes (0 = none) |
 //! | nbf_flag | u8 (v5 only; 0 = none, 1 = present) |
 //! | nbf | u64 (v5 only, if nbf_flag = 1) |
@@ -205,6 +205,14 @@ fn encode_constraint_value_to_wire(buf: &mut Vec<u8>, constraint: &Constraint) {
             buf.push(24);
             encode_sorted_unique_strings(buf, values);
         }
+        Constraint::MatchesAny(values) => {
+            buf.push(25);
+            encode_sorted_unique_strings(buf, values);
+        }
+        Constraint::MatchesNone(values) => {
+            buf.push(26);
+            encode_sorted_unique_strings(buf, values);
+        }
     }
 }
 
@@ -351,6 +359,8 @@ fn decode_constraint_value_from_wire(
         22 => Constraint::SuffixOneOf(read_wire_string_list(data, pos)?),
         23 => Constraint::ContainsAny(read_wire_string_list(data, pos)?),
         24 => Constraint::ContainsNone(read_wire_string_list(data, pos)?),
+        25 => Constraint::MatchesAny(read_wire_string_list(data, pos)?),
+        26 => Constraint::MatchesNone(read_wire_string_list(data, pos)?),
         _ => return Err(WireError::UnexpectedEof), // Invalid constraint type
     };
 
@@ -1434,6 +1444,138 @@ mod tests {
             }
             other => panic!("expected ContainsAny, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn wire_roundtrip_constraint_matches_any() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "file".to_string(),
+            Constraint::MatchesAny(vec!["*.md".to_string(), "*.txt".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["file".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+        assert!(
+            wire.windows(7)
+                .any(|w| w == [0x00, 0x04, b'f', b'i', b'l', b'e', 25]),
+            "wire must include MatchesAny type tag 25 after key file"
+        );
+    }
+
+    #[test]
+    fn wire_roundtrip_constraint_matches_none() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "skip".to_string(),
+            Constraint::MatchesNone(vec!["*.bak".to_string(), "*.tmp".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["skip".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+        assert!(
+            wire.windows(7)
+                .any(|w| w == [0x00, 0x04, b's', b'k', b'i', b'p', 26]),
+            "wire must include MatchesNone type tag 26 after key skip"
+        );
+    }
+
+    #[test]
+    fn wire_matches_any_sorts_and_uniques() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "file".to_string(),
+            Constraint::MatchesAny(vec![
+                "*.md".to_string(),
+                "*.txt".to_string(),
+                "*.md".to_string(),
+            ]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["file".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let decoded = Token::from_wire(&token.to_wire()).unwrap();
+        match decoded.constraints.as_ref().unwrap().get("file").unwrap() {
+            Constraint::MatchesAny(values) => {
+                assert_eq!(values, &vec!["*.md".to_string(), "*.txt".to_string()]);
+            }
+            other => panic!("expected MatchesAny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wire_without_matches_any_keeps_prior_type_tags() {
+        // Tokens that do not use MatchesAny/MatchesNone must keep the 0.27.0 tags.
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "note".to_string(),
+            Constraint::ContainsAny(vec!["tmp".to_string(), "var".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["note".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(
+            wire.windows(7)
+                .any(|w| w == [0x00, 0x04, b'n', b'o', b't', b'e', 23]),
+            "wire must keep ContainsAny type tag 23"
+        );
     }
 
     #[test]
