@@ -7,7 +7,7 @@
   "tools": [
     {
       "name": "read_file",
-      "arg_keys": ["path", "roots", "limit", "score", "query", "title", "ext", "note", "memo"],
+      "arg_keys": ["path", "roots", "limit", "score", "query", "title", "ext", "note", "memo", "file", "skip"],
       "constraints": {
         "path": { "type": "prefix", "value": "/tmp/" },
         "roots": { "type": "prefix_one_of", "value": ["/tmp/", "/var/"] },
@@ -17,7 +17,9 @@
         "title": { "type": "char_len_range", "value": { "min": 1, "max": 16 } },
         "ext": { "type": "suffix_one_of", "value": [".txt", ".md"] },
         "note": { "type": "contains_any", "value": ["tmp", "var"] },
-        "memo": { "type": "contains_none", "value": ["secret", "password"] }
+        "memo": { "type": "contains_none", "value": ["secret", "password"] },
+        "file": { "type": "matches_any", "value": ["*.txt", "*.md"] },
+        "skip": { "type": "matches_none", "value": ["*.tmp", "*.bak"] }
       }
     },
     {
