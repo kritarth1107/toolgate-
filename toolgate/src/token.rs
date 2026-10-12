@@ -4074,6 +4074,229 @@ mod tests {
     }
 
     #[test]
+    fn attenuation_can_tighten_contains_any() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "note".to_string(),
+            Constraint::ContainsAny(vec!["tmp".to_string(), "var".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["note".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut tighter: BTreeMap<String, Constraint> = BTreeMap::new();
+        tighter.insert(
+            "note".to_string(),
+            Constraint::ContainsAny(vec!["tmp/public".to_string()]),
+        );
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(tighter))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("note"),
+            Some(&Constraint::ContainsAny(vec!["tmp/public".to_string()]))
+        );
+        assert!(attenuated.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn attenuation_cannot_widen_contains_any() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "note".to_string(),
+            Constraint::ContainsAny(vec!["tmp".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["note".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut wider: BTreeMap<String, Constraint> = BTreeMap::new();
+        wider.insert(
+            "note".to_string(),
+            Constraint::ContainsAny(vec!["tmp".to_string(), "var".to_string()]),
+        );
+        assert_eq!(
+            token.attenuate_with_constraints(SECRET, None, None, Some(wider)),
+            Err(TokenError::AttenuationWidens)
+        );
+
+        let mut outside: BTreeMap<String, Constraint> = BTreeMap::new();
+        outside.insert(
+            "note".to_string(),
+            Constraint::ContainsAny(vec!["home".to_string()]),
+        );
+        assert_eq!(
+            token.attenuate_with_constraints(SECRET, None, None, Some(outside)),
+            Err(TokenError::AttenuationWidens)
+        );
+    }
+
+    #[test]
+    fn attenuation_can_tighten_contains_none() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "memo".to_string(),
+            Constraint::ContainsNone(vec!["secret".to_string(), "password".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "write_note",
+            vec!["memo".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut tighter: BTreeMap<String, Constraint> = BTreeMap::new();
+        tighter.insert(
+            "memo".to_string(),
+            Constraint::ContainsNone(vec![
+                "sec".to_string(),
+                "password".to_string(),
+                "token".to_string(),
+            ]),
+        );
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(tighter))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("memo"),
+            Some(&Constraint::ContainsNone(vec![
+                "sec".to_string(),
+                "password".to_string(),
+                "token".to_string()
+            ]))
+        );
+    }
+
+    #[test]
+    fn attenuation_cannot_widen_contains_none() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "memo".to_string(),
+            Constraint::ContainsNone(vec!["secret".to_string(), "password".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "write_note",
+            vec!["memo".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut wider: BTreeMap<String, Constraint> = BTreeMap::new();
+        wider.insert(
+            "memo".to_string(),
+            Constraint::ContainsNone(vec!["secret".to_string()]),
+        );
+        assert_eq!(
+            token.attenuate_with_constraints(SECRET, None, None, Some(wider)),
+            Err(TokenError::AttenuationWidens)
+        );
+    }
+
+    #[test]
+    fn attenuation_exact_can_replace_contains_any() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "note".to_string(),
+            Constraint::ContainsAny(vec!["tmp".to_string(), "var".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["note".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut exact: BTreeMap<String, Constraint> = BTreeMap::new();
+        exact.insert("note".to_string(), Constraint::Exact("/tmp/a".to_string()));
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(exact))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("note"),
+            Some(&Constraint::Exact("/tmp/a".to_string()))
+        );
+
+        let mut bad: BTreeMap<String, Constraint> = BTreeMap::new();
+        bad.insert("note".to_string(), Constraint::Exact("/home/a".to_string()));
+        assert_eq!(
+            token.attenuate_with_constraints(SECRET, None, None, Some(bad)),
+            Err(TokenError::AttenuationWidens)
+        );
+    }
+
+    #[test]
+    fn attenuation_empty_contains_any_fails_closed() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "note".to_string(),
+            Constraint::ContainsAny(vec!["tmp".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["note".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut empty: BTreeMap<String, Constraint> = BTreeMap::new();
+        empty.insert("note".to_string(), Constraint::ContainsAny(vec![]));
+        assert_eq!(
+            token.attenuate_with_constraints(SECRET, None, None, Some(empty)),
+            Err(TokenError::AttenuationWidens)
+        );
+    }
+
+    #[test]
     fn attenuation_can_tighten_suffix() {
         use crate::constraint::Constraint;
         use std::collections::BTreeMap;
@@ -5182,6 +5405,149 @@ mod tests {
         args.insert("path".to_string(), "/tmp/a".to_string());
         args.insert("name".to_string(), "notes.txt".to_string());
         let result = token.verify_call_with_args(SECRET, 1999999999, "file_op", &args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { .. })
+        ));
+    }
+
+    #[test]
+    fn verify_call_with_args_contains_any_satisfied() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert(
+            "note".to_string(),
+            Constraint::ContainsAny(vec!["tmp".to_string(), "var".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["note".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("note".to_string(), "/var/log/app".to_string());
+        assert!(token
+            .verify_call_with_args(SECRET, 1999999999, "search", &args, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_call_with_args_contains_any_violated() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert(
+            "note".to_string(),
+            Constraint::ContainsAny(vec!["tmp".to_string(), "var".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["note".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("note".to_string(), "/home/x".to_string());
+        let result = token.verify_call_with_args(SECRET, 1999999999, "search", &args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { key }) if key == "note"
+        ));
+    }
+
+    #[test]
+    fn verify_call_with_args_contains_none_satisfied() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert(
+            "memo".to_string(),
+            Constraint::ContainsNone(vec!["secret".to_string(), "password".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "write_note",
+            vec!["memo".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("memo".to_string(), "ok-note".to_string());
+        assert!(token
+            .verify_call_with_args(SECRET, 1999999999, "write_note", &args, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_call_with_args_contains_none_violated() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert(
+            "memo".to_string(),
+            Constraint::ContainsNone(vec!["secret".to_string(), "password".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "write_note",
+            vec!["memo".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("memo".to_string(), "has-secret".to_string());
+        let result = token.verify_call_with_args(SECRET, 1999999999, "write_note", &args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { key }) if key == "memo"
+        ));
+    }
+
+    #[test]
+    fn verify_call_with_args_empty_contains_any_fail_closed() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("note".to_string(), Constraint::ContainsAny(vec![]));
+        constraints.insert(
+            "memo".to_string(),
+            Constraint::ContainsNone(vec![String::new()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "note_op",
+            vec!["note".into(), "memo".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("note".to_string(), "tmp".to_string());
+        args.insert("memo".to_string(), "ok".to_string());
+        let result = token.verify_call_with_args(SECRET, 1999999999, "note_op", &args, None);
         assert!(matches!(
             result,
             Err(TokenError::ConstraintViolation { .. })

@@ -1439,6 +1439,30 @@ mod tests {
     }
 
     #[test]
+    fn contains_any_check() {
+        let c = Constraint::ContainsAny(vec!["tmp".to_string(), "var".to_string()]);
+        assert!(c.check("/tmp/file"));
+        assert!(c.check("tmp"));
+        assert!(c.check("/var/log"));
+        assert!(c.check("atmpb"));
+        assert!(!c.check("/home/file"));
+        assert!(!c.check("TMP"));
+        assert!(!c.check(""));
+    }
+
+    #[test]
+    fn contains_none_check() {
+        let c = Constraint::ContainsNone(vec!["secret".to_string(), "password".to_string()]);
+        assert!(c.check("/var/file"));
+        assert!(c.check("ok"));
+        assert!(c.check(""));
+        assert!(c.check("SECRET"));
+        assert!(!c.check("has-secret"));
+        assert!(!c.check("password"));
+        assert!(!c.check("my-password-here"));
+    }
+
+    #[test]
     fn maxlen_check() {
         let c = Constraint::MaxLen(5);
         assert!(c.check("hello"));
@@ -1770,6 +1794,34 @@ mod tests {
     }
 
     #[test]
+    fn empty_contains_any_fail_closed() {
+        let empty_list = Constraint::ContainsAny(vec![]);
+        let empty_member = Constraint::ContainsAny(vec![String::new()]);
+        let mixed = Constraint::ContainsAny(vec!["tmp".to_string(), String::new()]);
+        for c in [&empty_list, &empty_member, &mixed] {
+            assert!(c.is_empty_pattern());
+            assert!(!c.check(""));
+            assert!(!c.check("/tmp/foo"));
+            assert!(!c.check("anything"));
+        }
+        assert!(!Constraint::ContainsAny(vec!["tmp".to_string()]).is_empty_pattern());
+    }
+
+    #[test]
+    fn empty_contains_none_fail_closed() {
+        let empty_list = Constraint::ContainsNone(vec![]);
+        let empty_member = Constraint::ContainsNone(vec![String::new()]);
+        let mixed = Constraint::ContainsNone(vec!["secret".to_string(), String::new()]);
+        for c in [&empty_list, &empty_member, &mixed] {
+            assert!(c.is_empty_pattern());
+            assert!(!c.check(""));
+            assert!(!c.check("ok"));
+            assert!(!c.check("anything"));
+        }
+        assert!(!Constraint::ContainsNone(vec!["secret".to_string()]).is_empty_pattern());
+    }
+
+    #[test]
     fn not_contains_check() {
         let c = Constraint::NotContains("tmp".to_string());
         assert!(c.check("/var/file"));
@@ -1991,6 +2043,114 @@ mod tests {
         );
         assert!(
             !Constraint::OneOf(vec!["a.txt".to_string(), "b.rs".to_string()]).is_subset_of(&parent)
+        );
+    }
+
+    #[test]
+    fn contains_any_subset_tightens_only() {
+        let parent = Constraint::ContainsAny(vec!["tmp".to_string(), "var".to_string()]);
+        let shrink = Constraint::ContainsAny(vec!["tmp".to_string()]);
+        let extend = Constraint::ContainsAny(vec!["tmp/public".to_string(), "var/log".to_string()]);
+        let same = Constraint::ContainsAny(vec!["tmp".to_string(), "var".to_string()]);
+        let widen = Constraint::ContainsAny(vec!["tm".to_string()]);
+        let outside = Constraint::ContainsAny(vec!["home".to_string()]);
+        let empty = Constraint::ContainsAny(vec![]);
+        let empty_member = Constraint::ContainsAny(vec!["tmp".to_string(), String::new()]);
+
+        assert!(shrink.is_subset_of(&parent));
+        assert!(extend.is_subset_of(&parent));
+        assert!(same.is_subset_of(&parent));
+        assert!(!widen.is_subset_of(&parent));
+        assert!(!outside.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&shrink));
+        assert!(!empty.is_subset_of(&parent));
+        assert!(!empty_member.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&empty));
+
+        assert!(Constraint::Contains("tmp/public".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Contains("tm".to_string()).is_subset_of(&parent));
+        assert!(Constraint::ContainsAny(vec!["tmp/public".to_string()])
+            .is_subset_of(&Constraint::Contains("tmp".to_string())));
+        assert!(
+            !Constraint::ContainsAny(vec!["tmp".to_string(), "var".to_string()])
+                .is_subset_of(&Constraint::Contains("tmp".to_string()))
+        );
+
+        assert!(Constraint::Prefix("/tmp/".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Prefix("/home/".to_string()).is_subset_of(&parent));
+        assert!(Constraint::Suffix("/tmp/out".to_string()).is_subset_of(&parent));
+        assert!(
+            Constraint::PrefixOneOf(vec!["/tmp/".to_string(), "/var/".to_string()])
+                .is_subset_of(&parent)
+        );
+        assert!(
+            !Constraint::PrefixOneOf(vec!["/tmp/".to_string(), "/home/".to_string()])
+                .is_subset_of(&parent)
+        );
+
+        assert!(Constraint::Exact("/tmp/a".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("/home/a".to_string()).is_subset_of(&parent));
+        assert!(
+            Constraint::OneOf(vec!["/tmp/a".to_string(), "/var/b".to_string()])
+                .is_subset_of(&parent)
+        );
+        assert!(
+            !Constraint::OneOf(vec!["/tmp/a".to_string(), "/home/b".to_string()])
+                .is_subset_of(&parent)
+        );
+    }
+
+    #[test]
+    fn contains_none_subset_tightens_only() {
+        let parent = Constraint::ContainsNone(vec!["secret".to_string(), "password".to_string()]);
+        let grow = Constraint::ContainsNone(vec![
+            "secret".to_string(),
+            "password".to_string(),
+            "token".to_string(),
+        ]);
+        let shorten = Constraint::ContainsNone(vec!["sec".to_string(), "pass".to_string()]);
+        let same = Constraint::ContainsNone(vec!["secret".to_string(), "password".to_string()]);
+        let drop = Constraint::ContainsNone(vec!["secret".to_string()]);
+        let specialize = Constraint::ContainsNone(vec!["secret123".to_string()]);
+        let empty = Constraint::ContainsNone(vec![]);
+        let empty_member = Constraint::ContainsNone(vec!["secret".to_string(), String::new()]);
+
+        assert!(grow.is_subset_of(&parent));
+        assert!(shorten.is_subset_of(&parent));
+        assert!(same.is_subset_of(&parent));
+        assert!(!drop.is_subset_of(&parent));
+        assert!(!specialize.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&grow));
+        assert!(parent.is_subset_of(&drop));
+        assert!(!empty.is_subset_of(&parent));
+        assert!(!empty_member.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&empty));
+
+        assert!(Constraint::NotContains("s".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::NotContains("secret".to_string()).is_subset_of(&parent));
+        assert!(
+            Constraint::ContainsNone(vec!["secret".to_string(), "token".to_string()])
+                .is_subset_of(&Constraint::NotContains("secret".to_string()))
+        );
+        assert!(!Constraint::ContainsNone(vec!["secret123".to_string()])
+            .is_subset_of(&Constraint::NotContains("secret".to_string())));
+
+        assert!(Constraint::Exact("ok".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("has-secret".to_string()).is_subset_of(&parent));
+        assert!(
+            Constraint::OneOf(vec!["ok".to_string(), "fine".to_string()]).is_subset_of(&parent)
+        );
+        assert!(
+            !Constraint::OneOf(vec!["ok".to_string(), "password".to_string()])
+                .is_subset_of(&parent)
+        );
+
+        assert!(Constraint::ContainsNone(vec!["admin".to_string()])
+            .is_subset_of(&Constraint::NotEquals("admin".to_string())));
+        assert!(
+            Constraint::ContainsNone(vec!["admin".to_string()]).is_subset_of(
+                &Constraint::NotOneOf(vec!["admin".to_string(), "administrator".to_string()])
+            )
         );
     }
 
@@ -2612,6 +2772,39 @@ mod tests {
     }
 
     #[test]
+    fn json_contains_any() {
+        let c = Constraint::ContainsAny(vec!["tmp".to_string(), "var".to_string()]);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"contains_any\""));
+        assert!(json.contains("\"tmp\""));
+        assert!(json.contains("\"var\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"contains_any","value":["tmp","var"]}"#).unwrap();
+        assert_eq!(from_cli, c);
+    }
+
+    #[test]
+    fn json_contains_none() {
+        let c = Constraint::ContainsNone(vec!["secret".to_string(), "password".to_string()]);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"contains_none\""));
+        assert!(json.contains("\"secret\""));
+        assert!(json.contains("\"password\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"contains_none","value":["secret","password"]}"#)
+                .unwrap();
+        assert_eq!(from_cli, c);
+    }
+
+    #[test]
     fn json_suffix() {
         let c = Constraint::Suffix(".txt".to_string());
         let json = serde_json::to_string(&c).unwrap();
@@ -2828,6 +3021,12 @@ mod tests {
         let not_empty = Constraint::Not(Box::new(Constraint::SuffixOneOf(vec![String::new()])));
         assert!(not_empty.is_empty_pattern());
         assert!(!not_empty.check("notes.txt"));
+        let any_empty = Constraint::All(vec![Constraint::ContainsAny(vec![])]);
+        assert!(any_empty.is_empty_pattern());
+        assert!(!any_empty.check("tmp"));
+        let none_empty = Constraint::Not(Box::new(Constraint::ContainsNone(vec![String::new()])));
+        assert!(none_empty.is_empty_pattern());
+        assert!(!none_empty.check("ok"));
         assert!(!all.check("/tmp/a.txt"));
         assert!(!any.check("notes.txt"));
     }
