@@ -15,17 +15,21 @@
 //! `{"type":"char_len_range","value":{"min":...,"max":...}}`,
 //! `{"type":"prefix_one_of","value":["/tmp/","/var/"]}`,
 //! `{"type":"suffix_one_of","value":[".txt",".md"]}`,
-//! `{"type":"contains_any","value":["tmp","var"]}`, and
-//! `{"type":"contains_none","value":["secret","password"]}`.
+//! `{"type":"contains_any","value":["tmp","var"]}`,
+//! `{"type":"contains_none","value":["secret","password"]}`,
+//! `{"type":"matches_any","value":["*.txt","*.md"]}`, and
+//! `{"type":"matches_none","value":["*.tmp","*.bak"]}`.
 //! [`Constraint::PrefixOneOf`] requires the value to start with at least
 //! one listed UTF-8 prefix. [`Constraint::SuffixOneOf`] requires the value
 //! to end with at least one listed UTF-8 suffix. [`Constraint::ContainsAny`]
 //! requires the value to contain at least one listed UTF-8 needle.
 //! [`Constraint::ContainsNone`] requires the value to contain none of the
-//! listed UTF-8 needles. Empty lists and empty members are rejected at
-//! mint/validate and never match (fail closed).
+//! listed UTF-8 needles. [`Constraint::MatchesAny`] requires the value to
+//! match at least one listed `*` / `?` glob. [`Constraint::MatchesNone`]
+//! requires the value to match none of the listed globs. Empty lists and
+//! empty members are rejected at mint/validate and never match (fail closed).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A constraint on an argument's value.
 ///
@@ -198,6 +202,32 @@ pub enum Constraint {
     /// JSON: `{"type":"contains_none","value":["secret","password"]}`
     #[serde(rename = "contains_none")]
     ContainsNone(Vec<String>),
+    /// Value must match at least one listed simple glob over Unicode scalars.
+    ///
+    /// Same glob rules as [`Matches`] (`*` any sequence including empty;
+    /// `?` one Unicode scalar; every other character is literal — not a
+    /// regex). Stored and encoded as sorted unique strings, the same
+    /// spirit as [`OneOf`]. An empty list is rejected at mint/validate
+    /// and never matches a value (fail closed). An empty string in the
+    /// list is rejected at mint/validate and never matches (fail closed);
+    /// an empty glob would otherwise be a wildcard.
+    ///
+    /// JSON: `{"type":"matches_any","value":["*.txt","*.md"]}`
+    #[serde(rename = "matches_any")]
+    MatchesAny(Vec<String>),
+    /// Value must match none of the listed simple globs over Unicode scalars.
+    ///
+    /// Same glob rules as [`NotMatches`] (`*` and `?` only; other
+    /// characters are literal), inverted over a list. Stored and encoded
+    /// as sorted unique strings, the same spirit as [`NotOneOf`]. An
+    /// empty list is rejected at mint/validate and never matches a value
+    /// (fail closed). An empty string in the list is rejected at
+    /// mint/validate and never matches (fail closed); an empty glob
+    /// would otherwise forbid nothing.
+    ///
+    /// JSON: `{"type":"matches_none","value":["*.tmp","*.bak"]}`
+    #[serde(rename = "matches_none")]
+    MatchesNone(Vec<String>),
 }
 
 impl PartialEq for Constraint {
@@ -267,6 +297,8 @@ impl PartialEq for Constraint {
             (Constraint::SuffixOneOf(a), Constraint::SuffixOneOf(b)) => a == b,
             (Constraint::ContainsAny(a), Constraint::ContainsAny(b)) => a == b,
             (Constraint::ContainsNone(a), Constraint::ContainsNone(b)) => a == b,
+            (Constraint::MatchesAny(a), Constraint::MatchesAny(b)) => a == b,
+            (Constraint::MatchesNone(a), Constraint::MatchesNone(b)) => a == b,
             _ => false,
         }
     }
@@ -352,16 +384,22 @@ impl Constraint {
             Constraint::ContainsNone(needles) => {
                 string_list_is_valid(needles) && needles.iter().all(|n| !value.contains(n))
             }
+            Constraint::MatchesAny(patterns) => {
+                string_list_is_valid(patterns) && patterns.iter().any(|p| glob_match(p, value))
+            }
+            Constraint::MatchesNone(patterns) => {
+                string_list_is_valid(patterns) && patterns.iter().all(|p| !glob_match(p, value))
+            }
         }
     }
 
     /// Empty suffix/contains/matches/not_contains/not_prefix/not_suffix/
     /// not_matches needles, empty NotOneOf denylists, empty PrefixOneOf,
-    /// SuffixOneOf, ContainsAny, or ContainsNone lists (or a list
-    /// containing an empty member), empty All/Any composites, and a
-    /// `Not` whose child is an empty pattern match nothing and must not
-    /// be treated as wildcards. A composite that contains an empty child
-    /// is also empty.
+    /// SuffixOneOf, ContainsAny, ContainsNone, MatchesAny, or MatchesNone
+    /// lists (or a list containing an empty member), empty All/Any
+    /// composites, and a `Not` whose child is an empty pattern match
+    /// nothing and must not be treated as wildcards. A composite that
+    /// contains an empty child is also empty.
     pub fn is_empty_pattern(&self) -> bool {
         match self {
             Constraint::Suffix(value)
@@ -375,7 +413,9 @@ impl Constraint {
             Constraint::PrefixOneOf(values)
             | Constraint::SuffixOneOf(values)
             | Constraint::ContainsAny(values)
-            | Constraint::ContainsNone(values) => !string_list_is_valid(values),
+            | Constraint::ContainsNone(values)
+            | Constraint::MatchesAny(values)
+            | Constraint::MatchesNone(values) => !string_list_is_valid(values),
             Constraint::All(children) | Constraint::Any(children) => {
                 children.is_empty() || children.iter().any(|c| c.is_empty_pattern())
             }
@@ -499,6 +539,18 @@ impl Constraint {
             // none of the listed needles.
             (Constraint::Exact(a), Constraint::ContainsNone(needles)) => {
                 string_list_is_valid(needles) && needles.iter().all(|n| !a.contains(n))
+            }
+
+            // Exact is subset of MatchesAny if the value matches at
+            // least one listed glob.
+            (Constraint::Exact(a), Constraint::MatchesAny(patterns)) => {
+                string_list_is_valid(patterns) && patterns.iter().any(|p| glob_match(p, a))
+            }
+
+            // Exact is subset of MatchesNone if the value matches none
+            // of the listed globs.
+            (Constraint::Exact(a), Constraint::MatchesNone(patterns)) => {
+                string_list_is_valid(patterns) && patterns.iter().all(|p| !glob_match(p, a))
             }
 
             // Exact is subset of Suffix if the value ends with the suffix
@@ -658,6 +710,26 @@ impl Constraint {
                         .all(|v| needles.iter().all(|n| !v.contains(n)))
             }
 
+            // OneOf is subset of MatchesAny if every allowed value
+            // matches at least one listed glob.
+            (Constraint::OneOf(values), Constraint::MatchesAny(patterns)) => {
+                string_list_is_valid(patterns)
+                    && !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|v| patterns.iter().any(|p| glob_match(p, v)))
+            }
+
+            // OneOf is subset of MatchesNone if every allowed value
+            // matches none of the listed globs.
+            (Constraint::OneOf(values), Constraint::MatchesNone(patterns)) => {
+                string_list_is_valid(patterns)
+                    && !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|v| patterns.iter().all(|p| !glob_match(p, v)))
+            }
+
             // OneOf is subset of Suffix if every allowed value ends with the suffix
             (Constraint::OneOf(values), Constraint::Suffix(suffix)) => {
                 !suffix.is_empty() && values.iter().all(|v| v.ends_with(suffix))
@@ -790,6 +862,36 @@ impl Constraint {
             // Exact is the supported tightening path.
             (Constraint::Matches(new), Constraint::Matches(old)) => {
                 !new.is_empty() && !old.is_empty() && new == old
+            }
+
+            // Matches is subset of MatchesAny if the single pattern
+            // specializes some listed parent glob.
+            (Constraint::Matches(pattern), Constraint::MatchesAny(old)) => {
+                !pattern.is_empty()
+                    && string_list_is_valid(old)
+                    && old.iter().any(|parent| glob_specializes(pattern, parent))
+            }
+
+            // MatchesAny may replace Matches when every child pattern
+            // specializes the old glob.
+            (Constraint::MatchesAny(new), Constraint::Matches(old)) => {
+                !old.is_empty()
+                    && string_list_is_valid(new)
+                    && new.iter().all(|child| glob_specializes(child, old))
+            }
+
+            // MatchesAny → MatchesAny: every child pattern must
+            // specialize/narrow some parent pattern. The child may
+            // only shrink the allowed set. Unclear pairs fail closed.
+            (Constraint::MatchesAny(new), Constraint::MatchesAny(old)) => {
+                matches_any_tightens(new, old)
+            }
+
+            // MatchesNone → MatchesNone: every old glob must stay
+            // covered by a new denial that is at least as broad
+            // (L(old) ⊆ L(new)). Extra denials are allowed.
+            (Constraint::MatchesNone(new), Constraint::MatchesNone(old)) => {
+                matches_none_tightens(new, old)
             }
 
             // MaxLen is NOT a subset of Prefix (can have values not starting with prefix)
@@ -1160,6 +1262,24 @@ impl Constraint {
                 !new.is_empty() && !old.is_empty() && new == old
             }
 
+            // NotMatches is subset of MatchesNone when avoiding the
+            // glob still forbids every listed parent glob
+            // (L(parent) ⊆ L(pattern) for every parent).
+            (Constraint::NotMatches(pattern), Constraint::MatchesNone(old)) => {
+                !pattern.is_empty()
+                    && string_list_is_valid(old)
+                    && old.iter().all(|parent| glob_specializes(parent, pattern))
+            }
+
+            // MatchesNone may replace NotMatches when some new glob is
+            // at least as broad as the old denial; extra globs tighten
+            // further.
+            (Constraint::MatchesNone(new), Constraint::NotMatches(old)) => {
+                !old.is_empty()
+                    && string_list_is_valid(new)
+                    && new.iter().any(|child| glob_specializes(old, child))
+            }
+
             // Suffix is subset of NotSuffix when the required suffix and the
             // forbidden suffix cannot both hold (incomparable suffixes).
             (Constraint::Suffix(suffix), Constraint::NotSuffix(forbidden)) => {
@@ -1204,6 +1324,22 @@ impl Constraint {
                 !pattern.is_empty()
                     && !denied.is_empty()
                     && denied.iter().all(|v| glob_match(pattern, v))
+            }
+
+            // MatchesNone may replace NotEquals when avoiding some
+            // glob still forbids that exact value.
+            (Constraint::MatchesNone(patterns), Constraint::NotEquals(forbidden)) => {
+                string_list_is_valid(patterns) && patterns.iter().any(|p| glob_match(p, forbidden))
+            }
+
+            // MatchesNone may replace NotOneOf when every denied value
+            // matches at least one listed glob.
+            (Constraint::MatchesNone(patterns), Constraint::NotOneOf(denied)) => {
+                string_list_is_valid(patterns)
+                    && !denied.is_empty()
+                    && denied
+                        .iter()
+                        .all(|v| patterns.iter().any(|p| glob_match(p, v)))
             }
 
             // Not → Not: widening the inner constraint strengthens the
@@ -1292,9 +1428,9 @@ fn len_range_is_valid(min: usize, max: usize) -> bool {
     min <= max
 }
 
-/// PrefixOneOf / SuffixOneOf / ContainsAny / ContainsNone lists are
-/// valid only when non-empty and every member is a non-empty string
-/// (empty members are wildcards or empty denials).
+/// PrefixOneOf / SuffixOneOf / ContainsAny / ContainsNone / MatchesAny /
+/// MatchesNone lists are valid only when non-empty and every member is
+/// a non-empty string (empty members are wildcards or empty denials).
 fn string_list_is_valid(values: &[String]) -> bool {
     !values.is_empty() && values.iter().all(|s| !s.is_empty())
 }
@@ -1338,6 +1474,124 @@ fn suffix_one_of_tightens(new: &[String], old: &[String]) -> bool {
         && new
             .iter()
             .all(|child| old.iter().any(|parent| child.ends_with(parent)))
+}
+
+/// Every child glob specializes (language-subsets) some parent glob.
+/// Empty lists fail closed. Unclear pairs fail closed.
+fn matches_any_tightens(new: &[String], old: &[String]) -> bool {
+    string_list_is_valid(new)
+        && string_list_is_valid(old)
+        && new
+            .iter()
+            .all(|child| old.iter().any(|parent| glob_specializes(child, parent)))
+}
+
+/// Every old glob is covered by a new denial that is at least as
+/// broad (`L(old) ⊆ L(new)`). Extra new globs are allowed. Empty
+/// lists fail closed.
+fn matches_none_tightens(new: &[String], old: &[String]) -> bool {
+    string_list_is_valid(new)
+        && string_list_is_valid(old)
+        && old
+            .iter()
+            .all(|parent| new.iter().any(|child| glob_specializes(parent, child)))
+}
+
+/// True iff every string matching `child` also matches `parent`
+/// (`L(child) ⊆ L(parent)`). Empty patterns fail closed.
+fn glob_specializes(child: &str, parent: &str) -> bool {
+    if child.is_empty() || parent.is_empty() {
+        return false;
+    }
+    glob_language_subseteq(child, parent)
+}
+
+/// Glob language inclusion over an abstract alphabet: every literal
+/// that appears in either pattern, plus one OTHER symbol standing
+/// for every remaining Unicode scalar. `*` and `?` use the existing
+/// glob semantics.
+fn glob_language_subseteq(child: &str, parent: &str) -> bool {
+    let child_pat: Vec<char> = child.chars().collect();
+    let parent_pat: Vec<char> = parent.chars().collect();
+
+    let mut lits: Vec<char> = Vec::new();
+    for &c in child_pat.iter().chain(parent_pat.iter()) {
+        if c != '*' && c != '?' && !lits.contains(&c) {
+            lits.push(c);
+        }
+    }
+    // Alphabet is the collected literals plus one OTHER class.
+    let alpha_len = lits.len() + 1;
+
+    let child_start = glob_eps(&child_pat, [0].into_iter().collect());
+    let parent_start = glob_eps(&parent_pat, [0].into_iter().collect());
+
+    let mut seen: BTreeSet<(BTreeSet<usize>, BTreeSet<usize>)> = BTreeSet::new();
+    let mut stack = vec![(child_start.clone(), parent_start.clone())];
+    seen.insert((child_start, parent_start));
+
+    while let Some((cs, ps)) = stack.pop() {
+        if glob_nfa_accepts(&child_pat, &cs) && !glob_nfa_accepts(&parent_pat, &ps) {
+            return false;
+        }
+        if cs.is_empty() {
+            continue;
+        }
+        for sym in 0..alpha_len {
+            let lit = if sym < lits.len() {
+                Some(lits[sym])
+            } else {
+                None
+            };
+            let cs2 = glob_nfa_trans(&child_pat, &cs, lit);
+            if cs2.is_empty() {
+                continue;
+            }
+            let ps2 = glob_nfa_trans(&parent_pat, &ps, lit);
+            if seen.insert((cs2.clone(), ps2.clone())) {
+                stack.push((cs2, ps2));
+            }
+        }
+    }
+    true
+}
+
+fn glob_eps(pat: &[char], mut states: BTreeSet<usize>) -> BTreeSet<usize> {
+    let mut pending: Vec<usize> = states.iter().copied().collect();
+    while let Some(s) = pending.pop() {
+        if s < pat.len() && pat[s] == '*' && states.insert(s + 1) {
+            pending.push(s + 1);
+        }
+    }
+    states
+}
+
+fn glob_nfa_trans(pat: &[char], states: &BTreeSet<usize>, lit: Option<char>) -> BTreeSet<usize> {
+    let mut next = BTreeSet::new();
+    for &s in states {
+        if s >= pat.len() {
+            continue;
+        }
+        match pat[s] {
+            '*' => {
+                next.insert(s);
+                next.insert(s + 1);
+            }
+            '?' => {
+                next.insert(s + 1);
+            }
+            c => {
+                if lit == Some(c) {
+                    next.insert(s + 1);
+                }
+            }
+        }
+    }
+    glob_eps(pat, next)
+}
+
+fn glob_nfa_accepts(pat: &[char], states: &BTreeSet<usize>) -> bool {
+    states.contains(&pat.len())
 }
 
 /// Convert `n` to `f64` only when the integer is exactly representable.
@@ -1460,6 +1714,33 @@ mod tests {
         assert!(!c.check("has-secret"));
         assert!(!c.check("password"));
         assert!(!c.check("my-password-here"));
+    }
+
+    #[test]
+    fn matches_any_check() {
+        let c = Constraint::MatchesAny(vec!["*.txt".to_string(), "*.md".to_string()]);
+        assert!(c.check("notes.txt"));
+        assert!(c.check(".txt"));
+        assert!(c.check("README.md"));
+        assert!(c.check(".md"));
+        assert!(!c.check("notes.txt.bak"));
+        assert!(!c.check("notes.rs"));
+        assert!(!c.check(""));
+        // Literals are not regex.
+        let dot = Constraint::MatchesAny(vec!["a.b".to_string()]);
+        assert!(dot.check("a.b"));
+        assert!(!dot.check("axb"));
+    }
+
+    #[test]
+    fn matches_none_check() {
+        let c = Constraint::MatchesNone(vec!["*.tmp".to_string(), "*.bak".to_string()]);
+        assert!(c.check("notes.txt"));
+        assert!(c.check("ok"));
+        assert!(c.check(""));
+        assert!(!c.check("draft.tmp"));
+        assert!(!c.check("notes.bak"));
+        assert!(!c.check(".tmp"));
     }
 
     #[test]
@@ -1822,6 +2103,34 @@ mod tests {
     }
 
     #[test]
+    fn empty_matches_any_fail_closed() {
+        let empty_list = Constraint::MatchesAny(vec![]);
+        let empty_member = Constraint::MatchesAny(vec![String::new()]);
+        let mixed = Constraint::MatchesAny(vec!["*.txt".to_string(), String::new()]);
+        for c in [&empty_list, &empty_member, &mixed] {
+            assert!(c.is_empty_pattern());
+            assert!(!c.check(""));
+            assert!(!c.check("notes.txt"));
+            assert!(!c.check("anything"));
+        }
+        assert!(!Constraint::MatchesAny(vec!["*.txt".to_string()]).is_empty_pattern());
+    }
+
+    #[test]
+    fn empty_matches_none_fail_closed() {
+        let empty_list = Constraint::MatchesNone(vec![]);
+        let empty_member = Constraint::MatchesNone(vec![String::new()]);
+        let mixed = Constraint::MatchesNone(vec!["*.tmp".to_string(), String::new()]);
+        for c in [&empty_list, &empty_member, &mixed] {
+            assert!(c.is_empty_pattern());
+            assert!(!c.check(""));
+            assert!(!c.check("ok"));
+            assert!(!c.check("anything"));
+        }
+        assert!(!Constraint::MatchesNone(vec!["*.tmp".to_string()]).is_empty_pattern());
+    }
+
+    #[test]
     fn not_contains_check() {
         let c = Constraint::NotContains("tmp".to_string());
         assert!(c.check("/var/file"));
@@ -2149,6 +2458,101 @@ mod tests {
             .is_subset_of(&Constraint::NotEquals("admin".to_string())));
         assert!(
             Constraint::ContainsNone(vec!["admin".to_string()]).is_subset_of(
+                &Constraint::NotOneOf(vec!["admin".to_string(), "administrator".to_string()])
+            )
+        );
+    }
+
+    #[test]
+    fn matches_any_subset_tightens_only() {
+        let parent = Constraint::MatchesAny(vec!["*.txt".to_string(), "*.md".to_string()]);
+        let shrink = Constraint::MatchesAny(vec!["*.txt".to_string()]);
+        let specialize =
+            Constraint::MatchesAny(vec!["notes.txt".to_string(), "README.md".to_string()]);
+        let same = Constraint::MatchesAny(vec!["*.txt".to_string(), "*.md".to_string()]);
+        let widen = Constraint::MatchesAny(vec!["*".to_string()]);
+        let outside = Constraint::MatchesAny(vec!["*.rs".to_string()]);
+        let empty = Constraint::MatchesAny(vec![]);
+        let empty_member = Constraint::MatchesAny(vec!["*.txt".to_string(), String::new()]);
+
+        assert!(shrink.is_subset_of(&parent));
+        assert!(specialize.is_subset_of(&parent));
+        assert!(same.is_subset_of(&parent));
+        assert!(!widen.is_subset_of(&parent));
+        assert!(!outside.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&shrink));
+        assert!(!empty.is_subset_of(&parent));
+        assert!(!empty_member.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&empty));
+
+        assert!(Constraint::Matches("notes.txt".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Matches("*.rs".to_string()).is_subset_of(&parent));
+        assert!(Constraint::MatchesAny(vec!["notes.txt".to_string()])
+            .is_subset_of(&Constraint::Matches("*.txt".to_string())));
+        assert!(
+            !Constraint::MatchesAny(vec!["*.txt".to_string(), "*.md".to_string()])
+                .is_subset_of(&Constraint::Matches("*.txt".to_string()))
+        );
+
+        assert!(Constraint::Exact("notes.txt".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("notes.rs".to_string()).is_subset_of(&parent));
+        assert!(
+            Constraint::OneOf(vec!["a.txt".to_string(), "b.md".to_string()]).is_subset_of(&parent)
+        );
+        assert!(
+            !Constraint::OneOf(vec!["a.txt".to_string(), "b.rs".to_string()]).is_subset_of(&parent)
+        );
+    }
+
+    #[test]
+    fn matches_none_subset_tightens_only() {
+        let parent = Constraint::MatchesNone(vec!["*.tmp".to_string(), "*.bak".to_string()]);
+        let grow = Constraint::MatchesNone(vec![
+            "*.tmp".to_string(),
+            "*.bak".to_string(),
+            "*.swp".to_string(),
+        ]);
+        let broaden = Constraint::MatchesNone(vec!["*".to_string()]);
+        let same = Constraint::MatchesNone(vec!["*.tmp".to_string(), "*.bak".to_string()]);
+        let drop = Constraint::MatchesNone(vec!["*.tmp".to_string()]);
+        let specialize = Constraint::MatchesNone(vec!["draft.tmp".to_string()]);
+        let empty = Constraint::MatchesNone(vec![]);
+        let empty_member = Constraint::MatchesNone(vec!["*.tmp".to_string(), String::new()]);
+
+        assert!(grow.is_subset_of(&parent));
+        assert!(broaden.is_subset_of(&parent));
+        assert!(same.is_subset_of(&parent));
+        assert!(!drop.is_subset_of(&parent));
+        assert!(!specialize.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&grow));
+        assert!(parent.is_subset_of(&drop));
+        assert!(!empty.is_subset_of(&parent));
+        assert!(!empty_member.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&empty));
+
+        assert!(Constraint::NotMatches("*".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::NotMatches("*.tmp".to_string()).is_subset_of(&parent));
+        assert!(
+            Constraint::MatchesNone(vec!["*.tmp".to_string(), "*.swp".to_string()])
+                .is_subset_of(&Constraint::NotMatches("*.tmp".to_string()))
+        );
+        assert!(!Constraint::MatchesNone(vec!["draft.tmp".to_string()])
+            .is_subset_of(&Constraint::NotMatches("*.tmp".to_string())));
+
+        assert!(Constraint::Exact("ok".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("draft.tmp".to_string()).is_subset_of(&parent));
+        assert!(
+            Constraint::OneOf(vec!["ok".to_string(), "fine".to_string()]).is_subset_of(&parent)
+        );
+        assert!(
+            !Constraint::OneOf(vec!["ok".to_string(), "draft.tmp".to_string()])
+                .is_subset_of(&parent)
+        );
+
+        assert!(Constraint::MatchesNone(vec!["admin".to_string()])
+            .is_subset_of(&Constraint::NotEquals("admin".to_string())));
+        assert!(
+            Constraint::MatchesNone(vec!["admin*".to_string()]).is_subset_of(
                 &Constraint::NotOneOf(vec!["admin".to_string(), "administrator".to_string()])
             )
         );
@@ -2805,6 +3209,38 @@ mod tests {
     }
 
     #[test]
+    fn json_matches_any() {
+        let c = Constraint::MatchesAny(vec!["*.txt".to_string(), "*.md".to_string()]);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"matches_any\""));
+        assert!(json.contains("\"*.txt\""));
+        assert!(json.contains("\"*.md\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"matches_any","value":["*.txt","*.md"]}"#).unwrap();
+        assert_eq!(from_cli, c);
+    }
+
+    #[test]
+    fn json_matches_none() {
+        let c = Constraint::MatchesNone(vec!["*.tmp".to_string(), "*.bak".to_string()]);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"matches_none\""));
+        assert!(json.contains("\"*.tmp\""));
+        assert!(json.contains("\"*.bak\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"matches_none","value":["*.tmp","*.bak"]}"#).unwrap();
+        assert_eq!(from_cli, c);
+    }
+
+    #[test]
     fn json_suffix() {
         let c = Constraint::Suffix(".txt".to_string());
         let json = serde_json::to_string(&c).unwrap();
@@ -3027,6 +3463,13 @@ mod tests {
         let none_empty = Constraint::Not(Box::new(Constraint::ContainsNone(vec![String::new()])));
         assert!(none_empty.is_empty_pattern());
         assert!(!none_empty.check("ok"));
+        let matches_any_empty = Constraint::All(vec![Constraint::MatchesAny(vec![])]);
+        assert!(matches_any_empty.is_empty_pattern());
+        assert!(!matches_any_empty.check("notes.txt"));
+        let matches_none_empty =
+            Constraint::Not(Box::new(Constraint::MatchesNone(vec![String::new()])));
+        assert!(matches_none_empty.is_empty_pattern());
+        assert!(!matches_none_empty.check("ok"));
         assert!(!all.check("/tmp/a.txt"));
         assert!(!any.check("notes.txt"));
     }
