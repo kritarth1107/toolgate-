@@ -17,7 +17,7 @@
 //! | audience | u16 length + UTF-8 bytes (0 = none) |
 //! | kid | u16 length + UTF-8 bytes (0 = none) |
 //! | constraints_count | u16 (0 = none) |
-//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange) |
+//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf) |
 //! | jti | u16 length + UTF-8 bytes (0 = none) |
 //! | nbf_flag | u8 (v5 only; 0 = none, 1 = present) |
 //! | nbf | u64 (v5 only, if nbf_flag = 1) |
@@ -1224,6 +1224,147 @@ mod tests {
 
         assert_eq!(decoded.constraints, Some(constraints));
         assert!(decoded.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn wire_roundtrip_constraint_prefix_one_of() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "path".to_string(),
+            Constraint::PrefixOneOf(vec!["/tmp/".to_string(), "/var/".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+        assert!(
+            wire.windows(7)
+                .any(|w| w == [0x00, 0x04, b'p', b'a', b't', b'h', 21]),
+            "wire must include PrefixOneOf type tag 21 after key path"
+        );
+    }
+
+    #[test]
+    fn wire_roundtrip_constraint_suffix_one_of() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "name".to_string(),
+            Constraint::SuffixOneOf(vec![".md".to_string(), ".txt".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "write_file",
+            vec!["name".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+        assert!(
+            wire.windows(7)
+                .any(|w| w == [0x00, 0x04, b'n', b'a', b'm', b'e', 22]),
+            "wire must include SuffixOneOf type tag 22 after key name"
+        );
+    }
+
+    #[test]
+    fn wire_prefix_one_of_sorts_and_uniques() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "path".to_string(),
+            Constraint::PrefixOneOf(vec![
+                "/var/".to_string(),
+                "/tmp/".to_string(),
+                "/var/".to_string(),
+            ]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let decoded = Token::from_wire(&token.to_wire()).unwrap();
+        match decoded.constraints.as_ref().unwrap().get("path").unwrap() {
+            Constraint::PrefixOneOf(values) => {
+                assert_eq!(values, &vec!["/tmp/".to_string(), "/var/".to_string()]);
+            }
+            other => panic!("expected PrefixOneOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wire_without_prefix_one_of_keeps_prior_type_tags() {
+        // Tokens that do not use PrefixOneOf/SuffixOneOf must keep the 0.25.0 tags.
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "query".to_string(),
+            Constraint::CharLenRange { min: 1, max: 16 },
+        );
+        constraints.insert("path".to_string(), Constraint::Prefix("/tmp/".to_string()));
+
+        let token = Token::mint_full(
+            SECRET,
+            "search",
+            vec!["query".into(), "path".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(
+            wire.windows(8)
+                .any(|w| w == [0x00, 0x05, b'q', b'u', b'e', b'r', b'y', 20]),
+            "CharLenRange must keep type tag 20"
+        );
+        assert!(
+            wire.windows(7)
+                .any(|w| w == [0x00, 0x04, b'p', b'a', b't', b'h', 2]),
+            "Prefix must keep type tag 2"
+        );
+        assert!(!wire
+            .windows(7)
+            .any(|w| w == [0x00, 0x04, b'p', b'a', b't', b'h', 21]));
     }
 
     #[test]
