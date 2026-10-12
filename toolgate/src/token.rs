@@ -3859,6 +3859,221 @@ mod tests {
     }
 
     #[test]
+    fn attenuation_can_tighten_prefix_one_of() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "path".to_string(),
+            Constraint::PrefixOneOf(vec!["/tmp/".to_string(), "/var/".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut tighter: BTreeMap<String, Constraint> = BTreeMap::new();
+        tighter.insert(
+            "path".to_string(),
+            Constraint::PrefixOneOf(vec!["/tmp/sub/".to_string()]),
+        );
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(tighter))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("path"),
+            Some(&Constraint::PrefixOneOf(vec!["/tmp/sub/".to_string()]))
+        );
+        assert!(attenuated.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn attenuation_cannot_widen_prefix_one_of() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "path".to_string(),
+            Constraint::PrefixOneOf(vec!["/tmp/".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut wider: BTreeMap<String, Constraint> = BTreeMap::new();
+        wider.insert(
+            "path".to_string(),
+            Constraint::PrefixOneOf(vec!["/tmp/".to_string(), "/var/".to_string()]),
+        );
+        assert_eq!(
+            token.attenuate_with_constraints(SECRET, None, None, Some(wider)),
+            Err(TokenError::AttenuationWidens)
+        );
+
+        let mut outside: BTreeMap<String, Constraint> = BTreeMap::new();
+        outside.insert(
+            "path".to_string(),
+            Constraint::PrefixOneOf(vec!["/home/".to_string()]),
+        );
+        assert_eq!(
+            token.attenuate_with_constraints(SECRET, None, None, Some(outside)),
+            Err(TokenError::AttenuationWidens)
+        );
+    }
+
+    #[test]
+    fn attenuation_can_tighten_suffix_one_of() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "name".to_string(),
+            Constraint::SuffixOneOf(vec![".txt".to_string(), ".md".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "write_file",
+            vec!["name".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut tighter: BTreeMap<String, Constraint> = BTreeMap::new();
+        tighter.insert(
+            "name".to_string(),
+            Constraint::SuffixOneOf(vec![".bak.txt".to_string()]),
+        );
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(tighter))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("name"),
+            Some(&Constraint::SuffixOneOf(vec![".bak.txt".to_string()]))
+        );
+    }
+
+    #[test]
+    fn attenuation_cannot_widen_suffix_one_of() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "name".to_string(),
+            Constraint::SuffixOneOf(vec![".txt".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "write_file",
+            vec!["name".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut wider: BTreeMap<String, Constraint> = BTreeMap::new();
+        wider.insert(
+            "name".to_string(),
+            Constraint::SuffixOneOf(vec![".txt".to_string(), ".md".to_string()]),
+        );
+        assert_eq!(
+            token.attenuate_with_constraints(SECRET, None, None, Some(wider)),
+            Err(TokenError::AttenuationWidens)
+        );
+    }
+
+    #[test]
+    fn attenuation_exact_can_replace_prefix_one_of() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "path".to_string(),
+            Constraint::PrefixOneOf(vec!["/tmp/".to_string(), "/var/".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut exact: BTreeMap<String, Constraint> = BTreeMap::new();
+        exact.insert("path".to_string(), Constraint::Exact("/tmp/a".to_string()));
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(exact))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("path"),
+            Some(&Constraint::Exact("/tmp/a".to_string()))
+        );
+
+        let mut bad: BTreeMap<String, Constraint> = BTreeMap::new();
+        bad.insert("path".to_string(), Constraint::Exact("/home/a".to_string()));
+        assert_eq!(
+            token.attenuate_with_constraints(SECRET, None, None, Some(bad)),
+            Err(TokenError::AttenuationWidens)
+        );
+    }
+
+    #[test]
+    fn attenuation_empty_prefix_one_of_fails_closed() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "path".to_string(),
+            Constraint::PrefixOneOf(vec!["/tmp/".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut empty: BTreeMap<String, Constraint> = BTreeMap::new();
+        empty.insert("path".to_string(), Constraint::PrefixOneOf(vec![]));
+        assert_eq!(
+            token.attenuate_with_constraints(SECRET, None, None, Some(empty)),
+            Err(TokenError::AttenuationWidens)
+        );
+    }
+
+    #[test]
     fn attenuation_can_tighten_suffix() {
         use crate::constraint::Constraint;
         use std::collections::BTreeMap;
@@ -4827,6 +5042,149 @@ mod tests {
         assert!(matches!(
             result,
             Err(TokenError::ConstraintViolation { key }) if key == "query"
+        ));
+    }
+
+    #[test]
+    fn verify_call_with_args_prefix_one_of_satisfied() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert(
+            "path".to_string(),
+            Constraint::PrefixOneOf(vec!["/tmp/".to_string(), "/var/".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("path".to_string(), "/var/log/app".to_string());
+        assert!(token
+            .verify_call_with_args(SECRET, 1999999999, "read_file", &args, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_call_with_args_prefix_one_of_violated() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert(
+            "path".to_string(),
+            Constraint::PrefixOneOf(vec!["/tmp/".to_string(), "/var/".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("path".to_string(), "/home/x".to_string());
+        let result = token.verify_call_with_args(SECRET, 1999999999, "read_file", &args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { key }) if key == "path"
+        ));
+    }
+
+    #[test]
+    fn verify_call_with_args_suffix_one_of_satisfied() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert(
+            "name".to_string(),
+            Constraint::SuffixOneOf(vec![".txt".to_string(), ".md".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "write_file",
+            vec!["name".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("name".to_string(), "notes.md".to_string());
+        assert!(token
+            .verify_call_with_args(SECRET, 1999999999, "write_file", &args, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_call_with_args_suffix_one_of_violated() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert(
+            "name".to_string(),
+            Constraint::SuffixOneOf(vec![".txt".to_string(), ".md".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "write_file",
+            vec!["name".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("name".to_string(), "notes.rs".to_string());
+        let result = token.verify_call_with_args(SECRET, 1999999999, "write_file", &args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { key }) if key == "name"
+        ));
+    }
+
+    #[test]
+    fn verify_call_with_args_empty_prefix_one_of_fail_closed() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("path".to_string(), Constraint::PrefixOneOf(vec![]));
+        constraints.insert(
+            "name".to_string(),
+            Constraint::SuffixOneOf(vec![String::new()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "file_op",
+            vec!["path".into(), "name".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("path".to_string(), "/tmp/a".to_string());
+        args.insert("name".to_string(), "notes.txt".to_string());
+        let result = token.verify_call_with_args(SECRET, 1999999999, "file_op", &args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { .. })
         ));
     }
 

@@ -1227,6 +1227,31 @@ mod tests {
     }
 
     #[test]
+    fn prefix_one_of_check() {
+        let c = Constraint::PrefixOneOf(vec!["/tmp/".to_string(), "/var/".to_string()]);
+        assert!(c.check("/tmp/foo"));
+        assert!(c.check("/tmp/"));
+        assert!(c.check("/var/log"));
+        assert!(c.check("/var/"));
+        assert!(!c.check("/home/x"));
+        assert!(!c.check("tmp/foo"));
+        assert!(!c.check("/tmp"));
+        assert!(!c.check(""));
+    }
+
+    #[test]
+    fn suffix_one_of_check() {
+        let c = Constraint::SuffixOneOf(vec![".txt".to_string(), ".md".to_string()]);
+        assert!(c.check("notes.txt"));
+        assert!(c.check(".txt"));
+        assert!(c.check("README.md"));
+        assert!(c.check(".md"));
+        assert!(!c.check("notes.txt.bak"));
+        assert!(!c.check("notes"));
+        assert!(!c.check(""));
+    }
+
+    #[test]
     fn maxlen_check() {
         let c = Constraint::MaxLen(5);
         assert!(c.check("hello"));
@@ -1530,6 +1555,34 @@ mod tests {
     }
 
     #[test]
+    fn empty_prefix_one_of_fail_closed() {
+        let empty_list = Constraint::PrefixOneOf(vec![]);
+        let empty_member = Constraint::PrefixOneOf(vec![String::new()]);
+        let mixed = Constraint::PrefixOneOf(vec!["/tmp/".to_string(), String::new()]);
+        for c in [&empty_list, &empty_member, &mixed] {
+            assert!(c.is_empty_pattern());
+            assert!(!c.check(""));
+            assert!(!c.check("/tmp/foo"));
+            assert!(!c.check("anything"));
+        }
+        assert!(!Constraint::PrefixOneOf(vec!["/tmp/".to_string()]).is_empty_pattern());
+    }
+
+    #[test]
+    fn empty_suffix_one_of_fail_closed() {
+        let empty_list = Constraint::SuffixOneOf(vec![]);
+        let empty_member = Constraint::SuffixOneOf(vec![String::new()]);
+        let mixed = Constraint::SuffixOneOf(vec![".txt".to_string(), String::new()]);
+        for c in [&empty_list, &empty_member, &mixed] {
+            assert!(c.is_empty_pattern());
+            assert!(!c.check(""));
+            assert!(!c.check("notes.txt"));
+            assert!(!c.check("anything"));
+        }
+        assert!(!Constraint::SuffixOneOf(vec![".txt".to_string()]).is_empty_pattern());
+    }
+
+    #[test]
     fn not_contains_check() {
         let c = Constraint::NotContains("tmp".to_string());
         assert!(c.check("/var/file"));
@@ -1669,6 +1722,89 @@ mod tests {
         assert!(!short.is_subset_of(&long));
         assert!(!Constraint::Suffix(String::new()).is_subset_of(&short));
         assert!(!long.is_subset_of(&Constraint::Suffix(String::new())));
+    }
+
+    #[test]
+    fn prefix_one_of_subset_tightens_only() {
+        let parent = Constraint::PrefixOneOf(vec!["/tmp/".to_string(), "/var/".to_string()]);
+        let shrink = Constraint::PrefixOneOf(vec!["/tmp/".to_string()]);
+        let extend =
+            Constraint::PrefixOneOf(vec!["/tmp/sub/".to_string(), "/var/log/".to_string()]);
+        let same = Constraint::PrefixOneOf(vec!["/tmp/".to_string(), "/var/".to_string()]);
+        let widen = Constraint::PrefixOneOf(vec!["/".to_string()]);
+        let outside = Constraint::PrefixOneOf(vec!["/home/".to_string()]);
+        let empty = Constraint::PrefixOneOf(vec![]);
+        let empty_member = Constraint::PrefixOneOf(vec!["/tmp/".to_string(), String::new()]);
+
+        assert!(shrink.is_subset_of(&parent));
+        assert!(extend.is_subset_of(&parent));
+        assert!(same.is_subset_of(&parent));
+        assert!(!widen.is_subset_of(&parent));
+        assert!(!outside.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&shrink));
+        assert!(!empty.is_subset_of(&parent));
+        assert!(!empty_member.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&empty));
+
+        assert!(Constraint::Prefix("/tmp/sub/".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Prefix("/".to_string()).is_subset_of(&parent));
+        assert!(Constraint::PrefixOneOf(vec!["/tmp/sub/".to_string()])
+            .is_subset_of(&Constraint::Prefix("/tmp/".to_string())));
+        assert!(
+            !Constraint::PrefixOneOf(vec!["/tmp/".to_string(), "/var/".to_string()])
+                .is_subset_of(&Constraint::Prefix("/tmp/".to_string()))
+        );
+
+        assert!(Constraint::Exact("/tmp/a".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("/home/a".to_string()).is_subset_of(&parent));
+        assert!(
+            Constraint::OneOf(vec!["/tmp/a".to_string(), "/var/b".to_string()])
+                .is_subset_of(&parent)
+        );
+        assert!(
+            !Constraint::OneOf(vec!["/tmp/a".to_string(), "/home/b".to_string()])
+                .is_subset_of(&parent)
+        );
+    }
+
+    #[test]
+    fn suffix_one_of_subset_tightens_only() {
+        let parent = Constraint::SuffixOneOf(vec![".txt".to_string(), ".md".to_string()]);
+        let shrink = Constraint::SuffixOneOf(vec![".txt".to_string()]);
+        let extend = Constraint::SuffixOneOf(vec![".bak.txt".to_string(), ".old.md".to_string()]);
+        let same = Constraint::SuffixOneOf(vec![".txt".to_string(), ".md".to_string()]);
+        let widen = Constraint::SuffixOneOf(vec!["t".to_string()]);
+        let outside = Constraint::SuffixOneOf(vec![".rs".to_string()]);
+        let empty = Constraint::SuffixOneOf(vec![]);
+        let empty_member = Constraint::SuffixOneOf(vec![".txt".to_string(), String::new()]);
+
+        assert!(shrink.is_subset_of(&parent));
+        assert!(extend.is_subset_of(&parent));
+        assert!(same.is_subset_of(&parent));
+        assert!(!widen.is_subset_of(&parent));
+        assert!(!outside.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&shrink));
+        assert!(!empty.is_subset_of(&parent));
+        assert!(!empty_member.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&empty));
+
+        assert!(Constraint::Suffix(".bak.txt".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Suffix(".rs".to_string()).is_subset_of(&parent));
+        assert!(Constraint::SuffixOneOf(vec![".bak.txt".to_string()])
+            .is_subset_of(&Constraint::Suffix(".txt".to_string())));
+        assert!(
+            !Constraint::SuffixOneOf(vec![".txt".to_string(), ".md".to_string()])
+                .is_subset_of(&Constraint::Suffix(".txt".to_string()))
+        );
+
+        assert!(Constraint::Exact("notes.txt".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("notes.rs".to_string()).is_subset_of(&parent));
+        assert!(
+            Constraint::OneOf(vec!["a.txt".to_string(), "b.md".to_string()]).is_subset_of(&parent)
+        );
+        assert!(
+            !Constraint::OneOf(vec!["a.txt".to_string(), "b.rs".to_string()]).is_subset_of(&parent)
+        );
     }
 
     #[test]
@@ -2257,6 +2393,38 @@ mod tests {
     }
 
     #[test]
+    fn json_prefix_one_of() {
+        let c = Constraint::PrefixOneOf(vec!["/tmp/".to_string(), "/var/".to_string()]);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"prefix_one_of\""));
+        assert!(json.contains("\"/tmp/\""));
+        assert!(json.contains("\"/var/\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"prefix_one_of","value":["/tmp/","/var/"]}"#).unwrap();
+        assert_eq!(from_cli, c);
+    }
+
+    #[test]
+    fn json_suffix_one_of() {
+        let c = Constraint::SuffixOneOf(vec![".txt".to_string(), ".md".to_string()]);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"suffix_one_of\""));
+        assert!(json.contains("\".txt\""));
+        assert!(json.contains("\".md\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"suffix_one_of","value":[".txt",".md"]}"#).unwrap();
+        assert_eq!(from_cli, c);
+    }
+
+    #[test]
     fn json_suffix() {
         let c = Constraint::Suffix(".txt".to_string());
         let json = serde_json::to_string(&c).unwrap();
@@ -2467,6 +2635,12 @@ mod tests {
         let any = Constraint::Any(vec![Constraint::Matches(String::new())]);
         assert!(all.is_empty_pattern());
         assert!(any.is_empty_pattern());
+        let wrapped = Constraint::All(vec![Constraint::PrefixOneOf(vec![])]);
+        assert!(wrapped.is_empty_pattern());
+        assert!(!wrapped.check("/tmp/foo"));
+        let not_empty = Constraint::Not(Box::new(Constraint::SuffixOneOf(vec![String::new()])));
+        assert!(not_empty.is_empty_pattern());
+        assert!(!not_empty.check("notes.txt"));
         assert!(!all.check("/tmp/a.txt"));
         assert!(!any.check("notes.txt"));
     }
