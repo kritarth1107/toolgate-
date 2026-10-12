@@ -4454,3 +4454,267 @@ fn mint_from_policy_accepts_prefix_one_of() {
     assert_eq!(token["constraints"]["path"]["type"], "prefix_one_of");
     let _ = fs::remove_file(&path);
 }
+
+fn mint_contains_any_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "search",
+            "arg_keys": ["note"],
+            "expiry": 2000000000,
+            "constraints": {
+                "note": {"type": "contains_any", "value": ["tmp", "var"]}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+fn mint_contains_none_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "write_note",
+            "arg_keys": ["memo"],
+            "expiry": 2000000000,
+            "constraints": {
+                "memo": {"type": "contains_none", "value": ["secret", "password"]}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+#[test]
+fn mint_accepts_contains_any_and_contains_none() {
+    let any = mint_contains_any_token();
+    assert_eq!(any["constraints"]["note"]["type"], "contains_any");
+    assert_eq!(any["constraints"]["note"]["value"], json!(["tmp", "var"]));
+
+    let none = mint_contains_none_token();
+    assert_eq!(none["constraints"]["memo"]["type"], "contains_none");
+    assert_eq!(
+        none["constraints"]["memo"]["value"],
+        json!(["secret", "password"])
+    );
+}
+
+#[test]
+fn check_call_enforces_contains_any() {
+    let token = mint_contains_any_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "search",
+            "args": {"note": "/var/log/app"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "search",
+            "args": {"note": "/home/x"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn check_call_enforces_contains_none() {
+    let token = mint_contains_none_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "write_note",
+            "args": {"memo": "ok-note"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "write_note",
+            "args": {"memo": "has-secret"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn attenuate_can_tighten_contains_any() {
+    let token = mint_contains_any_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "note": {"type": "contains_any", "value": ["tmp/public"]}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(attenuated["constraints"]["note"]["type"], "contains_any");
+    assert_eq!(
+        attenuated["constraints"]["note"]["value"],
+        json!(["tmp/public"])
+    );
+}
+
+#[test]
+fn attenuate_rejects_widening_contains_any() {
+    let token = mint_contains_any_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "note": {"type": "contains_any", "value": ["tm", "tmp", "var"]}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("attenuation"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn mint_rejects_empty_contains_any() {
+    let out = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "search",
+            "arg_keys": ["note"],
+            "expiry": 2000000000,
+            "constraints": {
+                "note": {"type": "contains_any", "value": []}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("contains_any"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn mint_rejects_empty_contains_none_member() {
+    let out = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "write_note",
+            "arg_keys": ["memo"],
+            "expiry": 2000000000,
+            "constraints": {
+                "memo": {"type": "contains_none", "value": ["secret", ""]}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("contains_none"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn policy_lint_rejects_empty_contains_any() {
+    let path = write_temp_policy(
+        "empty-contains-any",
+        r#"{
+            "version": "1",
+            "tools": [{
+                "name": "search",
+                "arg_keys": ["note"],
+                "constraints": {
+                    "note": {"type": "contains_any", "value": []}
+                }
+            }]
+        }"#,
+    );
+    let output = tg()
+        .args(["policy", "lint", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("contains_any"),
+        "stdout={stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn mint_from_policy_accepts_contains_any() {
+    let path = write_temp_policy(
+        "contains-any-grant",
+        r#"{
+            "version": "1",
+            "default_ttl_seconds": 60,
+            "tools": [{
+                "name": "search",
+                "arg_keys": ["note"],
+                "constraints": {
+                    "note": {"type": "contains_any", "value": ["tmp", "var"]}
+                }
+            }]
+        }"#,
+    );
+    let out = run_json(
+        &[
+            "mint",
+            "--policy",
+            path.to_str().unwrap(),
+            "--tool",
+            "search",
+        ],
+        &json!({
+            "secret": "cli-secret",
+            "current_time": 1700000000
+        }),
+    );
+    let token = &out["token"];
+    assert_eq!(token["tool_name"], "search");
+    assert_eq!(token["constraints"]["note"]["type"], "contains_any");
+    let _ = fs::remove_file(&path);
+}

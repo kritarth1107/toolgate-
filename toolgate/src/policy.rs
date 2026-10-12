@@ -75,8 +75,8 @@ pub enum PolicyError {
     /// A constraint is attached to a key that is not in the grant's allowlist.
     ConstraintKeyNotAllowed { tool: String, key: String },
     /// An empty suffix, contains, matches, NotOneOf, PrefixOneOf,
-    /// SuffixOneOf, NotContains, NotPrefix, NotSuffix, NotMatches, All,
-    /// Any, or Not constraint is rejected.
+    /// SuffixOneOf, ContainsAny, ContainsNone, NotContains, NotPrefix,
+    /// NotSuffix, NotMatches, All, Any, or Not constraint is rejected.
     EmptyConstraintPattern { tool: String, key: String },
     /// An All/Any/Not tree deeper than [`crate::MAX_CONSTRAINT_NESTING`] is rejected.
     ConstraintNestingTooDeep { tool: String, key: String },
@@ -122,7 +122,7 @@ impl std::fmt::Display for PolicyError {
             PolicyError::EmptyConstraintPattern { tool, key } => {
                 write!(
                     f,
-                    "empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any/not/prefix_one_of/suffix_one_of constraint for '{key}' on tool '{tool}' is rejected"
+                    "empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any/not/prefix_one_of/suffix_one_of/contains_any/contains_none constraint for '{key}' on tool '{tool}' is rejected"
                 )
             }
             PolicyError::ConstraintNestingTooDeep { tool, key } => {
@@ -1360,6 +1360,79 @@ mod tests {
             Err(PolicyError::EmptyConstraintPattern {
                 tool: "write_file".into(),
                 key: "name".into()
+            })
+        );
+    }
+
+    #[test]
+    fn from_json_parses_contains_any_and_contains_none() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 60,
+                "tools": [{
+                    "name": "note_op",
+                    "arg_keys": ["note", "memo"],
+                    "constraints": {
+                        "note": {"type": "contains_any", "value": ["tmp", "var"]},
+                        "memo": {"type": "contains_none", "value": ["secret", "password"]}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        policy.validate().unwrap();
+        let grant = policy.grant("note_op").unwrap();
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("note"),
+            Some(&Constraint::ContainsAny(vec!["tmp".into(), "var".into()]))
+        );
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("memo"),
+            Some(&Constraint::ContainsNone(vec![
+                "secret".into(),
+                "password".into()
+            ]))
+        );
+    }
+
+    #[test]
+    fn validate_empty_contains_any_and_contains_none_are_rejected() {
+        let empty_list = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "search",
+                    "arg_keys": ["note"],
+                    "constraints": {"note": {"type": "contains_any", "value": []}}
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            empty_list.validate(),
+            Err(PolicyError::EmptyConstraintPattern {
+                tool: "search".into(),
+                key: "note".into()
+            })
+        );
+
+        let empty_member = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "write_note",
+                    "arg_keys": ["memo"],
+                    "constraints": {"memo": {"type": "contains_none", "value": ["secret", ""]}}
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            empty_member.validate(),
+            Err(PolicyError::EmptyConstraintPattern {
+                tool: "write_note".into(),
+                key: "memo".into()
             })
         );
     }

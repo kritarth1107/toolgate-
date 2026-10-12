@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.27.0] - 2026-10-12
+
+### Added
+- **`Constraint::ContainsAny(Vec<String>)`**: value must contain at least one of the listed UTF-8 substrings
+- **`Constraint::ContainsNone(Vec<String>)`**: value must contain none of the listed UTF-8 substrings
+- CLI JSON forms `{"type":"contains_any","value":["tmp","var"]}` and `{"type":"contains_none","value":["secret","password"]}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6, MinLen=7, Matches=8, NotEquals=9, NotOneOf=10, NotContains=11, NotPrefix=12, NotSuffix=13, NotMatches=14, All=15, Any=16, Not=17, FloatRange=18, LenRange=19, CharLenRange=20, PrefixOneOf=21, SuffixOneOf=22, ContainsAny=23, ContainsNone=24
+- Tokens without the new types still encode identically to 0.26.0
+
+### Notes
+- Stored and encoded as sorted unique strings (same spirit as OneOf / NotOneOf): u8 type + u16 count + each len-prefixed string
+- Attenuation only tightens: ContainsAny children must specialize some parent needle and may only shrink/narrow the allowed set; ContainsNone must cover every parent needle with a substring (shorter/equal forbids more) and may add extra denials
+- Exact may replace ContainsAny/ContainsNone when the exact value contains a listed needle / contains none of them
+- OneOf may replace ContainsAny/ContainsNone when every allowed value satisfies the same rule
+- Contains/ContainsAny may replace each other when every remaining needle specializes a parent needle
+- NotContains/ContainsNone may replace each other when the new denials still cover the old ones
+- Empty lists and empty members are rejected at mint/validate and never match a value (fail closed)
+- Unclear cross-type pairs fail closed
+
 ## [0.26.0] - 2026-10-12
 
 ### Added
