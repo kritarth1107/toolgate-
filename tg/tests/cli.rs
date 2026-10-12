@@ -4718,3 +4718,312 @@ fn mint_from_policy_accepts_contains_any() {
     assert_eq!(token["constraints"]["note"]["type"], "contains_any");
     let _ = fs::remove_file(&path);
 }
+
+fn mint_matches_any_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["file"],
+            "expiry": 2000000000,
+            "constraints": {
+                "file": {"type": "matches_any", "value": ["*.txt", "*.md"]}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+fn mint_matches_none_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["skip"],
+            "expiry": 2000000000,
+            "constraints": {
+                "skip": {"type": "matches_none", "value": ["*.tmp", "*.bak"]}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+#[test]
+fn mint_accepts_matches_any_and_matches_none() {
+    let any = mint_matches_any_token();
+    assert_eq!(any["constraints"]["file"]["type"], "matches_any");
+    assert_eq!(
+        any["constraints"]["file"]["value"],
+        json!(["*.txt", "*.md"])
+    );
+
+    let none = mint_matches_none_token();
+    assert_eq!(none["constraints"]["skip"]["type"], "matches_none");
+    assert_eq!(
+        none["constraints"]["skip"]["value"],
+        json!(["*.tmp", "*.bak"])
+    );
+}
+
+#[test]
+fn check_call_enforces_matches_any() {
+    let token = mint_matches_any_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"file": "notes.txt"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"file": "notes.rs"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn check_call_enforces_matches_none() {
+    let token = mint_matches_none_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"skip": "notes.txt"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"skip": "draft.tmp"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn attenuate_can_tighten_matches_any() {
+    let token = mint_matches_any_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "file": {"type": "matches_any", "value": ["notes.txt"]}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(attenuated["constraints"]["file"]["type"], "matches_any");
+    assert_eq!(
+        attenuated["constraints"]["file"]["value"],
+        json!(["notes.txt"])
+    );
+}
+
+#[test]
+fn attenuate_rejects_widening_matches_any() {
+    let token = mint_matches_any_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "file": {"type": "matches_any", "value": ["*", "*.txt", "*.md"]}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("attenuation"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn attenuate_can_tighten_matches_none() {
+    let token = mint_matches_none_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "skip": {"type": "matches_none", "value": ["*", "*.tmp"]}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(attenuated["constraints"]["skip"]["type"], "matches_none");
+    assert_eq!(
+        attenuated["constraints"]["skip"]["value"],
+        json!(["*", "*.tmp"])
+    );
+}
+
+#[test]
+fn attenuate_rejects_widening_matches_none() {
+    let token = mint_matches_none_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "skip": {"type": "matches_none", "value": ["*.tmp"]}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("attenuation"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn mint_rejects_empty_matches_any() {
+    let out = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["file"],
+            "expiry": 2000000000,
+            "constraints": {
+                "file": {"type": "matches_any", "value": []}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("matches_any"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn mint_rejects_empty_matches_none_member() {
+    let out = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["skip"],
+            "expiry": 2000000000,
+            "constraints": {
+                "skip": {"type": "matches_none", "value": ["*.tmp", ""]}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("matches_none"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn policy_lint_rejects_empty_matches_any() {
+    let path = write_temp_policy(
+        "empty-matches-any",
+        r#"{
+            "version": "1",
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["file"],
+                "constraints": {
+                    "file": {"type": "matches_any", "value": []}
+                }
+            }]
+        }"#,
+    );
+    let output = tg()
+        .args(["policy", "lint", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("matches_any"),
+        "stdout={stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn mint_from_policy_accepts_matches_any() {
+    let path = write_temp_policy(
+        "matches-any-grant",
+        r#"{
+            "version": "1",
+            "default_ttl_seconds": 60,
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["file"],
+                "constraints": {
+                    "file": {"type": "matches_any", "value": ["*.txt", "*.md"]}
+                }
+            }]
+        }"#,
+    );
+    let out = run_json(
+        &[
+            "mint",
+            "--policy",
+            path.to_str().unwrap(),
+            "--tool",
+            "read_file",
+        ],
+        &json!({
+            "secret": "cli-secret",
+            "current_time": 1700000000
+        }),
+    );
+    let token = &out["token"];
+    assert_eq!(token["tool_name"], "read_file");
+    assert_eq!(token["constraints"]["file"]["type"], "matches_any");
+    let _ = fs::remove_file(&path);
+}
