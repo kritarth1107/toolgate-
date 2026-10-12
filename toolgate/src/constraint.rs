@@ -440,6 +440,18 @@ impl Constraint {
                 len_range_is_valid(*min, *max) && count >= *min && count <= *max
             }
 
+            // Exact is subset of PrefixOneOf if the value starts with
+            // at least one listed prefix.
+            (Constraint::Exact(a), Constraint::PrefixOneOf(prefixes)) => {
+                string_list_is_valid(prefixes) && prefixes.iter().any(|p| a.starts_with(p))
+            }
+
+            // Exact is subset of SuffixOneOf if the value ends with
+            // at least one listed suffix.
+            (Constraint::Exact(a), Constraint::SuffixOneOf(suffixes)) => {
+                string_list_is_valid(suffixes) && suffixes.iter().any(|s| a.ends_with(s))
+            }
+
             // Exact is subset of Suffix if the value ends with the suffix
             (Constraint::Exact(a), Constraint::Suffix(suffix)) => {
                 !suffix.is_empty() && a.ends_with(suffix)
@@ -559,6 +571,26 @@ impl Constraint {
                     })
             }
 
+            // OneOf is subset of PrefixOneOf if every allowed value
+            // starts with at least one listed prefix.
+            (Constraint::OneOf(values), Constraint::PrefixOneOf(prefixes)) => {
+                string_list_is_valid(prefixes)
+                    && !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|v| prefixes.iter().any(|p| v.starts_with(p)))
+            }
+
+            // OneOf is subset of SuffixOneOf if every allowed value
+            // ends with at least one listed suffix.
+            (Constraint::OneOf(values), Constraint::SuffixOneOf(suffixes)) => {
+                string_list_is_valid(suffixes)
+                    && !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|v| suffixes.iter().any(|s| v.ends_with(s)))
+            }
+
             // OneOf is subset of Suffix if every allowed value ends with the suffix
             (Constraint::OneOf(values), Constraint::Suffix(suffix)) => {
                 !suffix.is_empty() && values.iter().all(|v| v.ends_with(suffix))
@@ -623,9 +655,40 @@ impl Constraint {
             // Prefix is subset of Prefix if new prefix starts with (extends) old prefix
             (Constraint::Prefix(new), Constraint::Prefix(old)) => new.starts_with(old),
 
+            // Prefix is subset of PrefixOneOf if it equals or extends
+            // some listed parent prefix (no new starting region).
+            (Constraint::Prefix(prefix), Constraint::PrefixOneOf(old)) => {
+                !prefix.is_empty()
+                    && string_list_is_valid(old)
+                    && old.iter().any(|p| prefix.starts_with(p))
+            }
+
+            // PrefixOneOf may replace Prefix when every child prefix
+            // equals or extends the old prefix.
+            (Constraint::PrefixOneOf(new), Constraint::Prefix(old)) => {
+                !old.is_empty()
+                    && string_list_is_valid(new)
+                    && new.iter().all(|p| p.starts_with(old))
+            }
+
+            // PrefixOneOf → PrefixOneOf: every child prefix must equal
+            // some parent prefix or be a strict extension of one.
+            // The child may only shrink/narrow the allowed set.
+            (Constraint::PrefixOneOf(new), Constraint::PrefixOneOf(old)) => {
+                prefix_one_of_tightens(new, old)
+            }
+
             // Prefix is subset of Contains if every value with that prefix contains the needle
             (Constraint::Prefix(prefix), Constraint::Contains(needle)) => {
                 !needle.is_empty() && prefix.contains(needle)
+            }
+
+            // PrefixOneOf is subset of Contains if every listed prefix
+            // already contains the needle.
+            (Constraint::PrefixOneOf(prefixes), Constraint::Contains(needle)) => {
+                string_list_is_valid(prefixes)
+                    && !needle.is_empty()
+                    && prefixes.iter().all(|p| p.contains(needle))
             }
 
             // Prefix is subset of MaxLen if... well, prefix doesn't constrain length
@@ -810,9 +873,38 @@ impl Constraint {
                 !new.is_empty() && !old.is_empty() && new.ends_with(old)
             }
 
+            // Suffix is subset of SuffixOneOf if it equals or extends
+            // some listed parent suffix (no new ending region).
+            (Constraint::Suffix(suffix), Constraint::SuffixOneOf(old)) => {
+                !suffix.is_empty()
+                    && string_list_is_valid(old)
+                    && old.iter().any(|s| suffix.ends_with(s))
+            }
+
+            // SuffixOneOf may replace Suffix when every child suffix
+            // equals or extends the old suffix.
+            (Constraint::SuffixOneOf(new), Constraint::Suffix(old)) => {
+                !old.is_empty() && string_list_is_valid(new) && new.iter().all(|s| s.ends_with(old))
+            }
+
+            // SuffixOneOf → SuffixOneOf: every child suffix must equal
+            // some parent suffix or be a strict extension of one.
+            // The child may only shrink/narrow the allowed set.
+            (Constraint::SuffixOneOf(new), Constraint::SuffixOneOf(old)) => {
+                suffix_one_of_tightens(new, old)
+            }
+
             // Suffix is subset of Contains if every value with that suffix contains the needle
             (Constraint::Suffix(suffix), Constraint::Contains(needle)) => {
                 !needle.is_empty() && suffix.contains(needle)
+            }
+
+            // SuffixOneOf is subset of Contains if every listed suffix
+            // already contains the needle.
+            (Constraint::SuffixOneOf(suffixes), Constraint::Contains(needle)) => {
+                string_list_is_valid(suffixes)
+                    && !needle.is_empty()
+                    && suffixes.iter().all(|s| s.contains(needle))
             }
 
             // Contains is subset of Contains if new needle contains (specializes) old needle
@@ -851,6 +943,16 @@ impl Constraint {
                 !forbidden.is_empty()
                     && !prefix.starts_with(forbidden)
                     && !forbidden.starts_with(prefix)
+            }
+
+            // PrefixOneOf is subset of NotPrefix when every listed prefix
+            // is incomparable with the forbidden prefix.
+            (Constraint::PrefixOneOf(prefixes), Constraint::NotPrefix(forbidden)) => {
+                string_list_is_valid(prefixes)
+                    && !forbidden.is_empty()
+                    && prefixes
+                        .iter()
+                        .all(|p| !p.starts_with(forbidden) && !forbidden.starts_with(p))
             }
 
             // NotContains may replace NotEquals when avoiding the needle still
@@ -899,6 +1001,16 @@ impl Constraint {
                 !forbidden.is_empty()
                     && !suffix.ends_with(forbidden)
                     && !forbidden.ends_with(suffix)
+            }
+
+            // SuffixOneOf is subset of NotSuffix when every listed suffix
+            // is incomparable with the forbidden suffix.
+            (Constraint::SuffixOneOf(suffixes), Constraint::NotSuffix(forbidden)) => {
+                string_list_is_valid(suffixes)
+                    && !forbidden.is_empty()
+                    && suffixes
+                        .iter()
+                        .all(|s| !s.ends_with(forbidden) && !forbidden.ends_with(s))
             }
 
             // NotSuffix may replace NotEquals when avoiding the suffix still
@@ -1019,6 +1131,26 @@ fn len_range_is_valid(min: usize, max: usize) -> bool {
 /// every member is a non-empty string (empty members are wildcards).
 fn string_list_is_valid(values: &[String]) -> bool {
     !values.is_empty() && values.iter().all(|s| !s.is_empty())
+}
+
+/// Every child prefix equals some parent prefix or is a strict
+/// extension that starts with one. Empty lists fail closed.
+fn prefix_one_of_tightens(new: &[String], old: &[String]) -> bool {
+    string_list_is_valid(new)
+        && string_list_is_valid(old)
+        && new
+            .iter()
+            .all(|child| old.iter().any(|parent| child.starts_with(parent)))
+}
+
+/// Every child suffix equals some parent suffix or is a strict
+/// extension that ends with one. Empty lists fail closed.
+fn suffix_one_of_tightens(new: &[String], old: &[String]) -> bool {
+    string_list_is_valid(new)
+        && string_list_is_valid(old)
+        && new
+            .iter()
+            .all(|child| old.iter().any(|parent| child.ends_with(parent)))
 }
 
 /// Convert `n` to `f64` only when the integer is exactly representable.
