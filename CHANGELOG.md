@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.26.0] - 2026-10-12
+
+### Added
+- **`Constraint::PrefixOneOf(Vec<String>)`**: value must start with at least one of the listed UTF-8 prefixes
+- **`Constraint::SuffixOneOf(Vec<String>)`**: value must end with at least one of the listed UTF-8 suffixes
+- CLI JSON forms `{"type":"prefix_one_of","value":["/tmp/","/var/"]}` and `{"type":"suffix_one_of","value":[".txt",".md"]}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6, MinLen=7, Matches=8, NotEquals=9, NotOneOf=10, NotContains=11, NotPrefix=12, NotSuffix=13, NotMatches=14, All=15, Any=16, Not=17, FloatRange=18, LenRange=19, CharLenRange=20, PrefixOneOf=21, SuffixOneOf=22
+- Tokens without the new types still encode identically to 0.25.0
+
+### Notes
+- Stored and encoded as sorted unique strings (same spirit as OneOf / NotOneOf): u8 type + u16 count + each len-prefixed string
+- Attenuation only tightens: every child prefix/suffix must equal some parent entry or be a strict extension of one; the child may only shrink/narrow the allowed set
+- Exact may replace PrefixOneOf/SuffixOneOf when the exact value starts/ends with a listed member
+- OneOf may replace PrefixOneOf/SuffixOneOf when every allowed value starts/ends with a listed member
+- Prefix/Suffix may replace (or be replaced by) the matching `*OneOf` form when every remaining region is a subset
+- Empty lists and empty members are rejected at mint/validate and never match a value (fail closed)
+- Unclear cross-type pairs fail closed
+
 ## [0.25.0] - 2026-10-11
 
 ### Added
