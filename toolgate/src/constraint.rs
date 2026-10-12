@@ -11,8 +11,14 @@
 //! `{"type":"all","value":[...]}`, `{"type":"any","value":[...]}`,
 //! `{"type":"not","value":{...}}`,
 //! `{"type":"float_range","value":{"min":...,"max":...}}`,
-//! `{"type":"len_range","value":{"min":...,"max":...}}`, and
-//! `{"type":"char_len_range","value":{"min":...,"max":...}}`.
+//! `{"type":"len_range","value":{"min":...,"max":...}}`,
+//! `{"type":"char_len_range","value":{"min":...,"max":...}}`,
+//! `{"type":"prefix_one_of","value":["/tmp/","/var/"]}`, and
+//! `{"type":"suffix_one_of","value":[".txt",".md"]}`.
+//! [`Constraint::PrefixOneOf`] requires the value to start with at least
+//! one listed UTF-8 prefix. [`Constraint::SuffixOneOf`] requires the value
+//! to end with at least one listed UTF-8 suffix. Empty lists and empty
+//! members are rejected at mint/validate and never match (fail closed).
 
 use std::collections::BTreeMap;
 
@@ -143,6 +149,28 @@ pub enum Constraint {
     /// is valid and accepts the empty string when `N` allows it.
     #[serde(rename = "char_len_range")]
     CharLenRange { min: usize, max: usize },
+    /// Value must start with at least one of the listed UTF-8 prefixes.
+    ///
+    /// Stored and encoded as sorted unique strings, the same spirit as [`OneOf`].
+    /// An empty list is rejected at mint/validate and never matches a
+    /// value (fail closed). An empty string in the list is rejected at
+    /// mint/validate and never matches (fail closed); an empty prefix
+    /// would otherwise be a wildcard.
+    ///
+    /// JSON: `{"type":"prefix_one_of","value":["/tmp/","/var/"]}`
+    #[serde(rename = "prefix_one_of")]
+    PrefixOneOf(Vec<String>),
+    /// Value must end with at least one of the listed UTF-8 suffixes.
+    ///
+    /// Stored and encoded as sorted unique strings, the same spirit as [`OneOf`].
+    /// An empty list is rejected at mint/validate and never matches a
+    /// value (fail closed). An empty string in the list is rejected at
+    /// mint/validate and never matches (fail closed), the same spirit
+    /// as an empty [`Suffix`].
+    ///
+    /// JSON: `{"type":"suffix_one_of","value":[".txt",".md"]}`
+    #[serde(rename = "suffix_one_of")]
+    SuffixOneOf(Vec<String>),
 }
 
 impl PartialEq for Constraint {
@@ -208,6 +236,8 @@ impl PartialEq for Constraint {
                     max: b_max,
                 },
             ) => a_min == b_min && a_max == b_max,
+            (Constraint::PrefixOneOf(a), Constraint::PrefixOneOf(b)) => a == b,
+            (Constraint::SuffixOneOf(a), Constraint::SuffixOneOf(b)) => a == b,
             _ => false,
         }
     }
@@ -279,14 +309,23 @@ impl Constraint {
                 let count = value.chars().count();
                 len_range_is_valid(*min, *max) && count >= *min && count <= *max
             }
+            // Empty list or empty member would be a wildcard / match
+            // nothing; fail closed, same spirit as Prefix/Suffix.
+            Constraint::PrefixOneOf(prefixes) => {
+                string_list_is_valid(prefixes) && prefixes.iter().any(|p| value.starts_with(p))
+            }
+            Constraint::SuffixOneOf(suffixes) => {
+                string_list_is_valid(suffixes) && suffixes.iter().any(|s| value.ends_with(s))
+            }
         }
     }
 
     /// Empty suffix/contains/matches/not_contains/not_prefix/not_suffix/
-    /// not_matches needles, empty NotOneOf denylists, empty All/Any
-    /// composites, and a `Not` whose child is an empty pattern match
-    /// nothing and must not be treated as wildcards. A composite that
-    /// contains an empty child is also empty.
+    /// not_matches needles, empty NotOneOf denylists, empty PrefixOneOf
+    /// or SuffixOneOf lists (or a list containing an empty member), empty
+    /// All/Any composites, and a `Not` whose child is an empty pattern
+    /// match nothing and must not be treated as wildcards. A composite
+    /// that contains an empty child is also empty.
     pub fn is_empty_pattern(&self) -> bool {
         match self {
             Constraint::Suffix(value)
@@ -297,6 +336,9 @@ impl Constraint {
             | Constraint::NotSuffix(value)
             | Constraint::NotMatches(value) => value.is_empty(),
             Constraint::NotOneOf(denied) => denied.is_empty(),
+            Constraint::PrefixOneOf(values) | Constraint::SuffixOneOf(values) => {
+                !string_list_is_valid(values)
+            }
             Constraint::All(children) | Constraint::Any(children) => {
                 children.is_empty() || children.iter().any(|c| c.is_empty_pattern())
             }
@@ -971,6 +1013,12 @@ fn float_range_is_valid(min: f64, max: f64) -> bool {
 /// Inclusive length bounds are valid only when they are ordered.
 fn len_range_is_valid(min: usize, max: usize) -> bool {
     min <= max
+}
+
+/// PrefixOneOf / SuffixOneOf lists are valid only when non-empty and
+/// every member is a non-empty string (empty members are wildcards).
+fn string_list_is_valid(values: &[String]) -> bool {
+    !values.is_empty() && values.iter().all(|s| !s.is_empty())
 }
 
 /// Convert `n` to `f64` only when the integer is exactly representable.

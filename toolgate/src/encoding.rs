@@ -398,6 +398,14 @@ fn encode_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
             buf.extend_from_slice(&(*min as u64).to_be_bytes());
             buf.extend_from_slice(&(*max as u64).to_be_bytes());
         }
+        Constraint::PrefixOneOf(values) => {
+            buf.push(21); // type = PrefixOneOf
+            encode_sorted_unique_strings(buf, values);
+        }
+        Constraint::SuffixOneOf(values) => {
+            buf.push(22); // type = SuffixOneOf
+            encode_sorted_unique_strings(buf, values);
+        }
     }
 }
 
@@ -406,6 +414,18 @@ fn encode_len_prefixed(buf: &mut Vec<u8>, value: &str) {
     let bytes = value.as_bytes();
     buf.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
     buf.extend_from_slice(bytes);
+}
+
+/// Encode a string list as u16 count + each len-prefixed string,
+/// sorted and unique (same layout as OneOf / NotOneOf).
+fn encode_sorted_unique_strings(buf: &mut Vec<u8>, values: &[String]) {
+    let mut sorted: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
+    sorted.sort();
+    sorted.dedup();
+    buf.extend_from_slice(&(sorted.len() as u16).to_be_bytes());
+    for value in sorted {
+        encode_len_prefixed(buf, value);
+    }
 }
 
 #[cfg(test)]

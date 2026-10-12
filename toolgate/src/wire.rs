@@ -189,6 +189,14 @@ fn encode_constraint_value_to_wire(buf: &mut Vec<u8>, constraint: &Constraint) {
             buf.extend_from_slice(&(*min as u64).to_be_bytes());
             buf.extend_from_slice(&(*max as u64).to_be_bytes());
         }
+        Constraint::PrefixOneOf(values) => {
+            buf.push(21);
+            encode_sorted_unique_strings(buf, values);
+        }
+        Constraint::SuffixOneOf(values) => {
+            buf.push(22);
+            encode_sorted_unique_strings(buf, values);
+        }
     }
 }
 
@@ -196,6 +204,16 @@ fn encode_len_prefixed(buf: &mut Vec<u8>, value: &str) {
     let bytes = value.as_bytes();
     buf.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
     buf.extend_from_slice(bytes);
+}
+
+fn encode_sorted_unique_strings(buf: &mut Vec<u8>, values: &[String]) {
+    let mut sorted: Vec<&str> = values.iter().map(|s| s.as_str()).collect();
+    sorted.sort();
+    sorted.dedup();
+    buf.extend_from_slice(&(sorted.len() as u16).to_be_bytes());
+    for value in sorted {
+        encode_len_prefixed(buf, value);
+    }
 }
 
 fn read_wire_bytes<'a>(data: &'a [u8], pos: &mut usize, len: usize) -> Result<&'a [u8], WireError> {
@@ -215,6 +233,15 @@ fn read_wire_utf8(data: &[u8], pos: &mut usize) -> Result<String, WireError> {
     let len = read_wire_u16(data, pos)?;
     let bytes = read_wire_bytes(data, pos, len)?;
     String::from_utf8(bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)
+}
+
+fn read_wire_string_list(data: &[u8], pos: &mut usize) -> Result<Vec<String>, WireError> {
+    let count = read_wire_u16(data, pos)?;
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values.push(read_wire_utf8(data, pos)?);
+    }
+    Ok(values)
 }
 
 /// Decode a single constraint from wire format.
@@ -312,6 +339,8 @@ fn decode_constraint_value_from_wire(
                 u64::from_be_bytes(read_wire_bytes(data, pos, 8)?.try_into().unwrap()) as usize;
             Constraint::CharLenRange { min, max }
         }
+        21 => Constraint::PrefixOneOf(read_wire_string_list(data, pos)?),
+        22 => Constraint::SuffixOneOf(read_wire_string_list(data, pos)?),
         _ => return Err(WireError::UnexpectedEof), // Invalid constraint type
     };
 
