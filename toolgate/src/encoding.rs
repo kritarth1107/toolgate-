@@ -20,7 +20,7 @@
 //! - constraints_count: u16
 //! - for each constraint (sorted by key):
 //!   - key: u16 length + UTF-8 bytes
-//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone)
+//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone)
 //!   - constraint_data: type-specific encoding
 //!
 //! Format v5 (backward-compatible extension):
@@ -63,6 +63,8 @@
 //! - SuffixOneOf: u16 count + (for each value, sorted unique: u16 length + UTF-8 bytes)
 //! - ContainsAny: u16 count + (for each value, sorted unique: u16 length + UTF-8 bytes)
 //! - ContainsNone: u16 count + (for each value, sorted unique: u16 length + UTF-8 bytes)
+//! - MatchesAny: u16 count + (for each value, sorted unique: u16 length + UTF-8 bytes)
+//! - MatchesNone: u16 count + (for each value, sorted unique: u16 length + UTF-8 bytes)
 //!
 //! The v5 format appends jti after constraints. Tokens without jti
 //! encode identically to v4. Tokens without constraints and without jti
@@ -416,6 +418,14 @@ fn encode_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
         }
         Constraint::ContainsNone(values) => {
             buf.push(24); // type = ContainsNone
+            encode_sorted_unique_strings(buf, values);
+        }
+        Constraint::MatchesAny(values) => {
+            buf.push(25); // type = MatchesAny
+            encode_sorted_unique_strings(buf, values);
+        }
+        Constraint::MatchesNone(values) => {
+            buf.push(26); // type = MatchesNone
             encode_sorted_unique_strings(buf, values);
         }
     }
@@ -1176,6 +1186,74 @@ mod tests {
             0x00, 0x02, // 2 values after sort+unique
             0x00, 0x08, b'p', b'a', b's', b's', b'w', b'o', b'r', b'd', // "password"
             0x00, 0x06, b's', b'e', b'c', b'r', b'e', b't', // "secret"
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_matches_any() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "file".to_string(),
+            Constraint::MatchesAny(vec!["*.md".to_string(), "*.txt".to_string()]),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'f', b'i', b'l', b'e', // key "file"
+            0x19, // type = MatchesAny
+            0x00, 0x02, // 2 values, sorted unique
+            0x00, 0x04, b'*', b'.', b'm', b'd', // "*.md"
+            0x00, 0x05, b'*', b'.', b't', b'x', b't', // "*.txt"
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_matches_none() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "skip".to_string(),
+            Constraint::MatchesNone(vec![
+                "*.bak".to_string(),
+                "*.tmp".to_string(),
+                "*.tmp".to_string(),
+            ]),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b's', b'k', b'i', b'p', // key "skip"
+            0x1A, // type = MatchesNone
+            0x00, 0x02, // 2 values after sort+unique
+            0x00, 0x05, b'*', b'.', b'b', b'a', b'k', // "*.bak"
+            0x00, 0x05, b'*', b'.', b't', b'm', b'p', // "*.tmp"
+        ]));
+    }
+
+    #[test]
+    fn encoding_without_matches_any_identical_to_prior() {
+        // Tokens that do not use MatchesAny/MatchesNone must keep the 0.27.0 bytes.
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "note".to_string(),
+            Constraint::ContainsAny(vec!["var".to_string(), "tmp".to_string()]),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'n', b'o', b't', b'e', // key "note"
+            0x17, // type = ContainsAny
+            0x00, 0x02, // 2 values, sorted unique
+            0x00, 0x03, b't', b'm', b'p', // "tmp"
+            0x00, 0x03, b'v', b'a', b'r', // "var"
         ]));
     }
 
