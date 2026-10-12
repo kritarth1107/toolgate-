@@ -20,7 +20,7 @@
 //! - constraints_count: u16
 //! - for each constraint (sorted by key):
 //!   - key: u16 length + UTF-8 bytes
-//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange)
+//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf)
 //!   - constraint_data: type-specific encoding
 //!
 //! Format v5 (backward-compatible extension):
@@ -59,6 +59,8 @@
 //!   `to_be_bytes` style as IntRange's i64 pair)
 //! - LenRange: u64 min + u64 max (same length encoding as MaxLen/MinLen)
 //! - CharLenRange: u64 min + u64 max (same length encoding as LenRange/MaxLen/MinLen)
+//! - PrefixOneOf: u16 count + (for each value, sorted unique: u16 length + UTF-8 bytes)
+//! - SuffixOneOf: u16 count + (for each value, sorted unique: u16 length + UTF-8 bytes)
 //!
 //! The v5 format appends jti after constraints. Tokens without jti
 //! encode identically to v4. Tokens without constraints and without jti
@@ -1057,6 +1059,73 @@ mod tests {
 
     #[test]
     fn encoding_constraint_charlenrange() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "q".to_string(),
+            Constraint::CharLenRange { min: 3, max: 16 },
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x01, b'q', // key "q"
+            0x14, // type = CharLenRange
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, // u64 min 3
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, // u64 max 16
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_prefix_one_of() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "path".to_string(),
+            Constraint::PrefixOneOf(vec!["/var/".to_string(), "/tmp/".to_string()]),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'p', b'a', b't', b'h', // key "path"
+            0x15, // type = PrefixOneOf
+            0x00, 0x02, // 2 values, sorted unique
+            0x00, 0x05, b'/', b't', b'm', b'p', b'/', // "/tmp/"
+            0x00, 0x05, b'/', b'v', b'a', b'r', b'/', // "/var/"
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_suffix_one_of() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "name".to_string(),
+            Constraint::SuffixOneOf(vec![
+                ".md".to_string(),
+                ".txt".to_string(),
+                ".md".to_string(),
+            ]),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'n', b'a', b'm', b'e', // key "name"
+            0x16, // type = SuffixOneOf
+            0x00, 0x02, // 2 values after sort+unique
+            0x00, 0x03, b'.', b'm', b'd', // ".md"
+            0x00, 0x04, b'.', b't', b'x', b't', // ".txt"
+        ]));
+    }
+
+    #[test]
+    fn encoding_without_prefix_one_of_identical_to_prior() {
+        // Tokens that do not use PrefixOneOf/SuffixOneOf must keep the 0.25.0 bytes.
         use std::collections::BTreeMap;
         let mut constraints: Constraints = BTreeMap::new();
         constraints.insert(
