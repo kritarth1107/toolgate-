@@ -20,7 +20,7 @@
 //! - constraints_count: u16
 //! - for each constraint (sorted by key):
 //!   - key: u16 length + UTF-8 bytes
-//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf)
+//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone)
 //!   - constraint_data: type-specific encoding
 //!
 //! Format v5 (backward-compatible extension):
@@ -61,6 +61,8 @@
 //! - CharLenRange: u64 min + u64 max (same length encoding as LenRange/MaxLen/MinLen)
 //! - PrefixOneOf: u16 count + (for each value, sorted unique: u16 length + UTF-8 bytes)
 //! - SuffixOneOf: u16 count + (for each value, sorted unique: u16 length + UTF-8 bytes)
+//! - ContainsAny: u16 count + (for each value, sorted unique: u16 length + UTF-8 bytes)
+//! - ContainsNone: u16 count + (for each value, sorted unique: u16 length + UTF-8 bytes)
 //!
 //! The v5 format appends jti after constraints. Tokens without jti
 //! encode identically to v4. Tokens without constraints and without jti
@@ -1128,6 +1130,74 @@ mod tests {
             0x00, 0x02, // 2 values after sort+unique
             0x00, 0x03, b'.', b'm', b'd', // ".md"
             0x00, 0x04, b'.', b't', b'x', b't', // ".txt"
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_contains_any() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "note".to_string(),
+            Constraint::ContainsAny(vec!["var".to_string(), "tmp".to_string()]),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'n', b'o', b't', b'e', // key "note"
+            0x17, // type = ContainsAny
+            0x00, 0x02, // 2 values, sorted unique
+            0x00, 0x03, b't', b'm', b'p', // "tmp"
+            0x00, 0x03, b'v', b'a', b'r', // "var"
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_contains_none() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "memo".to_string(),
+            Constraint::ContainsNone(vec![
+                "password".to_string(),
+                "secret".to_string(),
+                "secret".to_string(),
+            ]),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'm', b'e', b'm', b'o', // key "memo"
+            0x18, // type = ContainsNone
+            0x00, 0x02, // 2 values after sort+unique
+            0x00, 0x08, b'p', b'a', b's', b's', b'w', b'o', b'r', b'd', // "password"
+            0x00, 0x06, b's', b'e', b'c', b'r', b'e', b't', // "secret"
+        ]));
+    }
+
+    #[test]
+    fn encoding_without_contains_any_identical_to_prior() {
+        // Tokens that do not use ContainsAny/ContainsNone must keep the 0.26.0 bytes.
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "path".to_string(),
+            Constraint::PrefixOneOf(vec!["/var/".to_string(), "/tmp/".to_string()]),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'p', b'a', b't', b'h', // key "path"
+            0x15, // type = PrefixOneOf
+            0x00, 0x02, // 2 values, sorted unique
+            0x00, 0x05, b'/', b't', b'm', b'p', b'/', // "/tmp/"
+            0x00, 0x05, b'/', b'v', b'a', b'r', b'/', // "/var/"
         ]));
     }
 
