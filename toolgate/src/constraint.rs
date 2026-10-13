@@ -17,8 +17,10 @@
 //! `{"type":"suffix_one_of","value":[".txt",".md"]}`,
 //! `{"type":"contains_any","value":["tmp","var"]}`,
 //! `{"type":"contains_none","value":["secret","password"]}`,
-//! `{"type":"matches_any","value":["*.txt","*.md"]}`, and
-//! `{"type":"matches_none","value":["*.tmp","*.bak"]}`.
+//! `{"type":"matches_any","value":["*.txt","*.md"]}`,
+//! `{"type":"matches_none","value":["*.tmp","*.bak"]}`,
+//! `{"type":"prefix_none","value":["/etc/","/root/"]}`, and
+//! `{"type":"suffix_none","value":[".bak",".tmp"]}`.
 //! [`Constraint::PrefixOneOf`] requires the value to start with at least
 //! one listed UTF-8 prefix. [`Constraint::SuffixOneOf`] requires the value
 //! to end with at least one listed UTF-8 suffix. [`Constraint::ContainsAny`]
@@ -26,8 +28,11 @@
 //! [`Constraint::ContainsNone`] requires the value to contain none of the
 //! listed UTF-8 needles. [`Constraint::MatchesAny`] requires the value to
 //! match at least one listed `*` / `?` glob. [`Constraint::MatchesNone`]
-//! requires the value to match none of the listed globs. Empty lists and
-//! empty members are rejected at mint/validate and never match (fail closed).
+//! requires the value to match none of the listed globs.
+//! [`Constraint::PrefixNone`] requires the value to start with none of the
+//! listed UTF-8 prefixes. [`Constraint::SuffixNone`] requires the value to
+//! end with none of the listed UTF-8 suffixes. Empty lists and empty
+//! members are rejected at mint/validate and never match (fail closed).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -228,6 +233,30 @@ pub enum Constraint {
     /// JSON: `{"type":"matches_none","value":["*.tmp","*.bak"]}`
     #[serde(rename = "matches_none")]
     MatchesNone(Vec<String>),
+    /// Value must not start with any of the listed UTF-8 prefixes.
+    ///
+    /// Same spirit as [`NotPrefix`], inverted over a list. Stored and
+    /// encoded as sorted unique strings, the same spirit as [`NotOneOf`].
+    /// An empty list is rejected at mint/validate and never matches a
+    /// value (fail closed). An empty string in the list is rejected at
+    /// mint/validate and never matches (fail closed); an empty prefix
+    /// would otherwise forbid nothing, the same spirit as [`NotPrefix`].
+    ///
+    /// JSON: `{"type":"prefix_none","value":["/etc/","/root/"]}`
+    #[serde(rename = "prefix_none")]
+    PrefixNone(Vec<String>),
+    /// Value must not end with any of the listed UTF-8 suffixes.
+    ///
+    /// Same spirit as [`NotSuffix`], inverted over a list. Stored and
+    /// encoded as sorted unique strings, the same spirit as [`NotOneOf`].
+    /// An empty list is rejected at mint/validate and never matches a
+    /// value (fail closed). An empty string in the list is rejected at
+    /// mint/validate and never matches (fail closed); an empty suffix
+    /// would otherwise forbid nothing, the same spirit as [`NotSuffix`].
+    ///
+    /// JSON: `{"type":"suffix_none","value":[".bak",".tmp"]}`
+    #[serde(rename = "suffix_none")]
+    SuffixNone(Vec<String>),
 }
 
 impl PartialEq for Constraint {
@@ -299,6 +328,8 @@ impl PartialEq for Constraint {
             (Constraint::ContainsNone(a), Constraint::ContainsNone(b)) => a == b,
             (Constraint::MatchesAny(a), Constraint::MatchesAny(b)) => a == b,
             (Constraint::MatchesNone(a), Constraint::MatchesNone(b)) => a == b,
+            (Constraint::PrefixNone(a), Constraint::PrefixNone(b)) => a == b,
+            (Constraint::SuffixNone(a), Constraint::SuffixNone(b)) => a == b,
             _ => false,
         }
     }
@@ -390,16 +421,22 @@ impl Constraint {
             Constraint::MatchesNone(patterns) => {
                 string_list_is_valid(patterns) && patterns.iter().all(|p| !glob_match(p, value))
             }
+            Constraint::PrefixNone(prefixes) => {
+                string_list_is_valid(prefixes) && prefixes.iter().all(|p| !value.starts_with(p))
+            }
+            Constraint::SuffixNone(suffixes) => {
+                string_list_is_valid(suffixes) && suffixes.iter().all(|s| !value.ends_with(s))
+            }
         }
     }
 
     /// Empty suffix/contains/matches/not_contains/not_prefix/not_suffix/
     /// not_matches needles, empty NotOneOf denylists, empty PrefixOneOf,
-    /// SuffixOneOf, ContainsAny, ContainsNone, MatchesAny, or MatchesNone
-    /// lists (or a list containing an empty member), empty All/Any
-    /// composites, and a `Not` whose child is an empty pattern match
-    /// nothing and must not be treated as wildcards. A composite that
-    /// contains an empty child is also empty.
+    /// SuffixOneOf, ContainsAny, ContainsNone, MatchesAny, MatchesNone,
+    /// PrefixNone, or SuffixNone lists (or a list containing an empty
+    /// member), empty All/Any composites, and a `Not` whose child is an
+    /// empty pattern match nothing and must not be treated as wildcards.
+    /// A composite that contains an empty child is also empty.
     pub fn is_empty_pattern(&self) -> bool {
         match self {
             Constraint::Suffix(value)
@@ -415,7 +452,9 @@ impl Constraint {
             | Constraint::ContainsAny(values)
             | Constraint::ContainsNone(values)
             | Constraint::MatchesAny(values)
-            | Constraint::MatchesNone(values) => !string_list_is_valid(values),
+            | Constraint::MatchesNone(values)
+            | Constraint::PrefixNone(values)
+            | Constraint::SuffixNone(values) => !string_list_is_valid(values),
             Constraint::All(children) | Constraint::Any(children) => {
                 children.is_empty() || children.iter().any(|c| c.is_empty_pattern())
             }
@@ -551,6 +590,18 @@ impl Constraint {
             // of the listed globs.
             (Constraint::Exact(a), Constraint::MatchesNone(patterns)) => {
                 string_list_is_valid(patterns) && patterns.iter().all(|p| !glob_match(p, a))
+            }
+
+            // Exact is subset of PrefixNone if the value starts with
+            // none of the listed prefixes.
+            (Constraint::Exact(a), Constraint::PrefixNone(prefixes)) => {
+                string_list_is_valid(prefixes) && prefixes.iter().all(|p| !a.starts_with(p))
+            }
+
+            // Exact is subset of SuffixNone if the value ends with
+            // none of the listed suffixes.
+            (Constraint::Exact(a), Constraint::SuffixNone(suffixes)) => {
+                string_list_is_valid(suffixes) && suffixes.iter().all(|s| !a.ends_with(s))
             }
 
             // Exact is subset of Suffix if the value ends with the suffix
@@ -730,6 +781,26 @@ impl Constraint {
                         .all(|v| patterns.iter().all(|p| !glob_match(p, v)))
             }
 
+            // OneOf is subset of PrefixNone if every allowed value
+            // starts with none of the listed prefixes.
+            (Constraint::OneOf(values), Constraint::PrefixNone(prefixes)) => {
+                string_list_is_valid(prefixes)
+                    && !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|v| prefixes.iter().all(|p| !v.starts_with(p)))
+            }
+
+            // OneOf is subset of SuffixNone if every allowed value
+            // ends with none of the listed suffixes.
+            (Constraint::OneOf(values), Constraint::SuffixNone(suffixes)) => {
+                string_list_is_valid(suffixes)
+                    && !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|v| suffixes.iter().all(|s| !v.ends_with(s)))
+            }
+
             // OneOf is subset of Suffix if every allowed value ends with the suffix
             (Constraint::OneOf(values), Constraint::Suffix(suffix)) => {
                 !suffix.is_empty() && values.iter().all(|v| v.ends_with(suffix))
@@ -892,6 +963,20 @@ impl Constraint {
             // (L(old) ⊆ L(new)). Extra denials are allowed.
             (Constraint::MatchesNone(new), Constraint::MatchesNone(old)) => {
                 matches_none_tightens(new, old)
+            }
+
+            // PrefixNone → PrefixNone: every old prefix must stay
+            // covered by a new prefix that is a prefix of it
+            // (shorter/equal forbids more). Extra denials are allowed.
+            (Constraint::PrefixNone(new), Constraint::PrefixNone(old)) => {
+                prefix_none_tightens(new, old)
+            }
+
+            // SuffixNone → SuffixNone: every old suffix must stay
+            // covered by a new suffix that is a suffix of it
+            // (shorter/equal forbids more). Extra denials are allowed.
+            (Constraint::SuffixNone(new), Constraint::SuffixNone(old)) => {
+                suffix_none_tightens(new, old)
             }
 
             // MaxLen is NOT a subset of Prefix (can have values not starting with prefix)
@@ -1208,6 +1293,61 @@ impl Constraint {
                         .all(|p| !p.starts_with(forbidden) && !forbidden.starts_with(p))
             }
 
+            // Prefix is subset of PrefixNone when the required prefix is
+            // incomparable with every denied prefix.
+            (Constraint::Prefix(prefix), Constraint::PrefixNone(denied)) => {
+                !prefix.is_empty()
+                    && string_list_is_valid(denied)
+                    && denied
+                        .iter()
+                        .all(|d| !prefix.starts_with(d) && !d.starts_with(prefix))
+            }
+
+            // PrefixOneOf is subset of PrefixNone when every listed
+            // prefix is incomparable with every denied prefix.
+            (Constraint::PrefixOneOf(prefixes), Constraint::PrefixNone(denied)) => {
+                string_list_is_valid(prefixes)
+                    && string_list_is_valid(denied)
+                    && prefixes.iter().all(|p| {
+                        denied
+                            .iter()
+                            .all(|d| !p.starts_with(d) && !d.starts_with(p))
+                    })
+            }
+
+            // NotPrefix is subset of PrefixNone when avoiding the
+            // single prefix still forbids every listed parent prefix.
+            (Constraint::NotPrefix(prefix), Constraint::PrefixNone(old)) => {
+                !prefix.is_empty()
+                    && string_list_is_valid(old)
+                    && old.iter().all(|parent| parent.starts_with(prefix))
+            }
+
+            // PrefixNone may replace NotPrefix when some new prefix is
+            // a prefix of the old (covers that denial); extra prefixes
+            // tighten further.
+            (Constraint::PrefixNone(new), Constraint::NotPrefix(old)) => {
+                !old.is_empty()
+                    && string_list_is_valid(new)
+                    && new.iter().any(|child| old.starts_with(child))
+            }
+
+            // PrefixNone may replace NotEquals when avoiding some
+            // prefix still forbids that exact value.
+            (Constraint::PrefixNone(prefixes), Constraint::NotEquals(forbidden)) => {
+                string_list_is_valid(prefixes) && prefixes.iter().any(|p| forbidden.starts_with(p))
+            }
+
+            // PrefixNone may replace NotOneOf when every denied value
+            // starts with at least one listed prefix.
+            (Constraint::PrefixNone(prefixes), Constraint::NotOneOf(denied)) => {
+                string_list_is_valid(prefixes)
+                    && !denied.is_empty()
+                    && denied
+                        .iter()
+                        .all(|v| prefixes.iter().any(|p| v.starts_with(p)))
+            }
+
             // NotContains may replace NotEquals when avoiding the needle still
             // forbids that exact value (the forbidden string contains the needle).
             (Constraint::NotContains(needle), Constraint::NotEquals(forbidden)) => {
@@ -1296,6 +1436,59 @@ impl Constraint {
                     && suffixes
                         .iter()
                         .all(|s| !s.ends_with(forbidden) && !forbidden.ends_with(s))
+            }
+
+            // Suffix is subset of SuffixNone when the required suffix is
+            // incomparable with every denied suffix.
+            (Constraint::Suffix(suffix), Constraint::SuffixNone(denied)) => {
+                !suffix.is_empty()
+                    && string_list_is_valid(denied)
+                    && denied
+                        .iter()
+                        .all(|d| !suffix.ends_with(d) && !d.ends_with(suffix))
+            }
+
+            // SuffixOneOf is subset of SuffixNone when every listed
+            // suffix is incomparable with every denied suffix.
+            (Constraint::SuffixOneOf(suffixes), Constraint::SuffixNone(denied)) => {
+                string_list_is_valid(suffixes)
+                    && string_list_is_valid(denied)
+                    && suffixes
+                        .iter()
+                        .all(|s| denied.iter().all(|d| !s.ends_with(d) && !d.ends_with(s)))
+            }
+
+            // NotSuffix is subset of SuffixNone when avoiding the
+            // single suffix still forbids every listed parent suffix.
+            (Constraint::NotSuffix(suffix), Constraint::SuffixNone(old)) => {
+                !suffix.is_empty()
+                    && string_list_is_valid(old)
+                    && old.iter().all(|parent| parent.ends_with(suffix))
+            }
+
+            // SuffixNone may replace NotSuffix when some new suffix is
+            // a suffix of the old (covers that denial); extra suffixes
+            // tighten further.
+            (Constraint::SuffixNone(new), Constraint::NotSuffix(old)) => {
+                !old.is_empty()
+                    && string_list_is_valid(new)
+                    && new.iter().any(|child| old.ends_with(child))
+            }
+
+            // SuffixNone may replace NotEquals when avoiding some
+            // suffix still forbids that exact value.
+            (Constraint::SuffixNone(suffixes), Constraint::NotEquals(forbidden)) => {
+                string_list_is_valid(suffixes) && suffixes.iter().any(|s| forbidden.ends_with(s))
+            }
+
+            // SuffixNone may replace NotOneOf when every denied value
+            // ends with at least one listed suffix.
+            (Constraint::SuffixNone(suffixes), Constraint::NotOneOf(denied)) => {
+                string_list_is_valid(suffixes)
+                    && !denied.is_empty()
+                    && denied
+                        .iter()
+                        .all(|v| suffixes.iter().any(|s| v.ends_with(s)))
             }
 
             // NotSuffix may replace NotEquals when avoiding the suffix still
@@ -1429,10 +1622,33 @@ fn len_range_is_valid(min: usize, max: usize) -> bool {
 }
 
 /// PrefixOneOf / SuffixOneOf / ContainsAny / ContainsNone / MatchesAny /
-/// MatchesNone lists are valid only when non-empty and every member is
-/// a non-empty string (empty members are wildcards or empty denials).
+/// MatchesNone / PrefixNone / SuffixNone lists are valid only when
+/// non-empty and every member is a non-empty string (empty members are
+/// wildcards or empty denials).
 fn string_list_is_valid(values: &[String]) -> bool {
     !values.is_empty() && values.iter().all(|s| !s.is_empty())
+}
+
+/// Every old prefix is covered by a new prefix that is a prefix of it
+/// (shorter/equal forbids more). Extra new prefixes are allowed.
+/// Empty lists fail closed.
+fn prefix_none_tightens(new: &[String], old: &[String]) -> bool {
+    string_list_is_valid(new)
+        && string_list_is_valid(old)
+        && old
+            .iter()
+            .all(|parent| new.iter().any(|child| parent.starts_with(child)))
+}
+
+/// Every old suffix is covered by a new suffix that is a suffix of it
+/// (shorter/equal forbids more). Extra new suffixes are allowed.
+/// Empty lists fail closed.
+fn suffix_none_tightens(new: &[String], old: &[String]) -> bool {
+    string_list_is_valid(new)
+        && string_list_is_valid(old)
+        && old
+            .iter()
+            .all(|parent| new.iter().any(|child| parent.ends_with(child)))
 }
 
 /// Every child needle contains (specializes) some parent needle.
@@ -1741,6 +1957,29 @@ mod tests {
         assert!(!c.check("draft.tmp"));
         assert!(!c.check("notes.bak"));
         assert!(!c.check(".tmp"));
+    }
+
+    #[test]
+    fn prefix_none_check() {
+        let c = Constraint::PrefixNone(vec!["/etc/".to_string(), "/root/".to_string()]);
+        assert!(c.check("/tmp/file"));
+        assert!(c.check("/var/log"));
+        assert!(c.check("etc/passwd"));
+        assert!(c.check(""));
+        assert!(!c.check("/etc/passwd"));
+        assert!(!c.check("/root/.ssh"));
+        assert!(!c.check("/etc/"));
+    }
+
+    #[test]
+    fn suffix_none_check() {
+        let c = Constraint::SuffixNone(vec![".bak".to_string(), ".tmp".to_string()]);
+        assert!(c.check("notes.txt"));
+        assert!(c.check("ok"));
+        assert!(c.check(""));
+        assert!(!c.check("notes.bak"));
+        assert!(!c.check("draft.tmp"));
+        assert!(!c.check(".bak"));
     }
 
     #[test]
@@ -2128,6 +2367,34 @@ mod tests {
             assert!(!c.check("anything"));
         }
         assert!(!Constraint::MatchesNone(vec!["*.tmp".to_string()]).is_empty_pattern());
+    }
+
+    #[test]
+    fn empty_prefix_none_fail_closed() {
+        let empty_list = Constraint::PrefixNone(vec![]);
+        let empty_member = Constraint::PrefixNone(vec![String::new()]);
+        let mixed = Constraint::PrefixNone(vec!["/etc/".to_string(), String::new()]);
+        for c in [&empty_list, &empty_member, &mixed] {
+            assert!(c.is_empty_pattern());
+            assert!(!c.check(""));
+            assert!(!c.check("/tmp/foo"));
+            assert!(!c.check("anything"));
+        }
+        assert!(!Constraint::PrefixNone(vec!["/etc/".to_string()]).is_empty_pattern());
+    }
+
+    #[test]
+    fn empty_suffix_none_fail_closed() {
+        let empty_list = Constraint::SuffixNone(vec![]);
+        let empty_member = Constraint::SuffixNone(vec![String::new()]);
+        let mixed = Constraint::SuffixNone(vec![".bak".to_string(), String::new()]);
+        for c in [&empty_list, &empty_member, &mixed] {
+            assert!(c.is_empty_pattern());
+            assert!(!c.check(""));
+            assert!(!c.check("notes.txt"));
+            assert!(!c.check("anything"));
+        }
+        assert!(!Constraint::SuffixNone(vec![".bak".to_string()]).is_empty_pattern());
     }
 
     #[test]
@@ -2555,6 +2822,135 @@ mod tests {
             Constraint::MatchesNone(vec!["admin*".to_string()]).is_subset_of(
                 &Constraint::NotOneOf(vec!["admin".to_string(), "administrator".to_string()])
             )
+        );
+    }
+
+    #[test]
+    fn prefix_none_subset_tightens_only() {
+        let parent = Constraint::PrefixNone(vec!["/etc/".to_string(), "/root/".to_string()]);
+        let grow = Constraint::PrefixNone(vec![
+            "/etc/".to_string(),
+            "/root/".to_string(),
+            "/home/".to_string(),
+        ]);
+        let broaden = Constraint::PrefixNone(vec!["/".to_string()]);
+        let same = Constraint::PrefixNone(vec!["/etc/".to_string(), "/root/".to_string()]);
+        let drop = Constraint::PrefixNone(vec!["/etc/".to_string()]);
+        let specialize = Constraint::PrefixNone(vec!["/etc/passwd".to_string()]);
+        let empty = Constraint::PrefixNone(vec![]);
+        let empty_member = Constraint::PrefixNone(vec!["/etc/".to_string(), String::new()]);
+
+        assert!(grow.is_subset_of(&parent));
+        assert!(broaden.is_subset_of(&parent));
+        assert!(same.is_subset_of(&parent));
+        assert!(!drop.is_subset_of(&parent));
+        assert!(!specialize.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&grow));
+        assert!(parent.is_subset_of(&drop));
+        assert!(!empty.is_subset_of(&parent));
+        assert!(!empty_member.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&empty));
+
+        assert!(Constraint::NotPrefix("/".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::NotPrefix("/etc/".to_string()).is_subset_of(&parent));
+        assert!(
+            Constraint::PrefixNone(vec!["/etc/".to_string(), "/home/".to_string()])
+                .is_subset_of(&Constraint::NotPrefix("/etc/".to_string()))
+        );
+        assert!(!Constraint::PrefixNone(vec!["/etc/passwd".to_string()])
+            .is_subset_of(&Constraint::NotPrefix("/etc/".to_string())));
+
+        assert!(Constraint::Prefix("/tmp/".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Prefix("/etc/".to_string()).is_subset_of(&parent));
+        assert!(
+            Constraint::PrefixOneOf(vec!["/tmp/".to_string(), "/var/".to_string()])
+                .is_subset_of(&parent)
+        );
+        assert!(
+            !Constraint::PrefixOneOf(vec!["/tmp/".to_string(), "/etc/".to_string()])
+                .is_subset_of(&parent)
+        );
+
+        assert!(Constraint::Exact("/tmp/a".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("/etc/passwd".to_string()).is_subset_of(&parent));
+        assert!(
+            Constraint::OneOf(vec!["/tmp/a".to_string(), "/var/b".to_string()])
+                .is_subset_of(&parent)
+        );
+        assert!(
+            !Constraint::OneOf(vec!["/tmp/a".to_string(), "/etc/b".to_string()])
+                .is_subset_of(&parent)
+        );
+
+        assert!(Constraint::PrefixNone(vec!["admin".to_string()])
+            .is_subset_of(&Constraint::NotEquals("admin".to_string())));
+        assert!(Constraint::PrefixNone(vec!["ad".to_string()]).is_subset_of(
+            &Constraint::NotOneOf(vec!["admin".to_string(), "administrator".to_string()])
+        ));
+    }
+
+    #[test]
+    fn suffix_none_subset_tightens_only() {
+        let parent = Constraint::SuffixNone(vec![".tar.bak".to_string(), ".old.bak".to_string()]);
+        let grow = Constraint::SuffixNone(vec![
+            ".tar.bak".to_string(),
+            ".old.bak".to_string(),
+            ".swp".to_string(),
+        ]);
+        let broaden = Constraint::SuffixNone(vec![".bak".to_string()]);
+        let same = Constraint::SuffixNone(vec![".tar.bak".to_string(), ".old.bak".to_string()]);
+        let drop = Constraint::SuffixNone(vec![".tar.bak".to_string()]);
+        let specialize = Constraint::SuffixNone(vec![".extra.tar.bak".to_string()]);
+        let empty = Constraint::SuffixNone(vec![]);
+        let empty_member = Constraint::SuffixNone(vec![".tar.bak".to_string(), String::new()]);
+
+        assert!(grow.is_subset_of(&parent));
+        assert!(broaden.is_subset_of(&parent));
+        assert!(same.is_subset_of(&parent));
+        assert!(!drop.is_subset_of(&parent));
+        assert!(!specialize.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&grow));
+        assert!(parent.is_subset_of(&drop));
+        assert!(!empty.is_subset_of(&parent));
+        assert!(!empty_member.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&empty));
+
+        assert!(Constraint::NotSuffix(".bak".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::NotSuffix(".tar.bak".to_string()).is_subset_of(&parent));
+        assert!(
+            Constraint::SuffixNone(vec![".bak".to_string(), ".swp".to_string()])
+                .is_subset_of(&Constraint::NotSuffix(".bak".to_string()))
+        );
+        assert!(!Constraint::SuffixNone(vec![".extra.tar.bak".to_string()])
+            .is_subset_of(&Constraint::NotSuffix(".bak".to_string())));
+
+        assert!(Constraint::Suffix(".txt".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Suffix(".bak".to_string()).is_subset_of(&parent));
+        assert!(
+            Constraint::SuffixOneOf(vec![".txt".to_string(), ".md".to_string()])
+                .is_subset_of(&parent)
+        );
+        assert!(
+            !Constraint::SuffixOneOf(vec![".txt".to_string(), ".bak".to_string()])
+                .is_subset_of(&parent)
+        );
+
+        assert!(Constraint::Exact("notes.txt".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("notes.tar.bak".to_string()).is_subset_of(&parent));
+        assert!(
+            Constraint::OneOf(vec!["ok".to_string(), "fine".to_string()]).is_subset_of(&parent)
+        );
+        assert!(
+            !Constraint::OneOf(vec!["ok".to_string(), "x.tar.bak".to_string()])
+                .is_subset_of(&parent)
+        );
+
+        assert!(Constraint::SuffixNone(vec![".bak".to_string()])
+            .is_subset_of(&Constraint::NotEquals("notes.bak".to_string())));
+        assert!(
+            Constraint::SuffixNone(vec![".bak".to_string()]).is_subset_of(&Constraint::NotOneOf(
+                vec!["a.bak".to_string(), "b.bak".to_string()]
+            ))
         );
     }
 
@@ -3241,6 +3637,38 @@ mod tests {
     }
 
     #[test]
+    fn json_prefix_none() {
+        let c = Constraint::PrefixNone(vec!["/etc/".to_string(), "/root/".to_string()]);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"prefix_none\""));
+        assert!(json.contains("\"/etc/\""));
+        assert!(json.contains("\"/root/\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"prefix_none","value":["/etc/","/root/"]}"#).unwrap();
+        assert_eq!(from_cli, c);
+    }
+
+    #[test]
+    fn json_suffix_none() {
+        let c = Constraint::SuffixNone(vec![".bak".to_string(), ".tmp".to_string()]);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"suffix_none\""));
+        assert!(json.contains("\".bak\""));
+        assert!(json.contains("\".tmp\""));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"suffix_none","value":[".bak",".tmp"]}"#).unwrap();
+        assert_eq!(from_cli, c);
+    }
+
+    #[test]
     fn json_suffix() {
         let c = Constraint::Suffix(".txt".to_string());
         let json = serde_json::to_string(&c).unwrap();
@@ -3470,6 +3898,13 @@ mod tests {
             Constraint::Not(Box::new(Constraint::MatchesNone(vec![String::new()])));
         assert!(matches_none_empty.is_empty_pattern());
         assert!(!matches_none_empty.check("ok"));
+        let prefix_none_empty = Constraint::All(vec![Constraint::PrefixNone(vec![])]);
+        assert!(prefix_none_empty.is_empty_pattern());
+        assert!(!prefix_none_empty.check("/tmp/foo"));
+        let suffix_none_empty =
+            Constraint::Not(Box::new(Constraint::SuffixNone(vec![String::new()])));
+        assert!(suffix_none_empty.is_empty_pattern());
+        assert!(!suffix_none_empty.check("notes.txt"));
         assert!(!all.check("/tmp/a.txt"));
         assert!(!any.check("notes.txt"));
     }
