@@ -255,6 +255,28 @@ mod tests {
     }
 
     #[test]
+    fn token_string_roundtrip_with_required_keys() {
+        let token = Token::mint_with_required_keys(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            vec!["path".into()],
+        )
+        .unwrap();
+        let decoded = Token::from_token_string(&token.to_token_string()).unwrap();
+        assert_eq!(decoded, token);
+        assert_eq!(decoded.required_keys, vec!["path"]);
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
     fn token_string_matches_wire_bytes() {
         let token = sample_token();
         let encoded = token.to_token_string();

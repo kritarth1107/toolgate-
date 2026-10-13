@@ -1905,4 +1905,106 @@ mod tests {
         assert!(!file.reload_if_changed());
         let _ = fs::remove_file(&path);
     }
+
+    #[test]
+    fn validate_required_key_not_in_allowlist() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["path"],
+                    "required_keys": ["limit"]
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.validate(),
+            Err(PolicyError::RequiredKeyNotAllowed {
+                tool: "read_file".into(),
+                key: "limit".into()
+            })
+        );
+    }
+
+    #[test]
+    fn validate_empty_required_key() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["path"],
+                    "required_keys": [""]
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            policy.validate(),
+            Err(PolicyError::RequiredKeyNotAllowed {
+                tool: "read_file".into(),
+                key: "".into()
+            })
+        );
+    }
+
+    #[test]
+    fn mint_includes_grant_required_keys() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 60,
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["path", "limit"],
+                    "required_keys": ["path"]
+                }]
+            }"#,
+        )
+        .unwrap();
+        let token = policy.mint("read_file", SECRET, NOW).unwrap();
+        assert_eq!(token.required_keys, vec!["path"]);
+        let mut args = BTreeMap::new();
+        args.insert("path".into(), "/tmp/a.txt".into());
+        let verifier = Verifier::new(SECRET).at(NOW);
+        assert!(policy
+            .check_call_with_args(&verifier, &token, "read_file", &args)
+            .is_ok());
+    }
+
+    #[test]
+    fn authorize_token_requires_policy_required_keys() {
+        let loose = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 60,
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["path", "limit"]
+                }]
+            }"#,
+        )
+        .unwrap();
+        let token = loose.mint("read_file", SECRET, NOW).unwrap();
+        assert!(token.required_keys.is_empty());
+
+        let tight = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 60,
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["path", "limit"],
+                    "required_keys": ["path"]
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            tight.authorize_token(&token),
+            Err(TokenError::PolicyDenied { .. })
+        ));
+    }
 }

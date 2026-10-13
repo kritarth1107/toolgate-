@@ -2097,4 +2097,55 @@ mod tests {
         assert!(decoded.max_depth.is_none());
         assert!(decoded.verify(SECRET, 999).is_ok());
     }
+
+    #[test]
+    fn wire_roundtrip_with_required_keys() {
+        let token = Token::mint_with_required_keys(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            vec!["path".into()],
+        )
+        .unwrap();
+        let wire = token.to_wire();
+        assert_eq!(wire[0], WIRE_VERSION);
+        assert_eq!(wire[0], 6);
+
+        let decoded = Token::from_wire(&wire).unwrap();
+        assert_eq!(decoded.required_keys, vec!["path"]);
+        assert_eq!(decoded, token);
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn wire_required_keys_with_nbf_uses_v6() {
+        let token = Token::mint_with_required_keys(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            false,
+            Some(1_900_000_000),
+            Some(2),
+            vec!["path".into()],
+        )
+        .unwrap();
+        let wire = token.to_wire();
+        assert_eq!(wire[0], 6);
+        let decoded = Token::from_wire(&wire).unwrap();
+        assert_eq!(decoded.nbf, Some(1_900_000_000));
+        assert_eq!(decoded.max_depth, Some(2));
+        assert_eq!(decoded.required_keys, vec!["path"]);
+        assert!(decoded.verify(SECRET, 1_950_000_000).is_ok());
+    }
 }

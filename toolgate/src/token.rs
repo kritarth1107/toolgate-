@@ -7695,4 +7695,182 @@ mod tests {
         assert!(matches!(result, Err(TokenError::Revoked { .. })));
         assert_eq!(store.get_count(token.jti.as_ref().unwrap()), 0);
     }
+
+    fn mint_required(keys: Vec<String>) -> Token {
+        Token::mint_with_required_keys(
+            SECRET,
+            "read_file",
+            vec!["path".into(), "limit".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            keys,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn mint_with_required_keys_sorts_and_dedups() {
+        let token = mint_required(vec!["limit".into(), "path".into(), "path".into()]);
+        assert_eq!(token.required_keys, vec!["limit", "path"]);
+        assert!(token.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn mint_rejects_empty_required_key() {
+        let err = Token::mint_with_required_keys(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            vec!["".into()],
+        )
+        .unwrap_err();
+        assert_eq!(err, TokenError::InvalidRequiredKey { key: "".into() });
+        assert_eq!(err.kind(), "invalid_required_key");
+    }
+
+    #[test]
+    fn mint_rejects_required_key_outside_allowlist() {
+        let err = Token::mint_with_required_keys(
+            SECRET,
+            "read_file",
+            vec!["path".into()],
+            2000000000,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+            vec!["offset".into()],
+        )
+        .unwrap_err();
+        assert_eq!(
+            err,
+            TokenError::InvalidRequiredKey {
+                key: "offset".into()
+            }
+        );
+    }
+
+    #[test]
+    fn required_keys_omitted_from_json_when_empty() {
+        let token = Token::mint(SECRET, "read_file", vec!["path".into()], 2000000000);
+        let json = serde_json::to_string(&token).unwrap();
+        assert!(!json.contains("required_keys"));
+    }
+
+    #[test]
+    fn required_keys_json_roundtrip() {
+        let token = mint_required(vec!["path".into()]);
+        let json = serde_json::to_string(&token).unwrap();
+        assert!(json.contains("required_keys"));
+        let parsed: Token = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.required_keys, vec!["path"]);
+        assert!(parsed.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn required_keys_covered_by_mac() {
+        let mut token = mint_required(vec!["path".into()]);
+        token.required_keys.clear();
+        assert_eq!(
+            token.verify(SECRET, 1999999999),
+            Err(TokenError::InvalidMac)
+        );
+    }
+
+    #[test]
+    fn verify_call_requires_listed_keys() {
+        let token = mint_required(vec!["path".into()]);
+        assert!(token
+            .verify_call(SECRET, 1999999999, "read_file", &["path"], None)
+            .is_ok());
+        assert!(token
+            .verify_call(SECRET, 1999999999, "read_file", &["path", "limit"], None)
+            .is_ok());
+        assert_eq!(
+            token.verify_call(SECRET, 1999999999, "read_file", &["limit"], None),
+            Err(TokenError::MissingRequiredKey { key: "path".into() })
+        );
+        assert_eq!(
+            TokenError::MissingRequiredKey { key: "path".into() }.kind(),
+            "missing_required_key"
+        );
+    }
+
+    #[test]
+    fn verify_call_with_args_requires_listed_keys() {
+        let token = mint_required(vec!["path".into()]);
+        let mut args = BTreeMap::new();
+        args.insert("limit".into(), "10".into());
+        assert_eq!(
+            token.verify_call_with_args(SECRET, 1999999999, "read_file", &args, None),
+            Err(TokenError::MissingRequiredKey { key: "path".into() })
+        );
+        args.insert("path".into(), "/tmp/a.txt".into());
+        assert!(token
+            .verify_call_with_args(SECRET, 1999999999, "read_file", &args, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn attenuate_preserves_required_keys() {
+        let token = mint_required(vec!["path".into()]);
+        let attenuated = token
+            .attenuate(SECRET, Some(vec!["path".into()]), None)
+            .unwrap();
+        assert_eq!(attenuated.required_keys, vec!["path"]);
+        assert_eq!(attenuated.depth, 1);
+        assert!(attenuated
+            .verify_call(SECRET, 1999999999, "read_file", &["path"], None)
+            .is_ok());
+    }
+
+    #[test]
+    fn attenuate_can_add_required_keys() {
+        let token = mint_required(vec!["path".into()]);
+        let tighter = token
+            .attenuate_with_required_keys(
+                SECRET,
+                None,
+                None,
+                None,
+                Some(vec!["path".into(), "limit".into()]),
+            )
+            .unwrap();
+        assert_eq!(tighter.required_keys, vec!["limit", "path"]);
+        assert_eq!(
+            tighter.verify_call(SECRET, 1999999999, "read_file", &["path"], None),
+            Err(TokenError::MissingRequiredKey {
+                key: "limit".into()
+            })
+        );
+    }
+
+    #[test]
+    fn attenuate_rejects_dropping_required_key() {
+        let token = mint_required(vec!["path".into(), "limit".into()]);
+        let result =
+            token.attenuate_with_required_keys(SECRET, None, None, None, Some(vec!["path".into()]));
+        assert_eq!(result, Err(TokenError::AttenuationWidens));
+    }
+
+    #[test]
+    fn attenuate_rejects_dropping_required_key_from_arg_keys() {
+        let token = mint_required(vec!["path".into()]);
+        let result = token.attenuate(SECRET, Some(vec!["limit".into()]), None);
+        assert_eq!(result, Err(TokenError::AttenuationWidens));
+    }
 }

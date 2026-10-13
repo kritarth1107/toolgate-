@@ -1864,4 +1864,60 @@ mod tests {
             0x00, 0x00, 0x00, 0x04, // max_depth = 4
         ]));
     }
+
+    #[test]
+    fn encoding_v7_empty_required_keys_equals_v6() {
+        let v6 = encode_canonical_v6(
+            "read_file",
+            &["path".into()],
+            1700000000,
+            &[0xDE, 0xAD],
+            None,
+            None,
+            None,
+            None,
+            Some(900),
+            0,
+            None,
+        );
+        let v7 = encode_canonical_v7(
+            "read_file",
+            &["path".into()],
+            1700000000,
+            &[0xDE, 0xAD],
+            None,
+            None,
+            None,
+            None,
+            Some(900),
+            0,
+            None,
+            &[],
+        );
+        assert_eq!(v6, v7);
+    }
+
+    #[test]
+    fn encoding_v7_required_keys_appends_flag_bit_3() {
+        let bytes = encode_canonical_v7(
+            "t",
+            &["a".into(), "b".into()],
+            0,
+            &[],
+            None,
+            None,
+            None,
+            None,
+            None,
+            0,
+            None,
+            &["b".into(), "a".into()],
+        );
+        assert!(bytes.ends_with(&[
+            0x08, // flags: required_keys only
+            0x00, 0x02, // 2 keys
+            0x00, 0x01, b'a', // "a"
+            0x00, 0x01, b'b', // "b"
+        ]));
+    }
 }
