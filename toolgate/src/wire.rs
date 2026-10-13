@@ -17,7 +17,7 @@
 //! | audience | u16 length + UTF-8 bytes (0 = none) |
 //! | kid | u16 length + UTF-8 bytes (0 = none) |
 //! | constraints_count | u16 (0 = none) |
-//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone) |
+//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone, 27=PrefixNone, 28=SuffixNone) |
 //! | jti | u16 length + UTF-8 bytes (0 = none) |
 //! | nbf_flag | u8 (v5+ only; 0 = none, 1 = present) |
 //! | nbf | u64 (v5+ only, if nbf_flag = 1) |
@@ -220,6 +220,14 @@ fn encode_constraint_value_to_wire(buf: &mut Vec<u8>, constraint: &Constraint) {
             buf.push(26);
             encode_sorted_unique_strings(buf, values);
         }
+        Constraint::PrefixNone(values) => {
+            buf.push(27);
+            encode_sorted_unique_strings(buf, values);
+        }
+        Constraint::SuffixNone(values) => {
+            buf.push(28);
+            encode_sorted_unique_strings(buf, values);
+        }
     }
 }
 
@@ -368,6 +376,8 @@ fn decode_constraint_value_from_wire(
         24 => Constraint::ContainsNone(read_wire_string_list(data, pos)?),
         25 => Constraint::MatchesAny(read_wire_string_list(data, pos)?),
         26 => Constraint::MatchesNone(read_wire_string_list(data, pos)?),
+        27 => Constraint::PrefixNone(read_wire_string_list(data, pos)?),
+        28 => Constraint::SuffixNone(read_wire_string_list(data, pos)?),
         _ => return Err(WireError::UnexpectedEof), // Invalid constraint type
     };
 
@@ -1550,6 +1560,138 @@ mod tests {
             wire.windows(7)
                 .any(|w| w == [0x00, 0x04, b's', b'k', b'i', b'p', 26]),
             "wire must include MatchesNone type tag 26 after key skip"
+        );
+    }
+
+    #[test]
+    fn wire_roundtrip_constraint_prefix_none() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "dest".to_string(),
+            Constraint::PrefixNone(vec!["/etc/".to_string(), "/root/".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["dest".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+        assert!(
+            wire.windows(7)
+                .any(|w| w == [0x00, 0x04, b'd', b'e', b's', b't', 27]),
+            "wire must include PrefixNone type tag 27 after key dest"
+        );
+    }
+
+    #[test]
+    fn wire_roundtrip_constraint_suffix_none() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "name".to_string(),
+            Constraint::SuffixNone(vec![".bak".to_string(), ".tmp".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["name".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+        assert!(
+            wire.windows(7)
+                .any(|w| w == [0x00, 0x04, b'n', b'a', b'm', b'e', 28]),
+            "wire must include SuffixNone type tag 28 after key name"
+        );
+    }
+
+    #[test]
+    fn wire_prefix_none_sorts_and_uniques() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "dest".to_string(),
+            Constraint::PrefixNone(vec![
+                "/root/".to_string(),
+                "/etc/".to_string(),
+                "/etc/".to_string(),
+            ]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["dest".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let decoded = Token::from_wire(&token.to_wire()).unwrap();
+        match decoded.constraints.as_ref().unwrap().get("dest").unwrap() {
+            Constraint::PrefixNone(values) => {
+                assert_eq!(values, &vec!["/etc/".to_string(), "/root/".to_string()]);
+            }
+            other => panic!("expected PrefixNone, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wire_without_prefix_none_keeps_prior_type_tags() {
+        // Tokens that do not use PrefixNone/SuffixNone must keep the 0.28.0 tags.
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "file".to_string(),
+            Constraint::MatchesAny(vec!["*.md".to_string(), "*.txt".to_string()]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["file".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(
+            wire.windows(7)
+                .any(|w| w == [0x00, 0x04, b'f', b'i', b'l', b'e', 25]),
+            "wire must keep MatchesAny type tag 25"
         );
     }
 
