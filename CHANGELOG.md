@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.29.0] - 2026-10-13
+
+### Added
+- **`Token::required_keys`**: argument keys that must be present on every `verify_call` / `verify_call_with_args`
+- **`Token::mint_with_required_keys`** / **`Token::attenuate_with_required_keys`** / **`Keyring::mint_with_required_keys`**
+- Policy grant field `required_keys` (minted onto tokens; later tightening denies older tokens that omit the set)
+- CLI JSON field `required_keys` on `tg mint` and `tg attenuate`; `tg check-call` reports `missing_required_key`
+- Error kinds `missing_required_key` and `invalid_required_key`
+
+### Changed
+- Canonical encoding v7: flags bit 3 plus a sorted unique length-prefixed key list after the v6 trailer
+- Wire format v6 when required keys are set; tokens without them stay on v5/v4
+- Tokens without required keys still encode identically to 0.28.0
+
+### Notes
+- Required keys must be a subset of `arg_keys`. Empty names and keys outside the allowlist are rejected at mint/validate (fail closed)
+- Attenuation only tightens: new required keys must be a superset of the parent; dropping a required key, or dropping it from `arg_keys`, is `attenuation_widens`
+- Omitting a constrained key no longer skips that constraint when the key is required
+- Bare `verify` still checks only MAC and time; required keys are enforced on call checks
+
 ## [0.28.0] - 2026-10-12
 
 ### Added

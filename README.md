@@ -7,6 +7,7 @@ A small, fast Rust library for issuing macaroon-style capability tokens for tool
 toolgate issues capability tokens that bind:
 - **Tool name**: which tool the token authorizes
 - **Argument keys**: an allowlist of permitted argument names
+- **Required argument keys** (optional): keys that must be present on every verified call
 - **Argument constraints** (optional): restrict argument values (prefix, suffix, prefix-one-of, suffix-one-of, contains, contains-any/none, exact, one-of, not-equals, not-one-of, not-contains, not-prefix, min/max length, int range, float range, simple glob, matches-any/none, All/Any/Not composition)
 - **Expiry**: unix timestamp when the token becomes invalid
 - **Not-before (`nbf`)** (optional): unix timestamp before which the token is rejected
@@ -15,7 +16,7 @@ toolgate issues capability tokens that bind:
 - **Max attenuation depth** (optional): how many times the token may be narrowed
 - **Nonce**: random bytes for uniqueness
 
-Tokens are signed with HMAC-SHA256 over a canonical byte encoding. They can be **attenuated** (capabilities reduced) but never widened—you can drop argument keys, shorten expiry, or tighten constraints, but never add keys, extend expiry, or loosen constraints. Audience binding, key ID, token ID, not-before, and max depth are preserved during attenuation. Each attenuation increments a `depth` counter; if `max_depth` is set, further narrowing is rejected.
+Tokens are signed with HMAC-SHA256 over a canonical byte encoding. They can be **attenuated** (capabilities reduced) but never widened—you can drop argument keys, shorten expiry, add required keys, or tighten constraints, but never add allowlist keys, extend expiry, drop a required key, or loosen constraints. Audience binding, key ID, token ID, not-before, and max depth are preserved during attenuation. Each attenuation increments a `depth` counter; if `max_depth` is set, further narrowing is rejected.
 
 Expiry and not-before checks take a swappable [`Clock`](#clocks-and-leeway) plus optional clock-skew leeway, so library paths do not call `SystemTime` directly.
 
@@ -25,7 +26,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-toolgate = "0.28"
+toolgate = "0.29"
 ```
 
 Or install the CLI:
@@ -65,7 +66,8 @@ token.verify(secret, current_time)?; // Ok(())
 // Verify with audience check
 bound_token.verify_with_audience(secret, current_time, Some("client-123"))?;
 
-// Verify a specific tool call (checks MAC, expiry, audience, tool name, arg keys)
+// Verify a specific tool call (checks MAC, expiry, audience, tool name, arg keys,
+// and any required_keys)
 token.verify_call(
     secret,
     current_time,
@@ -151,6 +153,44 @@ assert!(twice.attenuate(secret, None, None).is_err()); // MaxDepthExceeded
 ```
 
 `nbf`, `depth`, and `max_depth` are covered by the MAC. Tokens minted without them encode identically to v0.5.
+
+## Required Argument Keys
+
+The argument allowlist says which keys *may* appear. `required_keys` says which keys *must* appear on `verify_call` / `verify_call_with_args`. A path-prefix constraint is not enough by itself: omitting `path` used to skip the constraint. Requiring `path` fails closed.
+
+```rust
+use toolgate::Token;
+
+let secret = b"your-256-bit-secret-key-here!!";
+let token = Token::mint_with_required_keys(
+    secret,
+    "read_file",
+    vec!["path".into(), "limit".into()],
+    1700100000,
+    None,
+    None,
+    None,
+    false,
+    None,
+    None,
+    vec!["path".into()],
+)?;
+
+assert!(token.verify_call(secret, 1700000000, "read_file", &["path"], None).is_ok());
+assert!(token.verify_call(secret, 1700000000, "read_file", &["limit"], None).is_err());
+
+// Attenuation may only add required keys (tighten), never drop them.
+let tighter = token.attenuate_with_required_keys(
+    secret,
+    None,
+    None,
+    None,
+    Some(vec!["path".into(), "limit".into()]),
+)?;
+assert_eq!(tighter.required_keys, vec!["limit", "path"]);
+```
+
+Empty names and keys outside the allowlist are rejected at mint/validate. Dropping a required key from `arg_keys` during attenuation is rejected. Tokens without `required_keys` encode identically to 0.28.0.
 
 ## Argument Value Constraints
 
@@ -550,12 +590,13 @@ assert_eq!(sink.len(), 1); // one Decision, even when the policy check fails
 | `default_audience` / `default_ttl_seconds` / `default_max_depth` / `default_kid` | policy | Optional defaults |
 | `tools[]` | policy | Grants; each `name` may appear once |
 | `name` / `arg_keys` | grant | Tool name and allowed argument keys |
+| `required_keys` | grant | Keys that must be present on every minted/checked call (subset of `arg_keys`) |
 | `constraints` | grant | Per-key [`Constraint`](#argument-value-constraints) (same serde form as tokens) |
 | `ttl_seconds` / `audience` / `max_depth` | grant | Optional overrides of the defaults |
 
-`Policy::validate()` rejects unknown versions, duplicate tool names, empty tool names, zero TTLs, and constraints on keys that are not in the grant's allowlist. Minting an unknown tool, or a grant with no TTL and no default TTL, is an error.
+`Policy::validate()` rejects unknown versions, duplicate tool names, empty tool names, zero TTLs, constraints on keys that are not in the grant's allowlist, and required keys that are empty or not in the allowlist. Minting an unknown tool, or a grant with no TTL and no default TTL, is an error.
 
-`check_call` / `check_call_with_args` verify the token through [`Verifier`](#verifier) **and** confirm the token is still within the current policy (argument keys, constraints, audience, and max depth). An attached `AuditSink` still records exactly one `Decision`.
+`check_call` / `check_call_with_args` verify the token through [`Verifier`](#verifier) **and** confirm the token is still within the current policy (argument keys, required keys, constraints, audience, and max depth). An attached `AuditSink` still records exactly one `Decision`. A later policy that adds `required_keys` denies older tokens that do not require that set.
 
 `PolicyFile` loads a policy JSON path, remembers mtime, and reloads when the file changes (`tg gate --policy` uses this). A failed reload keeps the previous good policy and writes one warning line to stderr, so tightening takes effect without a restart and a bad edit does not fail open.
 
@@ -596,11 +637,12 @@ echo '{
   },
   "generate_jti": true,
   "nbf": 1699990000,
-  "max_depth": 2
+  "max_depth": 2,
+  "required_keys": ["path"]
 }' | tg mint
 ```
 
-The `audience`, `constraints`, `generate_jti`, `nbf`, and `max_depth` fields are optional. Set `generate_jti: true` to generate a unique token identifier for revocation/replay tracking.
+The `audience`, `constraints`, `generate_jti`, `nbf`, `max_depth`, and `required_keys` fields are optional. Set `generate_jti: true` to generate a unique token identifier for revocation/replay tracking. `required_keys` must be a subset of `arg_keys`; empty names are rejected.
 
 Mint from a policy file instead of a full mint request. Stdin still supplies the secret (and optional `current_time`); expiry is `now + ttl` from the grant.
 
@@ -628,11 +670,12 @@ echo '{
   "expiry": 1900000000,
   "constraints": {
     "path": {"type": "prefix", "value": "/tmp/subdir/"}
-  }
+  },
+  "required_keys": ["path"]
 }' | tg attenuate
 ```
 
-The `constraints` field can add new constraints or tighten existing ones (never loosen).
+The `constraints` field can add new constraints or tighten existing ones (never loosen). `required_keys` can only add required keys (never drop them).
 
 ### Check
 
@@ -726,7 +769,7 @@ echo '{
 
 `token` may be a JSON token or a `tg1.` string. Returns `{"authorized": true}` or `{"authorized": false, "error": "...", "error_kind": "..."}`.
 
-Error kinds: `invalid_mac`, `expired`, `not_yet_valid`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `constraint_violation`, `revoked`, `replay_detected`, `missing_jti`, `max_depth_exceeded`, `malformed_request`, `policy_denied`, `use_store_failed`.
+Error kinds: `invalid_mac`, `expired`, `not_yet_valid`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `missing_required_key`, `constraint_violation`, `revoked`, `replay_detected`, `missing_jti`, `max_depth_exceeded`, `malformed_request`, `policy_denied`, `use_store_failed`.
 
 ### Gate (stdio MCP)
 
@@ -858,7 +901,7 @@ match action {
 |--------------|------|-------------------------|
 | `-32700` | Client line is not JSON | omitted |
 | `-32600` | JSON-RPC batch (array); not supported | omitted |
-| `-32040` | `tools/call` missing a token, or the token/policy/revocation/replay check failed | existing kinds: `malformed_request`, `invalid_mac`, `expired`, `not_yet_valid`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `constraint_violation`, `revoked`, `replay_detected`, `missing_jti`, `max_depth_exceeded`, `policy_denied`, … |
+| `-32040` | `tools/call` missing a token, or the token/policy/revocation/replay check failed | existing kinds: `malformed_request`, `invalid_mac`, `expired`, `not_yet_valid`, `audience_mismatch`, `tool_mismatch`, `arg_key_not_allowed`, `missing_required_key`, `constraint_violation`, `revoked`, `replay_detected`, `missing_jti`, `max_depth_exceeded`, `policy_denied`, … |
 
 ### Audit JSONL
 
@@ -872,7 +915,7 @@ echo '{ ... }' | tg check --audit-jsonl stdout --audit-redact-keys path
 
 Secrets can be hex-encoded with `"secret": "hex:deadbeef..."`.
 
-## Canonical Byte Encoding (v6)
+## Canonical Byte Encoding (v7)
 
 For cross-implementation compatibility, tokens are signed over this exact byte layout (all integers big-endian):
 
@@ -888,10 +931,11 @@ For cross-implementation compatibility, tokens are signed over this exact byte l
 | constraints_count | u16 (only if > 0) |
 | constraints | for each (sorted by key): key + type (u8) + type-specific data |
 | jti | u16 length + UTF-8 bytes (only if present) |
-| flags | u8 (only if nbf, depth>0, or max_depth is set; bit0=nbf, bit1=depth, bit2=max_depth) |
+| flags | u8 (only if nbf, depth>0, max_depth, or required_keys is set; bit0=nbf, bit1=depth, bit2=max_depth, bit3=required_keys) |
 | nbf | u64 (only if bit0 is set) |
 | depth | u32 (only if bit1 is set) |
 | max_depth | u32 (only if bit2 is set) |
+| required_keys | u16 count + (for each, sorted unique: u16 length + UTF-8) (only if bit3 is set) |
 
 Constraint type encoding:
 - `0` Exact: u16 length + UTF-8 value
@@ -935,7 +979,7 @@ Constraint type encoding:
 00 00                   # kid: len=0 (none)
 ```
 
-Tokens without nbf/depth/max_depth encode identically to v5. Tokens without jti encode identically to v4. Tokens without constraints and without jti encode identically to v3, ensuring backward compatibility.
+Tokens without required_keys encode identically to v6. Tokens without nbf/depth/max_depth encode identically to v5. Tokens without jti encode identically to v4. Tokens without constraints and without jti encode identically to v3, ensuring backward compatibility.
 
 The HMAC-SHA256 is computed over these concatenated bytes.
 
@@ -1064,9 +1108,11 @@ let info = check_tools_call(&verifier, &token, &request)?;
 - **Not a hosted gateway**: The gate does not dispatch tools, open a network listener, or run as a service. `check_tools_call` still only inspects a request.
 - **Nonce is random, not sequential**: Each mint/attenuate generates a fresh random nonce.
 - **Local advisory lock only**: `FileUseStore` uses `flock` on a sibling `.lock` file. That serializes processes on one machine (and filesystems that honor `flock`). It is not a distributed lock. Lock or I/O errors deny the call; they never fail open.
+- **Required keys are call-time only**: Bare `verify` / `tg check` still only check MAC and time. `required_keys` are enforced on `verify_call`, `verify_call_with_args`, `tg check-call`, `tg check-mcp`, and `tg gate`.
 
 ## Version History
 
+- **0.29.0**: Required argument keys (`Token::required_keys` / policy `required_keys`), fail-closed missing-key checks, tighten-only attenuation, canonical v7 flag bit 3, wire v6
 - **0.28.0**: `Constraint::MatchesAny` and `Constraint::MatchesNone` (canonical/wire tags 25 and 26), with fail-closed empty lists/members and tighten-only attenuation
 - **0.27.0**: `Constraint::ContainsAny` and `Constraint::ContainsNone` (canonical/wire tags 23 and 24), with fail-closed empty lists/members and tighten-only attenuation
 - **0.26.0**: `Constraint::PrefixOneOf` and `Constraint::SuffixOneOf` (canonical/wire tags 21 and 22), with fail-closed empty lists/members and tighten-only attenuation

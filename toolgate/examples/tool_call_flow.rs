@@ -27,7 +27,7 @@ fn main() {
         Constraint::IntRange { min: 1, max: 1000 },
     );
 
-    let token = Token::mint_with_jti(
+    let token = Token::mint_with_required_keys(
         secret,
         "read_file",
         vec!["path".into(), "limit".into(), "format".into()],
@@ -36,10 +36,15 @@ fn main() {
         None,
         Some(constraints),
         true, // generate jti for revocation/replay tracking
-    );
+        None,
+        None,
+        vec!["path".into()],
+    )
+    .expect("mint should accept path as a required key");
 
     println!("   Tool: {}", token.tool_name);
     println!("   Allowed args: {:?}", token.arg_keys);
+    println!("   Required args: {:?}", token.required_keys);
     println!("   Constraints: {:?}", token.constraints);
     println!("   Audience: {:?}", token.audience);
     println!("   JTI: {:?}", token.jti);
@@ -94,6 +99,18 @@ fn main() {
         "   /data/public/file.txt, limit=50: {}",
         format_result(&result)
     );
+
+    // Denied: required path key omitted (constraint would otherwise be skipped)
+    let mut missing_path = BTreeMap::new();
+    missing_path.insert("limit".to_string(), "10".to_string());
+    let result = attenuated.verify_call_with_args(
+        secret,
+        current_time,
+        "read_file",
+        &missing_path,
+        Some("client-abc"),
+    );
+    println!("   missing path, limit=10: {}", format_result(&result));
 
     // Denied: path outside allowed prefix
     let mut bad_path = BTreeMap::new();
