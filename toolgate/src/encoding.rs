@@ -20,7 +20,7 @@
 //! - constraints_count: u16
 //! - for each constraint (sorted by key):
 //!   - key: u16 length + UTF-8 bytes
-//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone, 27=PrefixNone, 28=SuffixNone)
+//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone, 27=PrefixNone, 28=SuffixNone, 29=IntOneOf, 30=IntNone)
 //!   - constraint_data: type-specific encoding
 //!
 //! Format v5 (backward-compatible extension):
@@ -75,6 +75,8 @@
 //! - MatchesNone: u16 count + (for each value, sorted unique: u16 length + UTF-8 bytes)
 //! - PrefixNone: u16 count + (for each value, sorted unique: u16 length + UTF-8 bytes)
 //! - SuffixNone: u16 count + (for each value, sorted unique: u16 length + UTF-8 bytes)
+//! - IntOneOf: u16 count + (for each value, sorted unique: i64 big-endian)
+//! - IntNone: u16 count + (for each value, sorted unique: i64 big-endian)
 //!
 //! The v5 format appends jti after constraints. Tokens without jti
 //! encode identically to v4. Tokens without constraints and without jti
@@ -505,6 +507,14 @@ fn encode_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
             buf.push(28); // type = SuffixNone
             encode_sorted_unique_strings(buf, values);
         }
+        Constraint::IntOneOf(values) => {
+            buf.push(29); // type = IntOneOf
+            encode_sorted_unique_i64s(buf, values);
+        }
+        Constraint::IntNone(values) => {
+            buf.push(30); // type = IntNone
+            encode_sorted_unique_i64s(buf, values);
+        }
     }
 }
 
@@ -524,6 +534,18 @@ fn encode_sorted_unique_strings(buf: &mut Vec<u8>, values: &[String]) {
     buf.extend_from_slice(&(sorted.len() as u16).to_be_bytes());
     for value in sorted {
         encode_len_prefixed(buf, value);
+    }
+}
+
+/// Encode an i64 list as u16 count + each big-endian i64,
+/// sorted and unique (same spirit as OneOf / NotOneOf).
+fn encode_sorted_unique_i64s(buf: &mut Vec<u8>, values: &[i64]) {
+    let mut sorted = values.to_vec();
+    sorted.sort();
+    sorted.dedup();
+    buf.extend_from_slice(&(sorted.len() as u16).to_be_bytes());
+    for value in sorted {
+        buf.extend_from_slice(&value.to_be_bytes());
     }
 }
 
@@ -1359,6 +1381,65 @@ mod tests {
             0x00, 0x02, // 2 values after sort+unique
             0x00, 0x04, b'.', b'b', b'a', b'k', // ".bak"
             0x00, 0x04, b'.', b't', b'm', b'p', // ".tmp"
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_int_one_of() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("mode".to_string(), Constraint::IntOneOf(vec![3, 1, 1, 2]));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'm', b'o', b'd', b'e', // key "mode"
+            0x1D, // type = IntOneOf
+            0x00, 0x03, // 3 values after sort+unique
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // 1
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, // 2
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, // 3
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_int_none() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("port".to_string(), Constraint::IntNone(vec![0, -1, 0]));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'p', b'o', b'r', b't', // key "port"
+            0x1E, // type = IntNone
+            0x00, 0x02, // 2 values after sort+unique
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // -1
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0
+        ]));
+    }
+
+    #[test]
+    fn encoding_without_int_one_of_identical_to_prior() {
+        // Tokens that do not use IntOneOf/IntNone must keep the 0.30.0 bytes.
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "dest".to_string(),
+            Constraint::PrefixNone(vec!["/etc/".to_string(), "/root/".to_string()]),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'd', b'e', b's', b't', // key "dest"
+            0x1B, // type = PrefixNone
+            0x00, 0x02, // 2 values after sort+unique
+            0x00, 0x05, b'/', b'e', b't', b'c', b'/', // "/etc/"
+            0x00, 0x06, b'/', b'r', b'o', b'o', b't', b'/', // "/root/"
         ]));
     }
 
