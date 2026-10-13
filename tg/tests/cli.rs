@@ -5638,6 +5638,312 @@ fn mint_from_policy_accepts_int_one_of() {
     let _ = fs::remove_file(&path);
 }
 
+fn mint_float_one_of_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["score"],
+            "expiry": 2000000000,
+            "constraints": {
+                "score": {"type": "float_one_of", "value": [0.5, 1.5, 2.5]}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+fn mint_float_none_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["bias"],
+            "expiry": 2000000000,
+            "constraints": {
+                "bias": {"type": "float_none", "value": [0.0, -1.0]}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+#[test]
+fn mint_accepts_float_one_of_and_float_none() {
+    let one_of = mint_float_one_of_token();
+    assert_eq!(one_of["constraints"]["score"]["type"], "float_one_of");
+    assert_eq!(
+        one_of["constraints"]["score"]["value"],
+        json!([0.5, 1.5, 2.5])
+    );
+
+    let none = mint_float_none_token();
+    assert_eq!(none["constraints"]["bias"]["type"], "float_none");
+    assert_eq!(none["constraints"]["bias"]["value"], json!([0.0, -1.0]));
+}
+
+#[test]
+fn check_call_enforces_float_one_of() {
+    let token = mint_float_one_of_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"score": "1.5"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"score": "1"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn check_call_enforces_float_none() {
+    let token = mint_float_none_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"bias": "2.5"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"bias": "0"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn attenuate_can_tighten_float_one_of() {
+    let token = mint_float_one_of_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "score": {"type": "float_one_of", "value": [0.5, 1.5]}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(attenuated["constraints"]["score"]["type"], "float_one_of");
+    assert_eq!(
+        attenuated["constraints"]["score"]["value"],
+        json!([0.5, 1.5])
+    );
+}
+
+#[test]
+fn attenuate_rejects_widening_float_one_of() {
+    let token = mint_float_one_of_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "score": {"type": "float_one_of", "value": [0.5, 1.5, 2.5, 3.5]}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("attenuation"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn attenuate_can_tighten_float_none() {
+    let token = mint_float_none_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "bias": {"type": "float_none", "value": [0.0, -1.0, 2.5]}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(attenuated["constraints"]["bias"]["type"], "float_none");
+    assert_eq!(
+        attenuated["constraints"]["bias"]["value"],
+        json!([0.0, -1.0, 2.5])
+    );
+}
+
+#[test]
+fn attenuate_rejects_widening_float_none() {
+    let token = mint_float_none_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "bias": {"type": "float_none", "value": [0.0]}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("attenuation"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn mint_rejects_empty_float_one_of() {
+    let out = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["score"],
+            "expiry": 2000000000,
+            "constraints": {
+                "score": {"type": "float_one_of", "value": []}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("float_one_of"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn mint_rejects_empty_float_none() {
+    let out = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["bias"],
+            "expiry": 2000000000,
+            "constraints": {
+                "bias": {"type": "float_none", "value": []}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("float_none"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn policy_lint_rejects_empty_float_one_of() {
+    let path = write_temp_policy(
+        "empty-float-one-of",
+        r#"{
+            "version": "1",
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["score"],
+                "constraints": {
+                    "score": {"type": "float_one_of", "value": []}
+                }
+            }]
+        }"#,
+    );
+    let output = tg()
+        .args(["policy", "lint", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("float_one_of"),
+        "stdout={stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn mint_from_policy_accepts_float_one_of() {
+    let path = write_temp_policy(
+        "float-one-of-grant",
+        r#"{
+            "version": "1",
+            "default_ttl_seconds": 60,
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["score"],
+                "constraints": {
+                    "score": {"type": "float_one_of", "value": [0.5, 1.5, 2.5]}
+                }
+            }]
+        }"#,
+    );
+    let out = run_json(
+        &[
+            "mint",
+            "--policy",
+            path.to_str().unwrap(),
+            "--tool",
+            "read_file",
+        ],
+        &json!({
+            "secret": "cli-secret",
+            "current_time": 1700000000
+        }),
+    );
+    let token = &out["token"];
+    assert_eq!(token["tool_name"], "read_file");
+    assert_eq!(token["constraints"]["score"]["type"], "float_one_of");
+    let _ = fs::remove_file(&path);
+}
+
 fn mint_required_path_token() -> Value {
     run_json(
         &["mint"],
