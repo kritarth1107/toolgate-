@@ -20,7 +20,7 @@
 //! - constraints_count: u16
 //! - for each constraint (sorted by key):
 //!   - key: u16 length + UTF-8 bytes
-//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone, 27=PrefixNone, 28=SuffixNone, 29=IntOneOf, 30=IntNone)
+//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone, 27=PrefixNone, 28=SuffixNone, 29=IntOneOf, 30=IntNone, 31=FloatOneOf, 32=FloatNone)
 //!   - constraint_data: type-specific encoding
 //!
 //! Format v5 (backward-compatible extension):
@@ -77,6 +77,8 @@
 //! - SuffixNone: u16 count + (for each value, sorted unique: u16 length + UTF-8 bytes)
 //! - IntOneOf: u16 count + (for each value, sorted unique: i64 big-endian)
 //! - IntNone: u16 count + (for each value, sorted unique: i64 big-endian)
+//! - FloatOneOf: u16 count + (for each value, sorted unique: IEEE-754 f64 big-endian bits)
+//! - FloatNone: u16 count + (for each value, sorted unique: IEEE-754 f64 big-endian bits)
 //!
 //! The v5 format appends jti after constraints. Tokens without jti
 //! encode identically to v4. Tokens without constraints and without jti
@@ -515,6 +517,14 @@ fn encode_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
             buf.push(30); // type = IntNone
             encode_sorted_unique_i64s(buf, values);
         }
+        Constraint::FloatOneOf(values) => {
+            buf.push(31); // type = FloatOneOf
+            encode_sorted_unique_f64s(buf, values);
+        }
+        Constraint::FloatNone(values) => {
+            buf.push(32); // type = FloatNone
+            encode_sorted_unique_f64s(buf, values);
+        }
     }
 }
 
@@ -543,6 +553,18 @@ fn encode_sorted_unique_i64s(buf: &mut Vec<u8>, values: &[i64]) {
     let mut sorted = values.to_vec();
     sorted.sort();
     sorted.dedup();
+    buf.extend_from_slice(&(sorted.len() as u16).to_be_bytes());
+    for value in sorted {
+        buf.extend_from_slice(&value.to_be_bytes());
+    }
+}
+
+/// Encode an f64 list as u16 count + each IEEE-754 big-endian bit
+/// pattern, sorted and unique by bits (same spirit as IntOneOf).
+fn encode_sorted_unique_f64s(buf: &mut Vec<u8>, values: &[f64]) {
+    let mut sorted = values.to_vec();
+    sorted.sort_by_key(|v| v.to_bits());
+    sorted.dedup_by_key(|v| v.to_bits());
     buf.extend_from_slice(&(sorted.len() as u16).to_be_bytes());
     for value in sorted {
         buf.extend_from_slice(&value.to_be_bytes());
@@ -1418,6 +1440,73 @@ mod tests {
             0x00, 0x02, // 2 values after sort+unique
             0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // -1
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_float_one_of() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "score".to_string(),
+            Constraint::FloatOneOf(vec![2.5, 0.5, 0.5, 1.5]),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        // IEEE-754: 0.5=0x3FE0000000000000, 1.5=0x3FF8000000000000,
+        // 2.5=0x4004000000000000 — sorted unique by bits.
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x05, b's', b'c', b'o', b'r', b'e', // key "score"
+            0x1F, // type = FloatOneOf
+            0x00, 0x03, // 3 values after sort+unique
+            0x3F, 0xE0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0.5
+            0x3F, 0xF8, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1.5
+            0x40, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 2.5
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_float_none() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "bias".to_string(),
+            Constraint::FloatNone(vec![0.0, -1.0, 0.0]),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        // IEEE-754: 0.0=0x0000000000000000, -1.0=0xBFF0000000000000
+        // sorted unique by bits (0.0 first).
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'b', b'i', b'a', b's', // key "bias"
+            0x20, // type = FloatNone
+            0x00, 0x02, // 2 values after sort+unique
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0.0
+            0xBF, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // -1.0
+        ]));
+    }
+
+    #[test]
+    fn encoding_without_float_one_of_identical_to_prior() {
+        // Tokens that do not use FloatOneOf/FloatNone must keep the 0.31.0 bytes.
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("mode".to_string(), Constraint::IntOneOf(vec![3, 1, 1, 2]));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'm', b'o', b'd', b'e', // key "mode"
+            0x1D, // type = IntOneOf
+            0x00, 0x03, // 3 values after sort+unique
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // 1
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, // 2
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, // 3
         ]));
     }
 
