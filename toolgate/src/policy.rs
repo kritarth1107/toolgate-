@@ -85,13 +85,15 @@ pub enum PolicyError {
     RequiredKeyNotAllowed { tool: String, key: String },
     /// An empty suffix, contains, matches, NotOneOf, PrefixOneOf,
     /// SuffixOneOf, ContainsAny, ContainsNone, MatchesAny, MatchesNone,
-    /// PrefixNone, SuffixNone, IntOneOf, IntNone, NotContains, NotPrefix,
-    /// NotSuffix, NotMatches, All, Any, or Not constraint is rejected.
+    /// PrefixNone, SuffixNone, IntOneOf, IntNone, FloatOneOf, FloatNone,
+    /// NotContains, NotPrefix, NotSuffix, NotMatches, All, Any, or Not
+    /// constraint is rejected.
     EmptyConstraintPattern { tool: String, key: String },
     /// An All/Any/Not tree deeper than [`crate::MAX_CONSTRAINT_NESTING`] is rejected.
     ConstraintNestingTooDeep { tool: String, key: String },
-    /// A FloatRange with non-finite bounds or `min > max`, or a LenRange
-    /// or CharLenRange with `min > max`, is rejected.
+    /// A FloatRange with non-finite bounds or `min > max`, a FloatOneOf
+    /// or FloatNone list with a non-finite member, or a LenRange or
+    /// CharLenRange with `min > max`, is rejected.
     InvalidConstraintRange { tool: String, key: String },
     /// A TTL (default or per-grant) is present and zero.
     ZeroTtl {
@@ -138,7 +140,7 @@ impl std::fmt::Display for PolicyError {
             PolicyError::EmptyConstraintPattern { tool, key } => {
                 write!(
                     f,
-                    "empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any/not/prefix_one_of/suffix_one_of/contains_any/contains_none/matches_any/matches_none/prefix_none/suffix_none/int_one_of/int_none constraint for '{key}' on tool '{tool}' is rejected"
+                    "empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any/not/prefix_one_of/suffix_one_of/contains_any/contains_none/matches_any/matches_none/prefix_none/suffix_none/int_one_of/int_none/float_one_of/float_none constraint for '{key}' on tool '{tool}' is rejected"
                 )
             }
             PolicyError::ConstraintNestingTooDeep { tool, key } => {
@@ -151,7 +153,7 @@ impl std::fmt::Display for PolicyError {
             PolicyError::InvalidConstraintRange { tool, key } => {
                 write!(
                     f,
-                    "invalid float_range, len_range, or char_len_range for '{key}' on tool '{tool}' is rejected (min <= max required; float bounds must be finite)"
+                    "invalid float_range, float_one_of, float_none, len_range, or char_len_range for '{key}' on tool '{tool}' is rejected (min <= max required; float bounds and list members must be finite)"
                 )
             }
             PolicyError::ZeroTtl { tool: Some(tool) } => {
@@ -1657,6 +1659,76 @@ mod tests {
             Err(PolicyError::EmptyConstraintPattern {
                 tool: "read_file".into(),
                 key: "port".into()
+            })
+        );
+    }
+
+    #[test]
+    fn from_json_parses_float_one_of_and_float_none() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 60,
+                "tools": [{
+                    "name": "file_op",
+                    "arg_keys": ["score", "bias"],
+                    "constraints": {
+                        "score": {"type": "float_one_of", "value": [0.5, 1.5, 2.5]},
+                        "bias": {"type": "float_none", "value": [0.0, -1.0]}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        policy.validate().unwrap();
+        let grant = policy.grant("file_op").unwrap();
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("score"),
+            Some(&Constraint::FloatOneOf(vec![0.5, 1.5, 2.5]))
+        );
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("bias"),
+            Some(&Constraint::FloatNone(vec![0.0, -1.0]))
+        );
+    }
+
+    #[test]
+    fn validate_empty_float_one_of_and_float_none_are_rejected() {
+        let empty_one_of = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["score"],
+                    "constraints": {"score": {"type": "float_one_of", "value": []}}
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            empty_one_of.validate(),
+            Err(PolicyError::EmptyConstraintPattern {
+                tool: "read_file".into(),
+                key: "score".into()
+            })
+        );
+
+        let empty_none = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["bias"],
+                    "constraints": {"bias": {"type": "float_none", "value": []}}
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            empty_none.validate(),
+            Err(PolicyError::EmptyConstraintPattern {
+                tool: "read_file".into(),
+                key: "bias".into()
             })
         );
     }

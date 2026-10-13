@@ -389,7 +389,7 @@ fn reject_empty_constraint_patterns(
     for (key, constraint) in constraints {
         if constraint.is_empty_pattern() {
             return Err(format!(
-                "empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any/not/prefix_one_of/suffix_one_of/contains_any/contains_none/matches_any/matches_none/prefix_none/suffix_none/int_one_of/int_none constraint for '{key}' is rejected"
+                "empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any/not/prefix_one_of/suffix_one_of/contains_any/contains_none/matches_any/matches_none/prefix_none/suffix_none/int_one_of/int_none/float_one_of/float_none constraint for '{key}' is rejected"
             )
             .into());
         }
@@ -401,7 +401,7 @@ fn reject_empty_constraint_patterns(
         }
         if constraint.is_invalid_range() {
             return Err(format!(
-                "invalid float_range, len_range, or char_len_range for '{key}' is rejected (min <= max required; float bounds must be finite)"
+                "invalid float_range, float_one_of, float_none, len_range, or char_len_range for '{key}' is rejected (min <= max required; float bounds and list members must be finite)"
             )
             .into());
         }
