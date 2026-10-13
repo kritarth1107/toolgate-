@@ -2,7 +2,8 @@
 //!
 //! A policy is a JSON document: a version, optional defaults (audience, TTL,
 //! max attenuation depth, key id), and a list of tool grants. Each grant
-//! names a tool, the argument keys it may receive, and optional per-key
+//! names a tool, the argument keys it may receive, optional required
+//! keys that must be present on every call, and optional per-key
 //! [`Constraint`](crate::Constraint)s in the same serde form used on tokens.
 
 use std::collections::BTreeMap;
@@ -61,6 +62,12 @@ pub struct ToolGrant {
     /// Per-grant max attenuation depth; overrides [`Policy::default_max_depth`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_depth: Option<u32>,
+    /// Argument keys that must be present on every call this grant mints.
+    ///
+    /// Each key must also appear in [`ToolGrant::arg_keys`]. Empty names
+    /// are rejected. At check time the token must require at least this set.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_keys: Vec<String>,
 }
 
 /// Errors from parsing or applying a [`Policy`].
@@ -74,6 +81,8 @@ pub enum PolicyError {
     DuplicateTool { name: String },
     /// A constraint is attached to a key that is not in the grant's allowlist.
     ConstraintKeyNotAllowed { tool: String, key: String },
+    /// A required key is empty or is not in the grant's allowlist.
+    RequiredKeyNotAllowed { tool: String, key: String },
     /// An empty suffix, contains, matches, NotOneOf, PrefixOneOf,
     /// SuffixOneOf, ContainsAny, ContainsNone, MatchesAny, MatchesNone,
     /// NotContains, NotPrefix, NotSuffix, NotMatches, All, Any, or Not
@@ -118,6 +127,12 @@ impl std::fmt::Display for PolicyError {
                 write!(
                     f,
                     "constraint key '{key}' on tool '{tool}' is not in the allowed key list"
+                )
+            }
+            PolicyError::RequiredKeyNotAllowed { tool, key } => {
+                write!(
+                    f,
+                    "required key '{key}' on tool '{tool}' is empty or not in the allowed key list"
                 )
             }
             PolicyError::EmptyConstraintPattern { tool, key } => {
@@ -239,6 +254,15 @@ impl Policy {
                 });
             }
 
+            for key in &grant.required_keys {
+                if key.is_empty() || !grant.arg_keys.iter().any(|k| k == key) {
+                    errors.push(PolicyError::RequiredKeyNotAllowed {
+                        tool: grant.name.clone(),
+                        key: key.clone(),
+                    });
+                }
+            }
+
             if let Some(constraints) = &grant.constraints {
                 for (key, constraint) in constraints {
                     if !grant.arg_keys.iter().any(|k| k == key) {
@@ -324,12 +348,12 @@ impl Policy {
 
     /// Mint a token for `tool` using `secret`.
     ///
-    /// Expiry is `now + ttl`. Audience, max depth, and argument constraints
-    /// come from the grant with policy defaults applied. `kid` is
-    /// [`Policy::default_kid`].
+    /// Expiry is `now + ttl`. Audience, max depth, required keys, and
+    /// argument constraints come from the grant with policy defaults
+    /// applied. `kid` is [`Policy::default_kid`].
     pub fn mint(&self, tool: &str, secret: &[u8], now: u64) -> Result<Token, PolicyError> {
         let resolved = self.resolve_grant(tool, now)?;
-        Ok(Token::mint_complete(
+        Token::mint_with_required_keys(
             secret,
             resolved.grant.name.clone(),
             resolved.grant.arg_keys.clone(),
@@ -340,7 +364,15 @@ impl Policy {
             false,
             None,
             resolved.max_depth,
-        ))
+            resolved.grant.required_keys.clone(),
+        )
+        .map_err(|err| PolicyError::RequiredKeyNotAllowed {
+            tool: tool.to_string(),
+            key: match err {
+                TokenError::InvalidRequiredKey { key } => key,
+                _ => String::new(),
+            },
+        })
     }
 
     /// Mint a token for `tool` using the keyring's active key.
@@ -354,7 +386,7 @@ impl Policy {
     ) -> Result<Token, PolicyError> {
         let resolved = self.resolve_grant(tool, now)?;
         keyring
-            .mint_complete(
+            .mint_with_required_keys(
                 resolved.grant.name.clone(),
                 resolved.grant.arg_keys.clone(),
                 resolved.expiry,
@@ -363,8 +395,16 @@ impl Policy {
                 false,
                 None,
                 resolved.max_depth,
+                resolved.grant.required_keys.clone(),
             )
-            .map_err(|_| PolicyError::NoActiveKey)
+            .map_err(|err| match err {
+                TokenError::NoActiveKey => PolicyError::NoActiveKey,
+                TokenError::InvalidRequiredKey { key } => PolicyError::RequiredKeyNotAllowed {
+                    tool: tool.to_string(),
+                    key,
+                },
+                _ => PolicyError::NoActiveKey,
+            })
     }
 
     /// True when `token`'s capabilities are within this policy.
@@ -381,6 +421,14 @@ impl Policy {
         for key in &token.arg_keys {
             if !grant.arg_keys.iter().any(|k| k == key) {
                 return Err(TokenError::ArgKeyNotAllowed { key: key.clone() });
+            }
+        }
+
+        for key in &grant.required_keys {
+            if !token.required_keys.iter().any(|k| k == key) {
+                return Err(TokenError::PolicyDenied {
+                    reason: format!("token is missing required key '{key}'"),
+                });
             }
         }
 

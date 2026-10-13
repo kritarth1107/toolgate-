@@ -796,6 +796,12 @@ impl Token {
             }
         }
 
+        for key in &self.required_keys {
+            if !requested_arg_keys.iter().any(|k| *k == key) {
+                return Err(TokenError::MissingRequiredKey { key: key.clone() });
+            }
+        }
+
         Ok(())
     }
 
@@ -807,7 +813,8 @@ impl Token {
     /// 3. Audience match (if `expected_audience` is provided)
     /// 4. Tool name must match exactly
     /// 5. All requested argument keys must be in the token's allowlist
-    /// 6. All argument values must satisfy their constraints (if any)
+    /// 6. Every key in [`Token::required_keys`] must be present
+    /// 7. All argument values must satisfy their constraints (if any)
     ///
     /// Returns `Ok(())` if the call is authorized, or a specific error.
     pub fn verify_call_with_args(
@@ -878,6 +885,7 @@ impl Token {
 
     /// Attenuate the token by removing argument keys, shortening expiry, or adding/tightening constraints.
     /// Cannot add keys, extend expiry, or loosen constraints. Audience, kid, jti, nbf, and max_depth are preserved.
+    /// Required keys are preserved; use [`Token::attenuate_with_required_keys`] to add more.
     /// Each attenuation increments `depth` and is rejected when `max_depth` would be exceeded.
     pub fn attenuate_with_constraints(
         &self,
@@ -885,6 +893,23 @@ impl Token {
         new_arg_keys: Option<Vec<String>>,
         new_expiry: Option<u64>,
         new_constraints: Option<Constraints>,
+    ) -> Result<Token, TokenError> {
+        self.attenuate_with_required_keys(secret, new_arg_keys, new_expiry, new_constraints, None)
+    }
+
+    /// Attenuate, optionally adding required argument keys.
+    ///
+    /// New required keys must be a superset of the parent's (tighten only)
+    /// and must remain inside the final argument allowlist. Dropping a
+    /// required key, or dropping it from `arg_keys`, is rejected.
+    #[allow(clippy::too_many_arguments)]
+    pub fn attenuate_with_required_keys(
+        &self,
+        secret: &[u8],
+        new_arg_keys: Option<Vec<String>>,
+        new_expiry: Option<u64>,
+        new_constraints: Option<Constraints>,
+        new_required_keys: Option<Vec<String>>,
     ) -> Result<Token, TokenError> {
         // Validate attenuation doesn't widen
         let final_arg_keys = match new_arg_keys {
@@ -914,6 +939,9 @@ impl Token {
         let final_constraints =
             Self::merge_constraints(self.constraints.as_ref(), new_constraints.as_ref())?;
 
+        let final_required_keys =
+            Self::merge_required_keys(&self.required_keys, new_required_keys, &final_arg_keys)?;
+
         let new_depth = self.depth.saturating_add(1);
         if let Some(max) = self.max_depth {
             if new_depth > max {
@@ -939,7 +967,7 @@ impl Token {
             self.nbf,
             new_depth,
             self.max_depth,
-            &self.required_keys,
+            &final_required_keys,
         );
         let mut hmac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
         hmac.update(&canonical);
@@ -958,8 +986,39 @@ impl Token {
             nbf: self.nbf,
             depth: new_depth,
             max_depth: self.max_depth,
-            required_keys: self.required_keys.clone(),
+            required_keys: final_required_keys,
         })
+    }
+
+    /// Merge required keys, ensuring attenuation only tightens.
+    ///
+    /// `None` keeps the parent list. `Some` must be a superset of the parent
+    /// (more required keys = tighter) and every key must stay in the final
+    /// allowlist. Dropping a required key, or dropping it from `arg_keys`,
+    /// widens the capability and is rejected.
+    fn merge_required_keys(
+        old: &[String],
+        new: Option<Vec<String>>,
+        final_arg_keys: &[String],
+    ) -> Result<Vec<String>, TokenError> {
+        let merged = match new {
+            None => old.to_vec(),
+            Some(keys) => {
+                let normalized = Self::normalize_required_keys(keys, final_arg_keys)?;
+                for key in old {
+                    if !normalized.iter().any(|k| k == key) {
+                        return Err(TokenError::AttenuationWidens);
+                    }
+                }
+                normalized
+            }
+        };
+        for key in &merged {
+            if !final_arg_keys.iter().any(|k| k == key) {
+                return Err(TokenError::AttenuationWidens);
+            }
+        }
+        Ok(merged)
     }
 
     /// Merge constraints, ensuring attenuation only tightens.
