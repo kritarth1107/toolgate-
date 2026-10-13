@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.31.0] - 2026-10-13
+
+### Added
+- **`Constraint::IntOneOf(Vec<i64>)`**: value must parse as an `i64` that is one of the listed integers
+- **`Constraint::IntNone(Vec<i64>)`**: value must parse as an `i64` that is none of the listed integers
+- CLI JSON forms `{"type":"int_one_of","value":[1,2,3]}` and `{"type":"int_none","value":[0,-1]}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6, MinLen=7, Matches=8, NotEquals=9, NotOneOf=10, NotContains=11, NotPrefix=12, NotSuffix=13, NotMatches=14, All=15, Any=16, Not=17, FloatRange=18, LenRange=19, CharLenRange=20, PrefixOneOf=21, SuffixOneOf=22, ContainsAny=23, ContainsNone=24, MatchesAny=25, MatchesNone=26, PrefixNone=27, SuffixNone=28, IntOneOf=29, IntNone=30
+- Tokens without the new types still encode identically to 0.30.0
+
+### Notes
+- Stored and encoded as sorted unique i64s (same spirit as OneOf / NotOneOf): u8 type + u16 count + each big-endian i64
+- Attenuation only tightens: IntOneOf children must be a subset of the parent allowlist; IntNone must cover every parent denial and may add extra denials
+- Exact may replace IntOneOf/IntNone when the exact value parses to a listed / non-denied integer
+- OneOf may replace IntOneOf/IntNone when every allowed value parses and satisfies the same rule
+- IntOneOf may replace IntRange when every listed integer lies inside the old range; IntRange may replace IntOneOf when every integer in the new range is listed
+- IntRange may replace IntNone when no denied integer lies inside the new range; IntOneOf may replace IntNone when every remaining integer avoids the denylist
+- Empty lists are rejected at mint/validate and never match a value (fail closed)
+- Values that do not parse as `i64` fail closed at check time (same spirit as IntRange)
+- Unclear cross-type pairs fail closed
+
 ## [0.30.0] - 2026-10-13
 
 ### Added
