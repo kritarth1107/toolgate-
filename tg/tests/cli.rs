@@ -429,6 +429,7 @@ fn mint_from_policy_file() {
         .unwrap()
         .iter()
         .any(|k| k == "path"));
+    assert_eq!(token["required_keys"], json!(["path"]));
 }
 
 #[test]
@@ -5025,5 +5026,159 @@ fn mint_from_policy_accepts_matches_any() {
     let token = &out["token"];
     assert_eq!(token["tool_name"], "read_file");
     assert_eq!(token["constraints"]["file"]["type"], "matches_any");
+    let _ = fs::remove_file(&path);
+}
+
+fn mint_required_path_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["path", "limit"],
+            "expiry": 2000000000,
+            "required_keys": ["path"]
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+#[test]
+fn mint_accepts_required_keys() {
+    let token = mint_required_path_token();
+    assert_eq!(token["required_keys"], json!(["path"]));
+}
+
+#[test]
+fn mint_rejects_required_key_outside_allowlist() {
+    let out = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["path"],
+            "expiry": 2000000000,
+            "required_keys": ["limit"]
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("required key"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn mint_rejects_empty_required_key() {
+    let out = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["path"],
+            "expiry": 2000000000,
+            "required_keys": [""]
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("required key"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn check_call_enforces_required_keys() {
+    let token = mint_required_path_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"path": "/tmp/a.txt"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"limit": "10"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("missing_required_key")
+    );
+}
+
+#[test]
+fn attenuate_can_add_required_keys() {
+    let token = mint_required_path_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "required_keys": ["path", "limit"]
+        }),
+    );
+    assert_eq!(out["token"]["required_keys"], json!(["limit", "path"]));
+}
+
+#[test]
+fn attenuate_rejects_dropping_required_key() {
+    let token = mint_required_path_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "required_keys": []
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("attenuation"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn policy_lint_rejects_required_key_outside_allowlist() {
+    let path = write_temp_policy(
+        "bad-required-key",
+        r#"{
+            "version": "1",
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["path"],
+                "required_keys": ["limit"]
+            }]
+        }"#,
+    );
+    let output = tg()
+        .args(["policy", "lint", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("required key"),
+        "stdout={stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let _ = fs::remove_file(&path);
 }

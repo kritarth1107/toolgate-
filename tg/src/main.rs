@@ -145,6 +145,8 @@ struct MintInput {
     nbf: Option<u64>,
     #[serde(default)]
     max_depth: Option<u32>,
+    #[serde(default)]
+    required_keys: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -169,6 +171,8 @@ struct AttenuateInput {
     expiry: Option<u64>,
     #[serde(default)]
     constraints: Option<Constraints>,
+    #[serde(default)]
+    required_keys: Option<Vec<String>>,
 }
 
 #[derive(Serialize)]
@@ -405,12 +409,27 @@ fn reject_empty_constraint_patterns(
     Ok(())
 }
 
+fn reject_invalid_required_keys(
+    required_keys: &[String],
+    arg_keys: &[String],
+) -> Result<(), Box<dyn std::error::Error>> {
+    for key in required_keys {
+        if key.is_empty() || !arg_keys.iter().any(|k| k == key) {
+            return Err(
+                format!("required key '{key}' is empty or not in the allowed key list").into(),
+            );
+        }
+    }
+    Ok(())
+}
+
 fn handle_mint_from_stdin() -> Result<(), Box<dyn std::error::Error>> {
     let input: MintInput = serde_json::from_str(&read_stdin()?)?;
     reject_empty_constraint_patterns(input.constraints.as_ref())?;
+    reject_invalid_required_keys(&input.required_keys, &input.arg_keys)?;
     let secret = decode_secret(&input.secret);
 
-    let token = Token::mint_complete(
+    let token = Token::mint_with_required_keys(
         &secret,
         input.tool_name,
         input.arg_keys,
@@ -421,7 +440,8 @@ fn handle_mint_from_stdin() -> Result<(), Box<dyn std::error::Error>> {
         input.generate_jti,
         input.nbf,
         input.max_depth,
-    );
+        input.required_keys,
+    )?;
 
     let output = MintOutput { token };
     println!("{}", serde_json::to_string_pretty(&output)?);
@@ -465,11 +485,16 @@ fn handle_attenuate() -> Result<(), Box<dyn std::error::Error>> {
     reject_empty_constraint_patterns(input.constraints.as_ref())?;
     let secret = decode_secret(&input.secret);
 
-    let attenuated = input.token.attenuate_with_constraints(
+    if let Some(ref keys) = input.required_keys {
+        let allowlist = input.arg_keys.as_ref().unwrap_or(&input.token.arg_keys);
+        reject_invalid_required_keys(keys, allowlist)?;
+    }
+    let attenuated = input.token.attenuate_with_required_keys(
         &secret,
         input.arg_keys,
         input.expiry,
         input.constraints,
+        input.required_keys,
     )?;
 
     let output = AttenuateOutput { token: attenuated };

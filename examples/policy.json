@@ -8,6 +8,7 @@
     {
       "name": "read_file",
       "arg_keys": ["path", "roots", "limit", "score", "query", "title", "ext", "note", "memo", "file", "skip"],
+      "required_keys": ["path"],
       "constraints": {
         "path": { "type": "prefix", "value": "/tmp/" },
         "roots": { "type": "prefix_one_of", "value": ["/tmp/", "/var/"] },
@@ -25,6 +26,7 @@
     {
       "name": "list_dir",
       "arg_keys": ["path"],
+      "required_keys": ["path"],
       "constraints": {
         "path": { "type": "not", "value": { "type": "prefix", "value": "/etc/" } }
       },
