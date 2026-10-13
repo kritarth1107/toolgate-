@@ -358,6 +358,38 @@ impl Keyring {
         ))
     }
 
+    /// Mint a token with optional required argument keys using the active key.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mint_with_required_keys(
+        &self,
+        tool_name: impl Into<String>,
+        arg_keys: Vec<String>,
+        expiry: u64,
+        audience: Option<String>,
+        constraints: Option<Constraints>,
+        generate_jti: bool,
+        nbf: Option<u64>,
+        max_depth: Option<u32>,
+        required_keys: Vec<String>,
+    ) -> Result<Token, TokenError> {
+        let kid = self.active_kid.as_ref().ok_or(TokenError::NoActiveKey)?;
+        let secret = self.keys.get(kid).ok_or(TokenError::NoActiveKey)?;
+
+        Token::mint_with_required_keys(
+            secret,
+            tool_name,
+            arg_keys,
+            expiry,
+            audience,
+            Some(kid.clone()),
+            constraints,
+            generate_jti,
+            nbf,
+            max_depth,
+            required_keys,
+        )
+    }
+
     /// Verify a token using the keyring.
     ///
     /// Looks up the signing key by the token's `kid` field.

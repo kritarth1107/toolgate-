@@ -631,6 +631,7 @@ impl Token {
                 nbf,
                 depth,
                 max_depth,
+                required_keys: Vec::new(),
             },
             pos,
         ))

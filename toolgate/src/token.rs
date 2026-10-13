@@ -1,6 +1,6 @@
 //! Token creation, attenuation, and verification.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use hmac::{Hmac, Mac};
@@ -9,7 +9,7 @@ use subtle::ConstantTimeEq;
 
 use crate::clock::{Clock, VerifyTime};
 use crate::constraint::Constraints;
-use crate::encoding::encode_canonical_v6;
+use crate::encoding::encode_canonical_v7;
 use crate::revocation::RevocationList;
 use crate::use_store::{UseResult, UseStore};
 use crate::verifier::Verifier;
@@ -45,6 +45,13 @@ pub struct Token {
     /// Optional maximum attenuation depth. When present, covered by the MAC.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_depth: Option<u32>,
+    /// Argument keys that must be present on a verified call.
+    ///
+    /// Empty / omitted means no keys are required (backward compatible).
+    /// Every required key must also appear in [`Token::arg_keys`]. Covered
+    /// by the MAC. Attenuation may only add required keys, never drop them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required_keys: Vec<String>,
 }
 
 fn is_zero_u32(value: &u32) -> bool {
@@ -101,6 +108,14 @@ pub enum TokenError {
     UseStoreFailed {
         reason: String,
     },
+    /// A required argument key was missing from the call.
+    MissingRequiredKey {
+        key: String,
+    },
+    /// A required key is empty or is not in the token's argument allowlist.
+    InvalidRequiredKey {
+        key: String,
+    },
 }
 
 impl std::fmt::Display for TokenError {
@@ -138,6 +153,16 @@ impl std::fmt::Display for TokenError {
             TokenError::MalformedRequest => write!(f, "malformed request"),
             TokenError::PolicyDenied { reason } => write!(f, "denied by policy: {reason}"),
             TokenError::UseStoreFailed { reason } => write!(f, "use store failed: {reason}"),
+            TokenError::MissingRequiredKey { key } => {
+                write!(f, "required argument key '{}' is missing", key)
+            }
+            TokenError::InvalidRequiredKey { key } => {
+                write!(
+                    f,
+                    "required argument key '{}' is empty or not in the allowlist",
+                    key
+                )
+            }
         }
     }
 }
@@ -166,6 +191,8 @@ impl TokenError {
             TokenError::MalformedRequest => "malformed_request",
             TokenError::PolicyDenied { .. } => "policy_denied",
             TokenError::UseStoreFailed { .. } => "use_store_failed",
+            TokenError::MissingRequiredKey { .. } => "missing_required_key",
+            TokenError::InvalidRequiredKey { .. } => "invalid_required_key",
         }
     }
 
@@ -303,6 +330,88 @@ impl Token {
         nbf: Option<u64>,
         max_depth: Option<u32>,
     ) -> Self {
+        Self::mint_all(
+            secret,
+            tool_name,
+            arg_keys,
+            expiry,
+            audience,
+            kid,
+            constraints,
+            generate_jti,
+            nbf,
+            max_depth,
+            Vec::new(),
+        )
+    }
+
+    /// Mint a token that requires the listed argument keys on every verified call.
+    ///
+    /// `required_keys` must be a subset of `arg_keys`. Empty names are rejected.
+    /// Duplicates are dropped after sorting. An empty list is equivalent to
+    /// [`Token::mint_complete`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn mint_with_required_keys(
+        secret: &[u8],
+        tool_name: impl Into<String>,
+        arg_keys: Vec<String>,
+        expiry: u64,
+        audience: Option<String>,
+        kid: Option<String>,
+        constraints: Option<Constraints>,
+        generate_jti: bool,
+        nbf: Option<u64>,
+        max_depth: Option<u32>,
+        required_keys: Vec<String>,
+    ) -> Result<Self, TokenError> {
+        let required_keys = Self::normalize_required_keys(required_keys, &arg_keys)?;
+        Ok(Self::mint_all(
+            secret,
+            tool_name,
+            arg_keys,
+            expiry,
+            audience,
+            kid,
+            constraints,
+            generate_jti,
+            nbf,
+            max_depth,
+            required_keys,
+        ))
+    }
+
+    /// Sort unique required keys and reject empty names or keys not in `arg_keys`.
+    pub(crate) fn normalize_required_keys(
+        keys: Vec<String>,
+        arg_keys: &[String],
+    ) -> Result<Vec<String>, TokenError> {
+        let mut seen = BTreeSet::new();
+        for key in keys {
+            if key.is_empty() {
+                return Err(TokenError::InvalidRequiredKey { key });
+            }
+            if !arg_keys.iter().any(|k| k == &key) {
+                return Err(TokenError::InvalidRequiredKey { key });
+            }
+            seen.insert(key);
+        }
+        Ok(seen.into_iter().collect())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn mint_all(
+        secret: &[u8],
+        tool_name: impl Into<String>,
+        arg_keys: Vec<String>,
+        expiry: u64,
+        audience: Option<String>,
+        kid: Option<String>,
+        constraints: Option<Constraints>,
+        generate_jti: bool,
+        nbf: Option<u64>,
+        max_depth: Option<u32>,
+        required_keys: Vec<String>,
+    ) -> Self {
         let tool_name = tool_name.into();
         let nonce: [u8; 16] = rand::random();
 
@@ -318,7 +427,7 @@ impl Token {
         };
 
         let depth = 0u32;
-        let canonical = encode_canonical_v6(
+        let canonical = encode_canonical_v7(
             &tool_name,
             &arg_keys,
             expiry,
@@ -330,6 +439,7 @@ impl Token {
             nbf,
             depth,
             max_depth,
+            &required_keys,
         );
         let mut hmac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
         hmac.update(&canonical);
@@ -348,6 +458,7 @@ impl Token {
             nbf,
             depth,
             max_depth,
+            required_keys,
         }
     }
 
@@ -454,7 +565,7 @@ impl Token {
         }
 
         // Recompute MAC
-        let canonical = encode_canonical_v6(
+        let canonical = encode_canonical_v7(
             &self.tool_name,
             &self.arg_keys,
             self.expiry,
@@ -466,6 +577,7 @@ impl Token {
             self.nbf,
             self.depth,
             self.max_depth,
+            &self.required_keys,
         );
         let mut hmac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
         hmac.update(&canonical);
@@ -815,7 +927,7 @@ impl Token {
         // Generate new nonce and MAC for the attenuated token
         // Audience, kid, jti, nbf, and max_depth are preserved unchanged.
         let nonce: [u8; 16] = rand::random();
-        let canonical = encode_canonical_v6(
+        let canonical = encode_canonical_v7(
             &self.tool_name,
             &final_arg_keys,
             final_expiry,
@@ -827,6 +939,7 @@ impl Token {
             self.nbf,
             new_depth,
             self.max_depth,
+            &self.required_keys,
         );
         let mut hmac = HmacSha256::new_from_slice(secret).expect("HMAC accepts any key size");
         hmac.update(&canonical);
@@ -845,6 +958,7 @@ impl Token {
             nbf: self.nbf,
             depth: new_depth,
             max_depth: self.max_depth,
+            required_keys: self.required_keys.clone(),
         })
     }
 

@@ -183,6 +183,42 @@ pub fn encode_canonical_v6(
     depth: u32,
     max_depth: Option<u32>,
 ) -> Vec<u8> {
+    encode_canonical_v7(
+        tool_name,
+        arg_keys,
+        expiry,
+        nonce,
+        audience,
+        kid,
+        constraints,
+        jti,
+        nbf,
+        depth,
+        max_depth,
+        &[],
+    )
+}
+
+/// Encode a token's fields into canonical bytes (v7 format with required keys).
+///
+/// When `required_keys` is empty the output is identical to
+/// [`encode_canonical_v6`] for the same other fields. Tokens without
+/// nbf/depth/max_depth/required_keys still encode identically to v5.
+#[allow(clippy::too_many_arguments)]
+pub fn encode_canonical_v7(
+    tool_name: &str,
+    arg_keys: &[String],
+    expiry: u64,
+    nonce: &[u8],
+    audience: Option<&str>,
+    kid: Option<&str>,
+    constraints: Option<&Constraints>,
+    jti: Option<&str>,
+    nbf: Option<u64>,
+    depth: u32,
+    max_depth: Option<u32>,
+    required_keys: &[String],
+) -> Vec<u8> {
     let mut buf = Vec::new();
 
     // Tool name: length-prefixed
@@ -258,9 +294,19 @@ pub fn encode_canonical_v6(
         buf.extend_from_slice(jti_bytes);
     }
 
-    // nbf / depth / max_depth: only encoded if any is set (v6 extension)
-    // Tokens without these fields produce identical encoding to v5
-    if nbf.is_some() || depth > 0 || max_depth.is_some() {
+    // nbf / depth / max_depth / required_keys: only encoded if any is set
+    // (v6 + v7 extensions). Tokens without these fields encode identically
+    // to v5. Tokens with v6 fields and no required keys encode identically
+    // to v6 (flag bit 3 unset, no key list).
+    let mut required: Vec<&str> = required_keys
+        .iter()
+        .filter(|k| !k.is_empty())
+        .map(|s| s.as_str())
+        .collect();
+    required.sort_unstable();
+    required.dedup();
+
+    if nbf.is_some() || depth > 0 || max_depth.is_some() || !required.is_empty() {
         let mut flags = 0u8;
         if nbf.is_some() {
             flags |= 0x01;
@@ -271,6 +317,9 @@ pub fn encode_canonical_v6(
         if max_depth.is_some() {
             flags |= 0x04;
         }
+        if !required.is_empty() {
+            flags |= 0x08;
+        }
         buf.push(flags);
         if let Some(n) = nbf {
             buf.extend_from_slice(&n.to_be_bytes());
@@ -280,6 +329,14 @@ pub fn encode_canonical_v6(
         }
         if let Some(m) = max_depth {
             buf.extend_from_slice(&m.to_be_bytes());
+        }
+        if !required.is_empty() {
+            buf.extend_from_slice(&(required.len() as u16).to_be_bytes());
+            for key in required {
+                let key_bytes = key.as_bytes();
+                buf.extend_from_slice(&(key_bytes.len() as u16).to_be_bytes());
+                buf.extend_from_slice(key_bytes);
+            }
         }
     }
 
