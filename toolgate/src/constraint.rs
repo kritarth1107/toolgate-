@@ -19,8 +19,10 @@
 //! `{"type":"contains_none","value":["secret","password"]}`,
 //! `{"type":"matches_any","value":["*.txt","*.md"]}`,
 //! `{"type":"matches_none","value":["*.tmp","*.bak"]}`,
-//! `{"type":"prefix_none","value":["/etc/","/root/"]}`, and
-//! `{"type":"suffix_none","value":[".bak",".tmp"]}`.
+//! `{"type":"prefix_none","value":["/etc/","/root/"]}`,
+//! `{"type":"suffix_none","value":[".bak",".tmp"]}`,
+//! `{"type":"int_one_of","value":[1,2,3]}`, and
+//! `{"type":"int_none","value":[0,-1]}`.
 //! [`Constraint::PrefixOneOf`] requires the value to start with at least
 //! one listed UTF-8 prefix. [`Constraint::SuffixOneOf`] requires the value
 //! to end with at least one listed UTF-8 suffix. [`Constraint::ContainsAny`]
@@ -31,7 +33,10 @@
 //! requires the value to match none of the listed globs.
 //! [`Constraint::PrefixNone`] requires the value to start with none of the
 //! listed UTF-8 prefixes. [`Constraint::SuffixNone`] requires the value to
-//! end with none of the listed UTF-8 suffixes. Empty lists and empty
+//! end with none of the listed UTF-8 suffixes. [`Constraint::IntOneOf`]
+//! requires the value to parse as an `i64` that is one of the listed
+//! integers. [`Constraint::IntNone`] requires the value to parse as an
+//! `i64` that is none of the listed integers. Empty lists and empty
 //! members are rejected at mint/validate and never match (fail closed).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -257,6 +262,29 @@ pub enum Constraint {
     /// JSON: `{"type":"suffix_none","value":[".bak",".tmp"]}`
     #[serde(rename = "suffix_none")]
     SuffixNone(Vec<String>),
+    /// Value must parse as an `i64` that is one of the listed integers.
+    ///
+    /// Stored and encoded as sorted unique `i64`s, the same spirit as
+    /// [`OneOf`] but compared after integer parse (so `"1"`, `"+1"`,
+    /// and `"01"` are the same member). An empty list is rejected at
+    /// mint/validate and never matches a value (fail closed). Values
+    /// that do not parse as `i64` fail closed at check time, the same
+    /// spirit as [`IntRange`].
+    ///
+    /// JSON: `{"type":"int_one_of","value":[1,2,3]}`
+    #[serde(rename = "int_one_of")]
+    IntOneOf(Vec<i64>),
+    /// Value must parse as an `i64` that is none of the listed integers.
+    ///
+    /// Stored and encoded as sorted unique `i64`s, the same spirit as
+    /// [`NotOneOf`] but compared after integer parse. An empty list is
+    /// rejected at mint/validate and never matches a value (fail closed).
+    /// Values that do not parse as `i64` fail closed at check time, the
+    /// same spirit as [`IntRange`].
+    ///
+    /// JSON: `{"type":"int_none","value":[0,-1]}`
+    #[serde(rename = "int_none")]
+    IntNone(Vec<i64>),
 }
 
 impl PartialEq for Constraint {
@@ -330,6 +358,8 @@ impl PartialEq for Constraint {
             (Constraint::MatchesNone(a), Constraint::MatchesNone(b)) => a == b,
             (Constraint::PrefixNone(a), Constraint::PrefixNone(b)) => a == b,
             (Constraint::SuffixNone(a), Constraint::SuffixNone(b)) => a == b,
+            (Constraint::IntOneOf(a), Constraint::IntOneOf(b)) => a == b,
+            (Constraint::IntNone(a), Constraint::IntNone(b)) => a == b,
             _ => false,
         }
     }
@@ -427,16 +457,33 @@ impl Constraint {
             Constraint::SuffixNone(suffixes) => {
                 string_list_is_valid(suffixes) && suffixes.iter().all(|s| !value.ends_with(s))
             }
+            // Empty allow/deny lists match nothing; non-integers fail
+            // closed, same spirit as IntRange.
+            Constraint::IntOneOf(allowed) => {
+                int_list_is_valid(allowed)
+                    && value
+                        .parse::<i64>()
+                        .map(|n| allowed.contains(&n))
+                        .unwrap_or(false)
+            }
+            Constraint::IntNone(denied) => {
+                int_list_is_valid(denied)
+                    && value
+                        .parse::<i64>()
+                        .map(|n| !denied.contains(&n))
+                        .unwrap_or(false)
+            }
         }
     }
 
     /// Empty suffix/contains/matches/not_contains/not_prefix/not_suffix/
     /// not_matches needles, empty NotOneOf denylists, empty PrefixOneOf,
     /// SuffixOneOf, ContainsAny, ContainsNone, MatchesAny, MatchesNone,
-    /// PrefixNone, or SuffixNone lists (or a list containing an empty
-    /// member), empty All/Any composites, and a `Not` whose child is an
-    /// empty pattern match nothing and must not be treated as wildcards.
-    /// A composite that contains an empty child is also empty.
+    /// PrefixNone, SuffixNone, IntOneOf, or IntNone lists (or a list
+    /// containing an empty member), empty All/Any composites, and a
+    /// `Not` whose child is an empty pattern match nothing and must not
+    /// be treated as wildcards. A composite that contains an empty child
+    /// is also empty.
     pub fn is_empty_pattern(&self) -> bool {
         match self {
             Constraint::Suffix(value)
@@ -455,6 +502,9 @@ impl Constraint {
             | Constraint::MatchesNone(values)
             | Constraint::PrefixNone(values)
             | Constraint::SuffixNone(values) => !string_list_is_valid(values),
+            Constraint::IntOneOf(values) | Constraint::IntNone(values) => {
+                !int_list_is_valid(values)
+            }
             Constraint::All(children) | Constraint::Any(children) => {
                 children.is_empty() || children.iter().any(|c| c.is_empty_pattern())
             }
@@ -532,6 +582,23 @@ impl Constraint {
                 } else {
                     false
                 }
+            }
+
+            // Exact is subset of IntOneOf if the value parses to a listed int.
+            (Constraint::Exact(a), Constraint::IntOneOf(allowed)) => {
+                int_list_is_valid(allowed)
+                    && a.parse::<i64>()
+                        .map(|n| allowed.contains(&n))
+                        .unwrap_or(false)
+            }
+
+            // Exact is subset of IntNone if the value parses to an int
+            // that is not in the denylist.
+            (Constraint::Exact(a), Constraint::IntNone(denied)) => {
+                int_list_is_valid(denied)
+                    && a.parse::<i64>()
+                        .map(|n| !denied.contains(&n))
+                        .unwrap_or(false)
             }
 
             // Exact is subset of FloatRange if the value parses as a finite
@@ -691,6 +758,30 @@ impl Constraint {
                         false
                     }
                 })
+            }
+
+            // OneOf is subset of IntOneOf if every allowed value parses
+            // to a listed integer.
+            (Constraint::OneOf(values), Constraint::IntOneOf(allowed)) => {
+                int_list_is_valid(allowed)
+                    && !values.is_empty()
+                    && values.iter().all(|v| {
+                        v.parse::<i64>()
+                            .map(|n| allowed.contains(&n))
+                            .unwrap_or(false)
+                    })
+            }
+
+            // OneOf is subset of IntNone if every allowed value parses
+            // to an integer that is not denied.
+            (Constraint::OneOf(values), Constraint::IntNone(denied)) => {
+                int_list_is_valid(denied)
+                    && !values.is_empty()
+                    && values.iter().all(|v| {
+                        v.parse::<i64>()
+                            .map(|n| !denied.contains(&n))
+                            .unwrap_or(false)
+                    })
             }
 
             // OneOf is subset of FloatRange if every allowed value parses as
@@ -993,6 +1084,42 @@ impl Constraint {
                     max: old_max,
                 },
             ) => new_min >= old_min && new_max <= old_max,
+
+            // IntOneOf → IntOneOf: every remaining integer must already
+            // be allowed (shrink/narrow only). Empty lists fail closed.
+            (Constraint::IntOneOf(new), Constraint::IntOneOf(old)) => int_one_of_tightens(new, old),
+
+            // IntNone → IntNone: every old denial must stay covered;
+            // extra denials are allowed. Empty lists fail closed.
+            (Constraint::IntNone(new), Constraint::IntNone(old)) => int_none_tightens(new, old),
+
+            // IntOneOf is subset of IntRange when every listed int lies
+            // inside the inclusive interval.
+            (Constraint::IntOneOf(allowed), Constraint::IntRange { min, max }) => {
+                int_list_is_valid(allowed) && allowed.iter().all(|&n| n >= *min && n <= *max)
+            }
+
+            // IntRange is subset of IntOneOf when every integer in the
+            // range is a listed member. Huge or inverted ranges fail closed.
+            (Constraint::IntRange { min, max }, Constraint::IntOneOf(allowed)) => {
+                int_range_subset_of_one_of(*min, *max, allowed)
+            }
+
+            // IntOneOf is subset of IntNone when every remaining allowed
+            // int avoids the denylist.
+            (Constraint::IntOneOf(allowed), Constraint::IntNone(denied)) => {
+                int_list_is_valid(allowed)
+                    && int_list_is_valid(denied)
+                    && allowed.iter().all(|n| !denied.contains(n))
+            }
+
+            // IntRange is subset of IntNone when no denied integer lies
+            // inside the inclusive interval.
+            (Constraint::IntRange { min, max }, Constraint::IntNone(denied)) => {
+                *min <= *max
+                    && int_list_is_valid(denied)
+                    && denied.iter().all(|&n| n < *min || n > *max)
+            }
 
             // FloatRange is subset of FloatRange if the new interval is
             // within the old one. Invalid (non-finite or inverted) bounds
@@ -1629,6 +1756,44 @@ fn string_list_is_valid(values: &[String]) -> bool {
     !values.is_empty() && values.iter().all(|s| !s.is_empty())
 }
 
+/// IntOneOf / IntNone lists are valid only when non-empty.
+fn int_list_is_valid(values: &[i64]) -> bool {
+    !values.is_empty()
+}
+
+/// Every child integer must already be allowed by the parent.
+/// Empty lists fail closed.
+fn int_one_of_tightens(new: &[i64], old: &[i64]) -> bool {
+    int_list_is_valid(new) && int_list_is_valid(old) && new.iter().all(|n| old.contains(n))
+}
+
+/// Every old denial must stay in the new denylist. Extra denials are
+/// allowed. Empty lists fail closed.
+fn int_none_tightens(new: &[i64], old: &[i64]) -> bool {
+    int_list_is_valid(new) && int_list_is_valid(old) && old.iter().all(|n| new.contains(n))
+}
+
+/// True when every integer in `[min, max]` is a member of `allowed`.
+/// Overflowing or inverted ranges fail closed.
+fn int_range_subset_of_one_of(min: i64, max: i64, allowed: &[i64]) -> bool {
+    if !int_list_is_valid(allowed) || min > max {
+        return false;
+    }
+    let Some(span) = max.checked_sub(min).and_then(|d| d.checked_add(1)) else {
+        return false;
+    };
+    let Ok(span_usize) = usize::try_from(span) else {
+        return false;
+    };
+    let mut seen = BTreeSet::new();
+    for &n in allowed {
+        if n >= min && n <= max {
+            seen.insert(n);
+        }
+    }
+    seen.len() == span_usize
+}
+
 /// Every old prefix is covered by a new prefix that is a prefix of it
 /// (shorter/equal forbids more). Extra new prefixes are allowed.
 /// Empty lists fail closed.
@@ -1980,6 +2145,37 @@ mod tests {
         assert!(!c.check("notes.bak"));
         assert!(!c.check("draft.tmp"));
         assert!(!c.check(".bak"));
+    }
+
+    #[test]
+    fn int_one_of_check() {
+        let c = Constraint::IntOneOf(vec![1, 2, 3]);
+        assert!(c.check("1"));
+        assert!(c.check("2"));
+        assert!(c.check("3"));
+        assert!(c.check("+1"));
+        assert!(c.check("01"));
+        assert!(!c.check("0"));
+        assert!(!c.check("4"));
+        assert!(!c.check("-1"));
+        assert!(!c.check("abc"));
+        assert!(!c.check("1.0"));
+        assert!(!c.check(""));
+    }
+
+    #[test]
+    fn int_none_check() {
+        let c = Constraint::IntNone(vec![0, -1]);
+        assert!(c.check("1"));
+        assert!(c.check("2"));
+        assert!(c.check("+3"));
+        assert!(!c.check("0"));
+        assert!(!c.check("+0"));
+        assert!(!c.check("-1"));
+        assert!(!c.check("00"));
+        assert!(!c.check("abc"));
+        assert!(!c.check("1.0"));
+        assert!(!c.check(""));
     }
 
     #[test]
@@ -2395,6 +2591,26 @@ mod tests {
             assert!(!c.check("anything"));
         }
         assert!(!Constraint::SuffixNone(vec![".bak".to_string()]).is_empty_pattern());
+    }
+
+    #[test]
+    fn empty_int_one_of_fail_closed() {
+        let empty = Constraint::IntOneOf(vec![]);
+        assert!(empty.is_empty_pattern());
+        assert!(!empty.check(""));
+        assert!(!empty.check("1"));
+        assert!(!empty.check("anything"));
+        assert!(!Constraint::IntOneOf(vec![1]).is_empty_pattern());
+    }
+
+    #[test]
+    fn empty_int_none_fail_closed() {
+        let empty = Constraint::IntNone(vec![]);
+        assert!(empty.is_empty_pattern());
+        assert!(!empty.check(""));
+        assert!(!empty.check("1"));
+        assert!(!empty.check("anything"));
+        assert!(!Constraint::IntNone(vec![0]).is_empty_pattern());
     }
 
     #[test]
@@ -2952,6 +3168,77 @@ mod tests {
                 vec!["a.bak".to_string(), "b.bak".to_string()]
             ))
         );
+    }
+
+    #[test]
+    fn int_one_of_subset_tightens_only() {
+        let parent = Constraint::IntOneOf(vec![1, 2, 3]);
+        let shrink = Constraint::IntOneOf(vec![1, 2]);
+        let same = Constraint::IntOneOf(vec![3, 1, 2]);
+        let grow = Constraint::IntOneOf(vec![1, 2, 3, 4]);
+        let empty = Constraint::IntOneOf(vec![]);
+        let disjoint = Constraint::IntOneOf(vec![4, 5]);
+
+        assert!(shrink.is_subset_of(&parent));
+        assert!(same.is_subset_of(&parent));
+        assert!(!grow.is_subset_of(&parent));
+        assert!(parent.is_subset_of(&grow));
+        assert!(!empty.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&empty));
+        assert!(!disjoint.is_subset_of(&parent));
+
+        assert!(Constraint::Exact("1".to_string()).is_subset_of(&parent));
+        assert!(Constraint::Exact("+2".to_string()).is_subset_of(&parent));
+        assert!(Constraint::Exact("01".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("4".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("abc".to_string()).is_subset_of(&parent));
+        assert!(Constraint::OneOf(vec!["1".to_string(), "3".to_string()]).is_subset_of(&parent));
+        assert!(!Constraint::OneOf(vec!["1".to_string(), "4".to_string()]).is_subset_of(&parent));
+
+        assert!(parent.is_subset_of(&Constraint::IntRange { min: 1, max: 3 }));
+        assert!(parent.is_subset_of(&Constraint::IntRange { min: 0, max: 10 }));
+        assert!(!parent.is_subset_of(&Constraint::IntRange { min: 2, max: 3 }));
+        assert!(Constraint::IntRange { min: 1, max: 3 }.is_subset_of(&parent));
+        assert!(!Constraint::IntRange { min: 1, max: 4 }.is_subset_of(&parent));
+        assert!(!Constraint::IntRange { min: 2, max: 2 }.is_subset_of(&disjoint));
+
+        assert!(parent.is_subset_of(&Constraint::IntNone(vec![0, -1])));
+        assert!(!parent.is_subset_of(&Constraint::IntNone(vec![2])));
+        // Unclear: IntOneOf cannot replace Exact (leading zeros / +).
+        assert!(!parent.is_subset_of(&Constraint::Exact("1".to_string())));
+        assert!(!parent.is_subset_of(&Constraint::OneOf(vec!["1".to_string()])));
+    }
+
+    #[test]
+    fn int_none_subset_tightens_only() {
+        let parent = Constraint::IntNone(vec![0, -1]);
+        let grow = Constraint::IntNone(vec![0, -1, 2]);
+        let same = Constraint::IntNone(vec![-1, 0]);
+        let drop = Constraint::IntNone(vec![0]);
+        let empty = Constraint::IntNone(vec![]);
+
+        assert!(grow.is_subset_of(&parent));
+        assert!(same.is_subset_of(&parent));
+        assert!(!drop.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&grow));
+        assert!(parent.is_subset_of(&drop));
+        assert!(!empty.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&empty));
+
+        assert!(Constraint::Exact("1".to_string()).is_subset_of(&parent));
+        assert!(Constraint::Exact("+2".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("0".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("-1".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("abc".to_string()).is_subset_of(&parent));
+        assert!(Constraint::OneOf(vec!["1".to_string(), "2".to_string()]).is_subset_of(&parent));
+        assert!(!Constraint::OneOf(vec!["1".to_string(), "0".to_string()]).is_subset_of(&parent));
+
+        assert!(Constraint::IntRange { min: 1, max: 10 }.is_subset_of(&parent));
+        assert!(!Constraint::IntRange { min: -1, max: 10 }.is_subset_of(&parent));
+        assert!(!Constraint::IntRange { min: 0, max: 0 }.is_subset_of(&parent));
+        // Denying specific ints is not a subset of a range.
+        assert!(!parent.is_subset_of(&Constraint::IntRange { min: 1, max: 10 }));
+        assert!(!parent.is_subset_of(&Constraint::IntOneOf(vec![1, 2, 3])));
     }
 
     #[test]
@@ -3669,6 +3956,39 @@ mod tests {
     }
 
     #[test]
+    fn json_int_one_of() {
+        let c = Constraint::IntOneOf(vec![1, 2, 3]);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"int_one_of\""));
+        assert!(json.contains('1'));
+        assert!(json.contains('2'));
+        assert!(json.contains('3'));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"int_one_of","value":[1,2,3]}"#).unwrap();
+        assert_eq!(from_cli, c);
+    }
+
+    #[test]
+    fn json_int_none() {
+        let c = Constraint::IntNone(vec![0, -1]);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"int_none\""));
+        assert!(json.contains('0'));
+        assert!(json.contains("-1"));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"int_none","value":[0,-1]}"#).unwrap();
+        assert_eq!(from_cli, c);
+    }
+
+    #[test]
     fn json_suffix() {
         let c = Constraint::Suffix(".txt".to_string());
         let json = serde_json::to_string(&c).unwrap();
@@ -3905,6 +4225,12 @@ mod tests {
             Constraint::Not(Box::new(Constraint::SuffixNone(vec![String::new()])));
         assert!(suffix_none_empty.is_empty_pattern());
         assert!(!suffix_none_empty.check("notes.txt"));
+        let int_one_of_empty = Constraint::All(vec![Constraint::IntOneOf(vec![])]);
+        assert!(int_one_of_empty.is_empty_pattern());
+        assert!(!int_one_of_empty.check("1"));
+        let int_none_empty = Constraint::Not(Box::new(Constraint::IntNone(vec![])));
+        assert!(int_none_empty.is_empty_pattern());
+        assert!(!int_none_empty.check("1"));
         assert!(!all.check("/tmp/a.txt"));
         assert!(!any.check("notes.txt"));
     }
