@@ -3,11 +3,11 @@
 //! This module provides a space-efficient binary encoding for tokens,
 //! suitable for transmission over constrained channels.
 //!
-//! ## Wire Format v5 (all integers big-endian)
+//! ## Wire Format v6 (all integers big-endian)
 //!
 //! | Field | Encoding |
 //! |-------|----------|
-//! | version | u8 (5 when nbf/depth/max_depth are set; otherwise 4) |
+//! | version | u8 (6 when required_keys are set; 5 when nbf/depth/max_depth are set; otherwise 4) |
 //! | tool_name | u16 length + UTF-8 bytes |
 //! | arg_keys_count | u16 |
 //! | arg_keys | for each: u16 length + UTF-8 bytes |
@@ -19,23 +19,30 @@
 //! | constraints_count | u16 (0 = none) |
 //! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone) |
 //! | jti | u16 length + UTF-8 bytes (0 = none) |
-//! | nbf_flag | u8 (v5 only; 0 = none, 1 = present) |
-//! | nbf | u64 (v5 only, if nbf_flag = 1) |
-//! | depth | u32 (v5 only) |
-//! | max_depth_flag | u8 (v5 only; 0 = none, 1 = present) |
-//! | max_depth | u32 (v5 only, if max_depth_flag = 1) |
+//! | nbf_flag | u8 (v5+ only; 0 = none, 1 = present) |
+//! | nbf | u64 (v5+ only, if nbf_flag = 1) |
+//! | depth | u32 (v5+ only) |
+//! | max_depth_flag | u8 (v5+ only; 0 = none, 1 = present) |
+//! | max_depth | u32 (v5+ only, if max_depth_flag = 1) |
+//! | required_keys_count | u16 (v6 only) |
+//! | required_keys | for each, sorted unique: u16 length + UTF-8 (v6 only) |
 //!
-//! Tokens without nbf, with depth 0, and without max_depth encode as v4 so
-//! the bytes match v0.5. Wire formats v1–v4 are still supported for decoding.
+//! Tokens without required_keys, nbf, with depth 0, and without max_depth
+//! encode as v4 so the bytes match v0.5. Tokens with v5 fields and no
+//! required keys stay on v5. Wire formats v1–v5 are still supported for
+//! decoding.
 
 use crate::constraint::{Constraint, Constraints};
 use crate::Token;
 use std::collections::BTreeMap;
 
-/// Current wire format version (supports nbf and attenuation depth)
-const WIRE_VERSION: u8 = 5;
+/// Current wire format version (supports required argument keys)
+const WIRE_VERSION: u8 = 6;
 
-/// Wire version used when nbf/depth/max_depth are unset (identical to v0.5).
+/// Wire version used when required_keys are unset but nbf/depth/max_depth are set.
+const WIRE_VERSION_V5: u8 = 5;
+
+/// Wire version used when nbf/depth/max_depth/required_keys are unset (identical to v0.5).
 const WIRE_VERSION_V4: u8 = 4;
 
 /// Minimum supported wire format version
@@ -372,16 +379,22 @@ impl Token {
         self.nbf.is_some() || self.depth > 0 || self.max_depth.is_some()
     }
 
+    fn has_v6_fields(&self) -> bool {
+        !self.required_keys.is_empty()
+    }
+
     /// Encode this token to compact binary wire format.
     ///
-    /// Tokens without nbf/depth/max_depth are written as v4 so the bytes
-    /// match the v0.5 encoding of the same fields.
+    /// Tokens without required_keys and without nbf/depth/max_depth are
+    /// written as v4 so the bytes match the v0.5 encoding of the same
+    /// fields. Tokens with v5 fields and no required keys stay on v5.
     pub fn to_wire(&self) -> Vec<u8> {
         let mut buf = Vec::new();
 
-        // Version: stay on v4 when the v5 fields are unset
-        let version = if self.has_v5_fields() {
+        let version = if self.has_v6_fields() {
             WIRE_VERSION
+        } else if self.has_v5_fields() {
+            WIRE_VERSION_V5
         } else {
             WIRE_VERSION_V4
         };
@@ -461,8 +474,8 @@ impl Token {
             }
         }
 
-        // nbf / depth / max_depth (v5 only)
-        if version >= WIRE_VERSION {
+        // nbf / depth / max_depth (v5+)
+        if version >= WIRE_VERSION_V5 {
             match self.nbf {
                 Some(nbf) => {
                     buf.push(1);
@@ -477,6 +490,16 @@ impl Token {
                     buf.extend_from_slice(&max.to_be_bytes());
                 }
                 None => buf.push(0),
+            }
+        }
+
+        // required_keys (v6 only)
+        if version >= WIRE_VERSION {
+            buf.extend_from_slice(&(self.required_keys.len() as u16).to_be_bytes());
+            for key in &self.required_keys {
+                let key_bytes = key.as_bytes();
+                buf.extend_from_slice(&(key_bytes.len() as u16).to_be_bytes());
+                buf.extend_from_slice(key_bytes);
             }
         }
 
@@ -594,7 +617,7 @@ impl Token {
         };
 
         // nbf / depth / max_depth (v5+ only)
-        let (nbf, depth, max_depth) = if version >= 5 {
+        let (nbf, depth, max_depth) = if version >= WIRE_VERSION_V5 {
             let nbf_flag = *read_bytes(&mut pos, 1)?.first().unwrap();
             let nbf = if nbf_flag == 1 {
                 Some(u64::from_be_bytes(
@@ -617,6 +640,23 @@ impl Token {
             (None, 0, None)
         };
 
+        // required_keys (v6+ only)
+        let required_keys = if version >= WIRE_VERSION {
+            let count = u16::from_be_bytes(read_bytes(&mut pos, 2)?.try_into().unwrap()) as usize;
+            let mut keys = Vec::with_capacity(count);
+            for _ in 0..count {
+                let key_len =
+                    u16::from_be_bytes(read_bytes(&mut pos, 2)?.try_into().unwrap()) as usize;
+                let key_bytes = read_bytes(&mut pos, key_len)?;
+                let key =
+                    String::from_utf8(key_bytes.to_vec()).map_err(|_| WireError::InvalidUtf8)?;
+                keys.push(key);
+            }
+            keys
+        } else {
+            Vec::new()
+        };
+
         Ok((
             Token {
                 tool_name,
@@ -631,7 +671,7 @@ impl Token {
                 nbf,
                 depth,
                 max_depth,
-                required_keys: Vec::new(),
+                required_keys,
             },
             pos,
         ))
@@ -1999,7 +2039,7 @@ mod tests {
         assert_eq!(attenuated.depth, 1);
 
         let wire = attenuated.to_wire();
-        assert_eq!(wire[0], WIRE_VERSION);
+        assert_eq!(wire[0], WIRE_VERSION_V5);
         assert_eq!(wire[0], 5);
 
         let decoded = Token::from_wire(&wire).unwrap();

@@ -36,6 +36,14 @@
 //! - depth: u32 (only if bit 1 is set)
 //! - max_depth: u32 (only if bit 2 is set)
 //!
+//! Format v7 (backward-compatible extension):
+//! - All v6 fields
+//! - flags bit 3 = required_keys present
+//! - required_keys: u16 count + (for each, sorted unique: u16 length + UTF-8)
+//!   only if bit 3 is set
+//! - Tokens without required_keys encode identically to v6 (or v5 when the
+//!   v6 trailer is also omitted)
+//!
 //! Constraint data encoding:
 //! - Exact: u16 length + UTF-8 bytes
 //! - OneOf: u16 count + (for each value, sorted: u16 length + UTF-8 bytes)
@@ -70,7 +78,9 @@
 //! encode identically to v4. Tokens without constraints and without jti
 //! encode identically to v3. The v6 format appends nbf/depth/max_depth
 //! only when at least one is set, so tokens without those fields encode
-//! identically to v5.
+//! identically to v5. The v7 format appends required_keys after the v6
+//! trailer (flag bit 3); tokens without required keys encode identically
+//! to v6.
 
 use crate::constraint::{Constraint, Constraints};
 
