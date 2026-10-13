@@ -20,7 +20,7 @@
 //! - constraints_count: u16
 //! - for each constraint (sorted by key):
 //!   - key: u16 length + UTF-8 bytes
-//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone)
+//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone, 27=PrefixNone, 28=SuffixNone)
 //!   - constraint_data: type-specific encoding
 //!
 //! Format v5 (backward-compatible extension):
@@ -73,6 +73,8 @@
 //! - ContainsNone: u16 count + (for each value, sorted unique: u16 length + UTF-8 bytes)
 //! - MatchesAny: u16 count + (for each value, sorted unique: u16 length + UTF-8 bytes)
 //! - MatchesNone: u16 count + (for each value, sorted unique: u16 length + UTF-8 bytes)
+//! - PrefixNone: u16 count + (for each value, sorted unique: u16 length + UTF-8 bytes)
+//! - SuffixNone: u16 count + (for each value, sorted unique: u16 length + UTF-8 bytes)
 //!
 //! The v5 format appends jti after constraints. Tokens without jti
 //! encode identically to v4. Tokens without constraints and without jti
@@ -493,6 +495,14 @@ fn encode_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
         }
         Constraint::MatchesNone(values) => {
             buf.push(26); // type = MatchesNone
+            encode_sorted_unique_strings(buf, values);
+        }
+        Constraint::PrefixNone(values) => {
+            buf.push(27); // type = PrefixNone
+            encode_sorted_unique_strings(buf, values);
+        }
+        Constraint::SuffixNone(values) => {
+            buf.push(28); // type = SuffixNone
             encode_sorted_unique_strings(buf, values);
         }
     }
@@ -1299,6 +1309,78 @@ mod tests {
             0x00, 0x02, // 2 values after sort+unique
             0x00, 0x05, b'*', b'.', b'b', b'a', b'k', // "*.bak"
             0x00, 0x05, b'*', b'.', b't', b'm', b'p', // "*.tmp"
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_prefix_none() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "dest".to_string(),
+            Constraint::PrefixNone(vec![
+                "/root/".to_string(),
+                "/etc/".to_string(),
+                "/etc/".to_string(),
+            ]),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'd', b'e', b's', b't', // key "dest"
+            0x1B, // type = PrefixNone
+            0x00, 0x02, // 2 values after sort+unique
+            0x00, 0x05, b'/', b'e', b't', b'c', b'/', // "/etc/"
+            0x00, 0x06, b'/', b'r', b'o', b'o', b't', b'/', // "/root/"
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_suffix_none() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "name".to_string(),
+            Constraint::SuffixNone(vec![
+                ".tmp".to_string(),
+                ".bak".to_string(),
+                ".bak".to_string(),
+            ]),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'n', b'a', b'm', b'e', // key "name"
+            0x1C, // type = SuffixNone
+            0x00, 0x02, // 2 values after sort+unique
+            0x00, 0x04, b'.', b'b', b'a', b'k', // ".bak"
+            0x00, 0x04, b'.', b't', b'm', b'p', // ".tmp"
+        ]));
+    }
+
+    #[test]
+    fn encoding_without_prefix_none_identical_to_prior() {
+        // Tokens that do not use PrefixNone/SuffixNone must keep the 0.28.0 bytes.
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "file".to_string(),
+            Constraint::MatchesAny(vec!["*.md".to_string(), "*.txt".to_string()]),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'f', b'i', b'l', b'e', // key "file"
+            0x19, // type = MatchesAny
+            0x00, 0x02, // 2 values, sorted unique
+            0x00, 0x04, b'*', b'.', b'm', b'd', // "*.md"
+            0x00, 0x05, b'*', b'.', b't', b'x', b't', // "*.txt"
         ]));
     }
 
