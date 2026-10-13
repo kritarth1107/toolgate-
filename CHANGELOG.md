@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.30.0] - 2026-10-13
+
+### Added
+- **`Constraint::PrefixNone(Vec<String>)`**: value must not start with any listed UTF-8 prefix
+- **`Constraint::SuffixNone(Vec<String>)`**: value must not end with any listed UTF-8 suffix
+- CLI JSON forms `{"type":"prefix_none","value":["/etc/","/root/"]}` and `{"type":"suffix_none","value":[".bak",".tmp"]}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6, MinLen=7, Matches=8, NotEquals=9, NotOneOf=10, NotContains=11, NotPrefix=12, NotSuffix=13, NotMatches=14, All=15, Any=16, Not=17, FloatRange=18, LenRange=19, CharLenRange=20, PrefixOneOf=21, SuffixOneOf=22, ContainsAny=23, ContainsNone=24, MatchesAny=25, MatchesNone=26, PrefixNone=27, SuffixNone=28
+- Tokens without the new types still encode identically to 0.29.0
+
+### Notes
+- Stored and encoded as sorted unique strings (same spirit as NotOneOf / ContainsNone): u8 type + u16 count + each len-prefixed string
+- Attenuation only tightens: PrefixNone children must cover every parent prefix with a denial that is at least as broad (shorter/equal forbids more) and may add extra denials; SuffixNone must cover every parent suffix the same way
+- Exact may replace PrefixNone/SuffixNone when the exact value starts/ends with none of the listed members
+- OneOf may replace PrefixNone/SuffixNone when every allowed value satisfies the same rule
+- NotPrefix/PrefixNone may replace each other when the new denials still cover the old ones
+- NotSuffix/SuffixNone may replace each other when the new denials still cover the old ones
+- Empty lists and empty members are rejected at mint/validate and never match a value (fail closed)
+- Unclear cross-type pairs fail closed
+
 ## [0.29.0] - 2026-10-13
 
 ### Added
