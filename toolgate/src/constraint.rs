@@ -21,8 +21,10 @@
 //! `{"type":"matches_none","value":["*.tmp","*.bak"]}`,
 //! `{"type":"prefix_none","value":["/etc/","/root/"]}`,
 //! `{"type":"suffix_none","value":[".bak",".tmp"]}`,
-//! `{"type":"int_one_of","value":[1,2,3]}`, and
-//! `{"type":"int_none","value":[0,-1]}`.
+//! `{"type":"int_one_of","value":[1,2,3]}`,
+//! `{"type":"int_none","value":[0,-1]}`,
+//! `{"type":"float_one_of","value":[0.5,1.5,2.5]}`, and
+//! `{"type":"float_none","value":[0.0,-1.0]}`.
 //! [`Constraint::PrefixOneOf`] requires the value to start with at least
 //! one listed UTF-8 prefix. [`Constraint::SuffixOneOf`] requires the value
 //! to end with at least one listed UTF-8 suffix. [`Constraint::ContainsAny`]
@@ -36,8 +38,12 @@
 //! end with none of the listed UTF-8 suffixes. [`Constraint::IntOneOf`]
 //! requires the value to parse as an `i64` that is one of the listed
 //! integers. [`Constraint::IntNone`] requires the value to parse as an
-//! `i64` that is none of the listed integers. Empty lists and empty
-//! members are rejected at mint/validate and never match (fail closed).
+//! `i64` that is none of the listed integers. [`Constraint::FloatOneOf`]
+//! requires the value to parse as a finite `f64` that is one of the
+//! listed floats. [`Constraint::FloatNone`] requires the value to parse
+//! as a finite `f64` that is none of the listed floats. Empty lists and
+//! empty members are rejected at mint/validate and never match (fail
+//! closed).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -285,6 +291,33 @@ pub enum Constraint {
     /// JSON: `{"type":"int_none","value":[0,-1]}`
     #[serde(rename = "int_none")]
     IntNone(Vec<i64>),
+    /// Value must parse as a finite `f64` that is one of the listed floats.
+    ///
+    /// Stored and encoded as sorted unique IEEE-754 bit patterns, the
+    /// same spirit as [`IntOneOf`] but compared after a finite `f64`
+    /// parse (so `"1"`, `"1.0"`, and `"1e0"` are the same member). An
+    /// empty list is rejected at mint/validate and never matches a
+    /// value (fail closed). Non-finite list members (NaN, ±inf) are
+    /// rejected at mint/validate. Values that do not parse as a finite
+    /// `f64` fail closed at check time, the same spirit as
+    /// [`FloatRange`].
+    ///
+    /// JSON: `{"type":"float_one_of","value":[0.5,1.5,2.5]}`
+    #[serde(rename = "float_one_of")]
+    FloatOneOf(Vec<f64>),
+    /// Value must parse as a finite `f64` that is none of the listed floats.
+    ///
+    /// Stored and encoded as sorted unique IEEE-754 bit patterns, the
+    /// same spirit as [`IntNone`] but compared after a finite `f64`
+    /// parse. An empty list is rejected at mint/validate and never
+    /// matches a value (fail closed). Non-finite list members (NaN,
+    /// ±inf) are rejected at mint/validate. Values that do not parse
+    /// as a finite `f64` fail closed at check time, the same spirit as
+    /// [`FloatRange`].
+    ///
+    /// JSON: `{"type":"float_none","value":[0.0,-1.0]}`
+    #[serde(rename = "float_none")]
+    FloatNone(Vec<f64>),
 }
 
 impl PartialEq for Constraint {
@@ -360,6 +393,11 @@ impl PartialEq for Constraint {
             (Constraint::SuffixNone(a), Constraint::SuffixNone(b)) => a == b,
             (Constraint::IntOneOf(a), Constraint::IntOneOf(b)) => a == b,
             (Constraint::IntNone(a), Constraint::IntNone(b)) => a == b,
+            // Compare IEEE-754 bit patterns so Eq is reflexive even if a
+            // non-finite member is constructed in memory (those values
+            // are still rejected at mint/validate).
+            (Constraint::FloatOneOf(a), Constraint::FloatOneOf(b)) => float_list_eq(a, b),
+            (Constraint::FloatNone(a), Constraint::FloatNone(b)) => float_list_eq(a, b),
             _ => false,
         }
     }
@@ -473,17 +511,31 @@ impl Constraint {
                         .map(|n| !denied.contains(&n))
                         .unwrap_or(false)
             }
+            // Empty or non-finite allow/deny lists match nothing;
+            // non-finite values fail closed, same spirit as FloatRange.
+            Constraint::FloatOneOf(allowed) => {
+                float_list_is_valid(allowed)
+                    && parse_finite_f64(value)
+                        .map(|n| float_list_contains(allowed, n))
+                        .unwrap_or(false)
+            }
+            Constraint::FloatNone(denied) => {
+                float_list_is_valid(denied)
+                    && parse_finite_f64(value)
+                        .map(|n| !float_list_contains(denied, n))
+                        .unwrap_or(false)
+            }
         }
     }
 
     /// Empty suffix/contains/matches/not_contains/not_prefix/not_suffix/
     /// not_matches needles, empty NotOneOf denylists, empty PrefixOneOf,
     /// SuffixOneOf, ContainsAny, ContainsNone, MatchesAny, MatchesNone,
-    /// PrefixNone, SuffixNone, IntOneOf, or IntNone lists (or a list
-    /// containing an empty member), empty All/Any composites, and a
-    /// `Not` whose child is an empty pattern match nothing and must not
-    /// be treated as wildcards. A composite that contains an empty child
-    /// is also empty.
+    /// PrefixNone, SuffixNone, IntOneOf, IntNone, FloatOneOf, or
+    /// FloatNone lists (or a list containing an empty member), empty
+    /// All/Any composites, and a `Not` whose child is an empty pattern
+    /// match nothing and must not be treated as wildcards. A composite
+    /// that contains an empty child is also empty.
     pub fn is_empty_pattern(&self) -> bool {
         match self {
             Constraint::Suffix(value)
@@ -505,6 +557,7 @@ impl Constraint {
             Constraint::IntOneOf(values) | Constraint::IntNone(values) => {
                 !int_list_is_valid(values)
             }
+            Constraint::FloatOneOf(values) | Constraint::FloatNone(values) => values.is_empty(),
             Constraint::All(children) | Constraint::Any(children) => {
                 children.is_empty() || children.iter().any(|c| c.is_empty_pattern())
             }
@@ -515,11 +568,15 @@ impl Constraint {
 
     /// True when a [`Constraint::FloatRange`], [`Constraint::LenRange`],
     /// or [`Constraint::CharLenRange`] (or a composite containing one)
-    /// has inverted bounds, or when a FloatRange has non-finite bounds.
+    /// has inverted bounds, when a FloatRange has non-finite bounds, or
+    /// when a FloatOneOf / FloatNone list contains a non-finite member.
     /// Rejected at mint/validate and never matches a value (fail closed).
     pub fn is_invalid_range(&self) -> bool {
         match self {
             Constraint::FloatRange { min, max } => !float_range_is_valid(*min, *max),
+            Constraint::FloatOneOf(values) | Constraint::FloatNone(values) => {
+                values.iter().any(|n| !n.is_finite())
+            }
             Constraint::LenRange { min, max } | Constraint::CharLenRange { min, max } => {
                 !len_range_is_valid(*min, *max)
             }
@@ -598,6 +655,24 @@ impl Constraint {
                 int_list_is_valid(denied)
                     && a.parse::<i64>()
                         .map(|n| !denied.contains(&n))
+                        .unwrap_or(false)
+            }
+
+            // Exact is subset of FloatOneOf if the value parses to a
+            // listed finite f64.
+            (Constraint::Exact(a), Constraint::FloatOneOf(allowed)) => {
+                float_list_is_valid(allowed)
+                    && parse_finite_f64(a)
+                        .map(|n| float_list_contains(allowed, n))
+                        .unwrap_or(false)
+            }
+
+            // Exact is subset of FloatNone if the value parses to a
+            // finite f64 that is not in the denylist.
+            (Constraint::Exact(a), Constraint::FloatNone(denied)) => {
+                float_list_is_valid(denied)
+                    && parse_finite_f64(a)
+                        .map(|n| !float_list_contains(denied, n))
                         .unwrap_or(false)
             }
 
@@ -780,6 +855,30 @@ impl Constraint {
                     && values.iter().all(|v| {
                         v.parse::<i64>()
                             .map(|n| !denied.contains(&n))
+                            .unwrap_or(false)
+                    })
+            }
+
+            // OneOf is subset of FloatOneOf if every allowed value parses
+            // to a listed finite f64.
+            (Constraint::OneOf(values), Constraint::FloatOneOf(allowed)) => {
+                float_list_is_valid(allowed)
+                    && !values.is_empty()
+                    && values.iter().all(|v| {
+                        parse_finite_f64(v)
+                            .map(|n| float_list_contains(allowed, n))
+                            .unwrap_or(false)
+                    })
+            }
+
+            // OneOf is subset of FloatNone if every allowed value parses
+            // to a finite f64 that is not denied.
+            (Constraint::OneOf(values), Constraint::FloatNone(denied)) => {
+                float_list_is_valid(denied)
+                    && !values.is_empty()
+                    && values.iter().all(|v| {
+                        parse_finite_f64(v)
+                            .map(|n| !float_list_contains(denied, n))
                             .unwrap_or(false)
                     })
             }
@@ -1119,6 +1218,96 @@ impl Constraint {
                 *min <= *max
                     && int_list_is_valid(denied)
                     && denied.iter().all(|&n| n < *min || n > *max)
+            }
+
+            // FloatOneOf → FloatOneOf: every remaining float must already
+            // be allowed (shrink/narrow only). Empty or non-finite lists
+            // fail closed.
+            (Constraint::FloatOneOf(new), Constraint::FloatOneOf(old)) => {
+                float_one_of_tightens(new, old)
+            }
+
+            // FloatNone → FloatNone: every old denial must stay covered;
+            // extra denials are allowed. Empty or non-finite lists fail
+            // closed.
+            (Constraint::FloatNone(new), Constraint::FloatNone(old)) => {
+                float_none_tightens(new, old)
+            }
+
+            // FloatOneOf is subset of FloatRange when every listed float
+            // lies inside the inclusive interval.
+            (Constraint::FloatOneOf(allowed), Constraint::FloatRange { min, max }) => {
+                float_list_is_valid(allowed)
+                    && float_range_is_valid(*min, *max)
+                    && allowed.iter().all(|&n| n >= *min && n <= *max)
+            }
+
+            // FloatRange is subset of FloatOneOf only when the interval
+            // is a single finite point that is listed. A continuous
+            // range cannot be shown to be a subset of a discrete list.
+            (Constraint::FloatRange { min, max }, Constraint::FloatOneOf(allowed)) => {
+                float_range_is_valid(*min, *max)
+                    && *min == *max
+                    && float_list_is_valid(allowed)
+                    && float_list_contains(allowed, *min)
+            }
+
+            // FloatOneOf is subset of FloatNone when every remaining
+            // allowed float avoids the denylist.
+            (Constraint::FloatOneOf(allowed), Constraint::FloatNone(denied)) => {
+                float_list_is_valid(allowed)
+                    && float_list_is_valid(denied)
+                    && allowed.iter().all(|&n| !float_list_contains(denied, n))
+            }
+
+            // FloatRange is subset of FloatNone when no denied float
+            // lies inside the inclusive interval.
+            (Constraint::FloatRange { min, max }, Constraint::FloatNone(denied)) => {
+                float_range_is_valid(*min, *max)
+                    && float_list_is_valid(denied)
+                    && denied.iter().all(|&n| n < *min || n > *max)
+            }
+
+            // IntOneOf is subset of FloatOneOf when every listed int
+            // converts exactly to f64 and is listed.
+            (Constraint::IntOneOf(allowed), Constraint::FloatOneOf(floats)) => {
+                int_list_is_valid(allowed)
+                    && float_list_is_valid(floats)
+                    && allowed.iter().all(|&n| {
+                        i64_as_exact_f64(n)
+                            .map(|f| float_list_contains(floats, f))
+                            .unwrap_or(false)
+                    })
+            }
+
+            // IntRange is subset of FloatOneOf when every integer in
+            // the range converts exactly to f64 and is listed. Huge or
+            // inverted ranges fail closed.
+            (Constraint::IntRange { min, max }, Constraint::FloatOneOf(allowed)) => {
+                int_range_subset_of_float_one_of(*min, *max, allowed)
+            }
+
+            // IntOneOf is subset of FloatNone when every remaining
+            // allowed int converts exactly to f64 and avoids the denylist.
+            (Constraint::IntOneOf(allowed), Constraint::FloatNone(denied)) => {
+                int_list_is_valid(allowed)
+                    && float_list_is_valid(denied)
+                    && allowed.iter().all(|&n| {
+                        i64_as_exact_f64(n)
+                            .map(|f| !float_list_contains(denied, f))
+                            .unwrap_or(false)
+                    })
+            }
+
+            // IntRange is subset of FloatNone when no denied float is
+            // an exact integer inside the inclusive interval.
+            (Constraint::IntRange { min, max }, Constraint::FloatNone(denied)) => {
+                *min <= *max
+                    && float_list_is_valid(denied)
+                    && denied.iter().all(|&f| match f64_as_exact_i64(f) {
+                        Some(n) => n < *min || n > *max,
+                        None => true,
+                    })
             }
 
             // FloatRange is subset of FloatRange if the new interval is
@@ -1794,6 +1983,78 @@ fn int_range_subset_of_one_of(min: i64, max: i64, allowed: &[i64]) -> bool {
     seen.len() == span_usize
 }
 
+/// FloatOneOf / FloatNone lists are valid only when non-empty and every
+/// member is finite. NaN / ±inf fail closed, the same spirit as
+/// [`Constraint::FloatRange`].
+fn float_list_is_valid(values: &[f64]) -> bool {
+    !values.is_empty() && values.iter().all(|n| n.is_finite())
+}
+
+/// IEEE-754 bit equality so `0.0` / `-0.0` stay distinct in stored
+/// lists, while Eq stays reflexive for any in-memory NaN payload.
+fn float_list_eq(a: &[f64], b: &[f64]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| x.to_bits() == y.to_bits())
+}
+
+/// Membership uses IEEE `==` so `"0"` / `"+0"` / `"-0"` / `"0.0"`
+/// match either signed zero, matching [`Constraint::FloatRange`].
+fn float_list_contains(values: &[f64], n: f64) -> bool {
+    values.iter().any(|&x| x == n)
+}
+
+/// Every child float must already be allowed by the parent.
+/// Empty or non-finite lists fail closed.
+fn float_one_of_tightens(new: &[f64], old: &[f64]) -> bool {
+    float_list_is_valid(new)
+        && float_list_is_valid(old)
+        && new.iter().all(|&n| float_list_contains(old, n))
+}
+
+/// Every old denial must stay in the new denylist. Extra denials are
+/// allowed. Empty or non-finite lists fail closed.
+fn float_none_tightens(new: &[f64], old: &[f64]) -> bool {
+    float_list_is_valid(new)
+        && float_list_is_valid(old)
+        && old.iter().all(|&n| float_list_contains(new, n))
+}
+
+/// True when every integer in `[min, max]` converts exactly to `f64`
+/// and is a member of `allowed`. Overflowing or inverted ranges fail
+/// closed.
+fn int_range_subset_of_float_one_of(min: i64, max: i64, allowed: &[f64]) -> bool {
+    if !float_list_is_valid(allowed) || min > max {
+        return false;
+    }
+    let Some(span) = max.checked_sub(min).and_then(|d| d.checked_add(1)) else {
+        return false;
+    };
+    let Ok(span_usize) = usize::try_from(span) else {
+        return false;
+    };
+    let mut seen = BTreeSet::new();
+    for &f in allowed {
+        if let Some(n) = f64_as_exact_i64(f) {
+            if n >= min && n <= max {
+                seen.insert(n);
+            }
+        }
+    }
+    seen.len() == span_usize
+}
+
+/// Inverse of [`i64_as_exact_f64`]: accept only finite floats that
+/// convert to an `i64` without rounding.
+fn f64_as_exact_i64(f: f64) -> Option<i64> {
+    if !f.is_finite() {
+        return None;
+    }
+    let n = f as i64;
+    i64_as_exact_f64(n).filter(|&back| back == f).map(|_| n)
+}
+
 /// Every old prefix is covered by a new prefix that is a prefix of it
 /// (shorter/equal forbids more). Extra new prefixes are allowed.
 /// Empty lists fail closed.
@@ -2176,6 +2437,42 @@ mod tests {
         assert!(!c.check("abc"));
         assert!(!c.check("1.0"));
         assert!(!c.check(""));
+    }
+
+    #[test]
+    fn float_one_of_check() {
+        let c = Constraint::FloatOneOf(vec![0.5, 1.5, 2.5]);
+        assert!(c.check("0.5"));
+        assert!(c.check("1.5"));
+        assert!(c.check("2.5"));
+        assert!(c.check("5e-1"));
+        assert!(!c.check("1"));
+        assert!(!c.check("1.0"));
+        assert!(!c.check("0"));
+        assert!(!c.check("abc"));
+        assert!(!c.check(""));
+        assert!(!c.check("NaN"));
+        assert!(!c.check("inf"));
+        assert!(!c.check("-inf"));
+    }
+
+    #[test]
+    fn float_none_check() {
+        let c = Constraint::FloatNone(vec![0.0, -1.0]);
+        assert!(c.check("1"));
+        assert!(c.check("1.0"));
+        assert!(c.check("2.5"));
+        assert!(c.check("+3"));
+        assert!(!c.check("0"));
+        assert!(!c.check("0.0"));
+        assert!(!c.check("+0"));
+        assert!(!c.check("-0"));
+        assert!(!c.check("-1"));
+        assert!(!c.check("-1.0"));
+        assert!(!c.check("abc"));
+        assert!(!c.check(""));
+        assert!(!c.check("NaN"));
+        assert!(!c.check("inf"));
     }
 
     #[test]
@@ -2611,6 +2908,39 @@ mod tests {
         assert!(!empty.check("1"));
         assert!(!empty.check("anything"));
         assert!(!Constraint::IntNone(vec![0]).is_empty_pattern());
+    }
+
+    #[test]
+    fn empty_float_one_of_fail_closed() {
+        let empty = Constraint::FloatOneOf(vec![]);
+        assert!(empty.is_empty_pattern());
+        assert!(!empty.check(""));
+        assert!(!empty.check("1.5"));
+        assert!(!empty.check("anything"));
+        assert!(!Constraint::FloatOneOf(vec![1.5]).is_empty_pattern());
+    }
+
+    #[test]
+    fn empty_float_none_fail_closed() {
+        let empty = Constraint::FloatNone(vec![]);
+        assert!(empty.is_empty_pattern());
+        assert!(!empty.check(""));
+        assert!(!empty.check("1.5"));
+        assert!(!empty.check("anything"));
+        assert!(!Constraint::FloatNone(vec![0.0]).is_empty_pattern());
+    }
+
+    #[test]
+    fn nonfinite_float_one_of_and_float_none_fail_closed() {
+        let nan = Constraint::FloatOneOf(vec![f64::NAN]);
+        let inf = Constraint::FloatNone(vec![0.5, f64::INFINITY]);
+        assert!(nan.is_invalid_range());
+        assert!(inf.is_invalid_range());
+        assert!(!nan.check("1.5"));
+        assert!(!inf.check("0.5"));
+        assert!(!inf.check("1.0"));
+        assert!(!Constraint::FloatOneOf(vec![0.5, 1.5]).is_invalid_range());
+        assert!(!Constraint::FloatNone(vec![0.0, -1.0]).is_invalid_range());
     }
 
     #[test]
@@ -3239,6 +3569,104 @@ mod tests {
         // Denying specific ints is not a subset of a range.
         assert!(!parent.is_subset_of(&Constraint::IntRange { min: 1, max: 10 }));
         assert!(!parent.is_subset_of(&Constraint::IntOneOf(vec![1, 2, 3])));
+    }
+
+    #[test]
+    fn float_one_of_subset_tightens_only() {
+        let parent = Constraint::FloatOneOf(vec![0.5, 1.5, 2.5]);
+        let shrink = Constraint::FloatOneOf(vec![0.5, 1.5]);
+        let same = Constraint::FloatOneOf(vec![2.5, 0.5, 1.5]);
+        let grow = Constraint::FloatOneOf(vec![0.5, 1.5, 2.5, 3.5]);
+        let empty = Constraint::FloatOneOf(vec![]);
+        let disjoint = Constraint::FloatOneOf(vec![3.5, 4.5]);
+        let nan = Constraint::FloatOneOf(vec![f64::NAN]);
+
+        assert!(shrink.is_subset_of(&parent));
+        assert!(same.is_subset_of(&parent));
+        assert!(!grow.is_subset_of(&parent));
+        assert!(parent.is_subset_of(&grow));
+        assert!(!empty.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&empty));
+        assert!(!disjoint.is_subset_of(&parent));
+        assert!(!nan.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&nan));
+
+        assert!(Constraint::Exact("0.5".to_string()).is_subset_of(&parent));
+        assert!(Constraint::Exact("5e-1".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("1".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("abc".to_string()).is_subset_of(&parent));
+        assert!(
+            Constraint::OneOf(vec!["0.5".to_string(), "2.5".to_string()]).is_subset_of(&parent)
+        );
+        assert!(!Constraint::OneOf(vec!["0.5".to_string(), "1".to_string()]).is_subset_of(&parent));
+
+        assert!(parent.is_subset_of(&Constraint::FloatRange { min: 0.5, max: 2.5 }));
+        assert!(parent.is_subset_of(&Constraint::FloatRange {
+            min: 0.0,
+            max: 10.0
+        }));
+        assert!(!parent.is_subset_of(&Constraint::FloatRange { min: 1.0, max: 2.5 }));
+        assert!(Constraint::FloatRange { min: 1.5, max: 1.5 }.is_subset_of(&parent));
+        assert!(!Constraint::FloatRange { min: 0.5, max: 2.5 }.is_subset_of(&parent));
+
+        assert!(parent.is_subset_of(&Constraint::FloatNone(vec![0.0, -1.0])));
+        assert!(!parent.is_subset_of(&Constraint::FloatNone(vec![1.5])));
+        assert!(!Constraint::IntOneOf(vec![]).is_subset_of(&parent));
+        assert!(Constraint::IntOneOf(vec![1]).is_subset_of(&Constraint::FloatOneOf(vec![1.0])));
+        assert!(!Constraint::IntOneOf(vec![1]).is_subset_of(&parent));
+        // Unclear: FloatOneOf cannot replace Exact (1 vs 1.0).
+        assert!(!parent.is_subset_of(&Constraint::Exact("0.5".to_string())));
+        assert!(!parent.is_subset_of(&Constraint::OneOf(vec!["0.5".to_string()])));
+        assert!(!parent.is_subset_of(&Constraint::IntOneOf(vec![1])));
+    }
+
+    #[test]
+    fn float_none_subset_tightens_only() {
+        let parent = Constraint::FloatNone(vec![0.0, -1.0]);
+        let grow = Constraint::FloatNone(vec![0.0, -1.0, 2.5]);
+        let same = Constraint::FloatNone(vec![-1.0, 0.0]);
+        let drop = Constraint::FloatNone(vec![0.0]);
+        let empty = Constraint::FloatNone(vec![]);
+        let nan = Constraint::FloatNone(vec![f64::NAN]);
+
+        assert!(grow.is_subset_of(&parent));
+        assert!(same.is_subset_of(&parent));
+        assert!(!drop.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&grow));
+        assert!(parent.is_subset_of(&drop));
+        assert!(!empty.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&empty));
+        assert!(!nan.is_subset_of(&parent));
+
+        assert!(Constraint::Exact("1".to_string()).is_subset_of(&parent));
+        assert!(Constraint::Exact("1.0".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("0".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("-1.0".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("abc".to_string()).is_subset_of(&parent));
+        assert!(Constraint::OneOf(vec!["1".to_string(), "2.5".to_string()]).is_subset_of(&parent));
+        assert!(!Constraint::OneOf(vec!["1".to_string(), "0".to_string()]).is_subset_of(&parent));
+
+        assert!(Constraint::FloatRange {
+            min: 0.5,
+            max: 10.0
+        }
+        .is_subset_of(&parent));
+        assert!(!Constraint::FloatRange {
+            min: -1.0,
+            max: 10.0
+        }
+        .is_subset_of(&parent));
+        assert!(!Constraint::FloatRange { min: 0.0, max: 0.0 }.is_subset_of(&parent));
+        // Denying specific floats is not a subset of a range.
+        assert!(!parent.is_subset_of(&Constraint::FloatRange {
+            min: 0.5,
+            max: 10.0
+        }));
+        assert!(!parent.is_subset_of(&Constraint::FloatOneOf(vec![0.5, 1.5])));
+        assert!(Constraint::IntRange { min: 1, max: 10 }.is_subset_of(&parent));
+        assert!(!Constraint::IntRange { min: -1, max: 10 }.is_subset_of(&parent));
+        assert!(Constraint::IntOneOf(vec![1, 2]).is_subset_of(&parent));
+        assert!(!Constraint::IntOneOf(vec![0, 2]).is_subset_of(&parent));
     }
 
     #[test]
@@ -3989,6 +4417,39 @@ mod tests {
     }
 
     #[test]
+    fn json_float_one_of() {
+        let c = Constraint::FloatOneOf(vec![0.5, 1.5, 2.5]);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"float_one_of\""));
+        assert!(json.contains("0.5"));
+        assert!(json.contains("1.5"));
+        assert!(json.contains("2.5"));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"float_one_of","value":[0.5,1.5,2.5]}"#).unwrap();
+        assert_eq!(from_cli, c);
+    }
+
+    #[test]
+    fn json_float_none() {
+        let c = Constraint::FloatNone(vec![0.0, -1.0]);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"float_none\""));
+        assert!(json.contains('0'));
+        assert!(json.contains("-1"));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"float_none","value":[0.0,-1.0]}"#).unwrap();
+        assert_eq!(from_cli, c);
+    }
+
+    #[test]
     fn json_suffix() {
         let c = Constraint::Suffix(".txt".to_string());
         let json = serde_json::to_string(&c).unwrap();
@@ -4231,6 +4692,12 @@ mod tests {
         let int_none_empty = Constraint::Not(Box::new(Constraint::IntNone(vec![])));
         assert!(int_none_empty.is_empty_pattern());
         assert!(!int_none_empty.check("1"));
+        let float_one_of_empty = Constraint::All(vec![Constraint::FloatOneOf(vec![])]);
+        assert!(float_one_of_empty.is_empty_pattern());
+        assert!(!float_one_of_empty.check("1.5"));
+        let float_none_empty = Constraint::Not(Box::new(Constraint::FloatNone(vec![])));
+        assert!(float_none_empty.is_empty_pattern());
+        assert!(!float_none_empty.check("1.5"));
         assert!(!all.check("/tmp/a.txt"));
         assert!(!any.check("notes.txt"));
     }
