@@ -2002,7 +2002,7 @@ fn float_list_eq(a: &[f64], b: &[f64]) -> bool {
 /// Membership uses IEEE `==` so `"0"` / `"+0"` / `"-0"` / `"0.0"`
 /// match either signed zero, matching [`Constraint::FloatRange`].
 fn float_list_contains(values: &[f64], n: f64) -> bool {
-    values.iter().any(|&x| x == n)
+    values.contains(&n)
 }
 
 /// Every child float must already be allowed by the parent.
