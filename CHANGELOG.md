@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.32.0] - 2026-10-13
+
+### Added
+- **`Constraint::FloatOneOf(Vec<f64>)`**: value must parse as a finite `f64` that is one of the listed floats
+- **`Constraint::FloatNone(Vec<f64>)`**: value must parse as a finite `f64` that is none of the listed floats
+- CLI JSON forms `{"type":"float_one_of","value":[0.5,1.5,2.5]}` and `{"type":"float_none","value":[0.0,-1.0]}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6, MinLen=7, Matches=8, NotEquals=9, NotOneOf=10, NotContains=11, NotPrefix=12, NotSuffix=13, NotMatches=14, All=15, Any=16, Not=17, FloatRange=18, LenRange=19, CharLenRange=20, PrefixOneOf=21, SuffixOneOf=22, ContainsAny=23, ContainsNone=24, MatchesAny=25, MatchesNone=26, PrefixNone=27, SuffixNone=28, IntOneOf=29, IntNone=30, FloatOneOf=31, FloatNone=32
+- Tokens without the new types still encode identically to 0.31.0
+
+### Notes
+- Stored and encoded as sorted unique IEEE-754 bit patterns (same spirit as IntOneOf / IntNone): u8 type + u16 count + each big-endian f64
+- Attenuation only tightens: FloatOneOf children must be a subset of the parent allowlist; FloatNone must cover every parent denial and may add extra denials
+- Exact may replace FloatOneOf/FloatNone when the exact value parses to a listed / non-denied finite f64
+- OneOf may replace FloatOneOf/FloatNone when every allowed value parses and satisfies the same rule
+- FloatOneOf may replace FloatRange when every listed float lies inside the old range; FloatRange may replace FloatOneOf only when the interval is a single listed point
+- FloatRange may replace FloatNone when no denied float lies inside the new range; FloatOneOf may replace FloatNone when every remaining float avoids the denylist
+- IntOneOf may replace FloatOneOf/FloatNone when every listed integer converts exactly to f64 and satisfies the same rule
+- IntRange may replace FloatOneOf when every integer in the range converts exactly and is listed; IntRange may replace FloatNone when no denied float is an exact integer inside the range
+- Empty lists are rejected at mint/validate and never match a value (fail closed)
+- Non-finite list members (NaN, ±inf) are rejected at mint/validate and never match (fail closed)
+- Values that do not parse as a finite `f64` fail closed at check time (same spirit as FloatRange)
+- Unclear cross-type pairs fail closed
+
 ## [0.31.0] - 2026-10-13
 
 ### Added
