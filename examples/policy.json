@@ -7,7 +7,7 @@
   "tools": [
     {
       "name": "read_file",
-      "arg_keys": ["path", "roots", "limit", "score", "query", "title", "ext", "note", "memo", "file", "skip", "dest", "name"],
+      "arg_keys": ["path", "roots", "limit", "score", "query", "title", "ext", "note", "memo", "file", "skip", "dest", "name", "mode", "port"],
       "required_keys": ["path"],
       "constraints": {
         "path": { "type": "prefix", "value": "/tmp/" },
@@ -22,7 +22,9 @@
         "file": { "type": "matches_any", "value": ["*.txt", "*.md"] },
         "skip": { "type": "matches_none", "value": ["*.tmp", "*.bak"] },
         "dest": { "type": "prefix_none", "value": ["/etc/", "/root/"] },
-        "name": { "type": "suffix_none", "value": [".bak", ".tmp"] }
+        "name": { "type": "suffix_none", "value": [".bak", ".tmp"] },
+        "mode": { "type": "int_one_of", "value": [1, 2, 3] },
+        "port": { "type": "int_none", "value": [0, -1] }
       }
     },
     {
