@@ -2978,6 +2978,40 @@ mod tests {
     }
 
     #[test]
+    fn char_len_one_of_check() {
+        let c = Constraint::CharLenOneOf(vec![2, 4, 8]);
+        assert!(c.check("ab"));
+        assert!(c.check("abcd"));
+        assert!(c.check("abcdefgh"));
+        assert!(c.check("éé")); // 2 scalars, 4 bytes
+        assert!(c.check("café")); // 4 scalars, 5 bytes
+        assert!(!c.check("a"));
+        assert!(!c.check("abc"));
+        assert!(!c.check(""));
+        assert!(!c.check("abcdefghi"));
+        assert!(!c.check("日本語")); // 3 scalars
+        assert!(Constraint::CharLenOneOf(vec![0]).check(""));
+        assert!(!Constraint::CharLenOneOf(vec![0]).check("a"));
+        assert!(!Constraint::CharLenOneOf(vec![2]).check("é")); // 1 scalar
+        assert!(Constraint::CharLenOneOf(vec![1]).check("é"));
+        assert!(Constraint::CharLenOneOf(vec![3]).check("日本語"));
+        assert!(!Constraint::CharLenOneOf(vec![9]).check("日本語"));
+    }
+
+    #[test]
+    fn char_len_none_check() {
+        let c = Constraint::CharLenNone(vec![0, 1]);
+        assert!(c.check("ab"));
+        assert!(c.check("hello"));
+        assert!(c.check("éé")); // 2 scalars
+        assert!(!c.check(""));
+        assert!(!c.check("a"));
+        assert!(!c.check("x"));
+        assert!(!c.check("é")); // 1 scalar, 2 bytes
+        assert!(c.check("日本語"));
+    }
+
+    #[test]
     fn suffix_check() {
         let c = Constraint::Suffix(".txt".to_string());
         assert!(c.check("notes.txt"));
@@ -3278,6 +3312,28 @@ mod tests {
         assert!(!empty.check("ab"));
         assert!(!empty.check("anything"));
         assert!(!Constraint::LenNone(vec![0]).is_empty_pattern());
+    }
+
+    #[test]
+    fn empty_char_len_one_of_fail_closed() {
+        let empty = Constraint::CharLenOneOf(vec![]);
+        assert!(empty.is_empty_pattern());
+        assert!(!empty.check(""));
+        assert!(!empty.check("ab"));
+        assert!(!empty.check("é"));
+        assert!(!empty.check("anything"));
+        assert!(!Constraint::CharLenOneOf(vec![2]).is_empty_pattern());
+    }
+
+    #[test]
+    fn empty_char_len_none_fail_closed() {
+        let empty = Constraint::CharLenNone(vec![]);
+        assert!(empty.is_empty_pattern());
+        assert!(!empty.check(""));
+        assert!(!empty.check("ab"));
+        assert!(!empty.check("é"));
+        assert!(!empty.check("anything"));
+        assert!(!Constraint::CharLenNone(vec![0]).is_empty_pattern());
     }
 
     #[test]
@@ -4561,6 +4617,97 @@ mod tests {
     }
 
     #[test]
+    fn char_len_one_of_subset_tightens_only() {
+        let parent = Constraint::CharLenOneOf(vec![2, 4, 8]);
+        let shrink = Constraint::CharLenOneOf(vec![2, 4]);
+        let same = Constraint::CharLenOneOf(vec![8, 2, 4]);
+        let grow = Constraint::CharLenOneOf(vec![2, 4, 8, 16]);
+        let empty = Constraint::CharLenOneOf(vec![]);
+        let disjoint = Constraint::CharLenOneOf(vec![16, 32]);
+
+        assert!(shrink.is_subset_of(&parent));
+        assert!(same.is_subset_of(&parent));
+        assert!(!grow.is_subset_of(&parent));
+        assert!(parent.is_subset_of(&grow));
+        assert!(!empty.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&empty));
+        assert!(!disjoint.is_subset_of(&parent));
+
+        assert!(Constraint::Exact("ab".to_string()).is_subset_of(&parent));
+        assert!(Constraint::Exact("abcd".to_string()).is_subset_of(&parent));
+        assert!(Constraint::Exact("éé".to_string()).is_subset_of(&parent));
+        assert!(Constraint::Exact("café".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("a".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("é".to_string()).is_subset_of(&parent));
+        assert!(
+            Constraint::OneOf(vec!["ab".to_string(), "abcd".to_string()]).is_subset_of(&parent)
+        );
+        assert!(!Constraint::OneOf(vec!["ab".to_string(), "a".to_string()]).is_subset_of(&parent));
+        assert!(Constraint::OneOf(vec!["éé".to_string(), "café".to_string()]).is_subset_of(&parent));
+
+        assert!(parent.is_subset_of(&Constraint::CharLenRange { min: 2, max: 8 }));
+        assert!(parent.is_subset_of(&Constraint::CharLenRange { min: 0, max: 16 }));
+        assert!(!parent.is_subset_of(&Constraint::CharLenRange { min: 4, max: 8 }));
+        assert!(Constraint::CharLenRange { min: 2, max: 2 }.is_subset_of(&parent));
+        assert!(Constraint::CharLenRange { min: 2, max: 4 }
+            .is_subset_of(&Constraint::CharLenOneOf(vec![2, 3, 4])));
+        assert!(!Constraint::CharLenRange { min: 2, max: 8 }.is_subset_of(&parent));
+
+        assert!(parent.is_subset_of(&Constraint::CharLenNone(vec![0, 1])));
+        assert!(!parent.is_subset_of(&Constraint::CharLenNone(vec![4])));
+        // Byte versus scalar: fail closed.
+        assert!(!parent.is_subset_of(&Constraint::LenOneOf(vec![2, 4, 8])));
+        assert!(!Constraint::LenOneOf(vec![2, 4, 8]).is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&Constraint::LenRange { min: 2, max: 8 }));
+        assert!(!parent.is_subset_of(&Constraint::MinLen(2)));
+        assert!(!parent.is_subset_of(&Constraint::MaxLen(8)));
+        // Unclear: CharLenOneOf cannot replace Exact (many strings share a count).
+        assert!(!parent.is_subset_of(&Constraint::Exact("ab".to_string())));
+        assert!(!parent.is_subset_of(&Constraint::OneOf(vec!["ab".to_string()])));
+    }
+
+    #[test]
+    fn char_len_none_subset_tightens_only() {
+        let parent = Constraint::CharLenNone(vec![0, 1]);
+        let grow = Constraint::CharLenNone(vec![0, 1, 3]);
+        let same = Constraint::CharLenNone(vec![1, 0]);
+        let drop = Constraint::CharLenNone(vec![0]);
+        let empty = Constraint::CharLenNone(vec![]);
+
+        assert!(grow.is_subset_of(&parent));
+        assert!(same.is_subset_of(&parent));
+        assert!(!drop.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&grow));
+        assert!(parent.is_subset_of(&drop));
+        assert!(!empty.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&empty));
+
+        assert!(Constraint::Exact("ab".to_string()).is_subset_of(&parent));
+        assert!(Constraint::Exact("hello".to_string()).is_subset_of(&parent));
+        assert!(Constraint::Exact("éé".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("a".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("é".to_string()).is_subset_of(&parent));
+        assert!(Constraint::OneOf(vec!["ab".to_string(), "cd".to_string()]).is_subset_of(&parent));
+        assert!(!Constraint::OneOf(vec!["ab".to_string(), "a".to_string()]).is_subset_of(&parent));
+        assert!(!Constraint::OneOf(vec!["éé".to_string(), "é".to_string()]).is_subset_of(&parent));
+
+        assert!(Constraint::CharLenRange { min: 2, max: 16 }.is_subset_of(&parent));
+        assert!(!Constraint::CharLenRange { min: 0, max: 16 }.is_subset_of(&parent));
+        assert!(!Constraint::CharLenRange { min: 1, max: 1 }.is_subset_of(&parent));
+        // Denying specific scalar counts is not a subset of a range.
+        assert!(!parent.is_subset_of(&Constraint::CharLenRange { min: 2, max: 16 }));
+        assert!(!parent.is_subset_of(&Constraint::CharLenOneOf(vec![2, 4, 8])));
+        // Byte versus scalar: fail closed.
+        assert!(!parent.is_subset_of(&Constraint::LenNone(vec![0, 1])));
+        assert!(!Constraint::LenNone(vec![0, 1]).is_subset_of(&parent));
+        assert!(!Constraint::LenRange { min: 2, max: 16 }.is_subset_of(&parent));
+        assert!(!Constraint::MinLen(2).is_subset_of(&parent));
+        assert!(!Constraint::MaxLen(8).is_subset_of(&parent));
+    }
+
+    #[test]
     fn json_exact() {
         let c = Constraint::Exact("hello".to_string());
         let json = serde_json::to_string(&c).unwrap();
@@ -4901,6 +5048,39 @@ mod tests {
     }
 
     #[test]
+    fn json_char_len_one_of() {
+        let c = Constraint::CharLenOneOf(vec![4, 8, 16]);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"char_len_one_of\""));
+        assert!(json.contains('4'));
+        assert!(json.contains('8'));
+        assert!(json.contains("16"));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"char_len_one_of","value":[4,8,16]}"#).unwrap();
+        assert_eq!(from_cli, c);
+    }
+
+    #[test]
+    fn json_char_len_none() {
+        let c = Constraint::CharLenNone(vec![0, 1]);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"char_len_none\""));
+        assert!(json.contains('0'));
+        assert!(json.contains('1'));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"char_len_none","value":[0,1]}"#).unwrap();
+        assert_eq!(from_cli, c);
+    }
+
+    #[test]
     fn json_suffix() {
         let c = Constraint::Suffix(".txt".to_string());
         let json = serde_json::to_string(&c).unwrap();
@@ -5149,6 +5329,12 @@ mod tests {
         let float_none_empty = Constraint::Not(Box::new(Constraint::FloatNone(vec![])));
         assert!(float_none_empty.is_empty_pattern());
         assert!(!float_none_empty.check("1.5"));
+        let char_len_one_of_empty = Constraint::All(vec![Constraint::CharLenOneOf(vec![])]);
+        assert!(char_len_one_of_empty.is_empty_pattern());
+        assert!(!char_len_one_of_empty.check("ab"));
+        let char_len_none_empty = Constraint::Not(Box::new(Constraint::CharLenNone(vec![])));
+        assert!(char_len_none_empty.is_empty_pattern());
+        assert!(!char_len_none_empty.check("ab"));
         assert!(!all.check("/tmp/a.txt"));
         assert!(!any.check("notes.txt"));
     }
