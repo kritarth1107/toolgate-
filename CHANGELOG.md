@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.35.0] - 2026-10-14
+
+### Added
+- **`Constraint::MinCharLen(usize)`**: value Unicode scalar count (`chars().count()`, not bytes) must be at least N
+- **`Constraint::MaxCharLen(usize)`**: value Unicode scalar count must be at most N
+- CLI JSON forms `{"type":"min_char_len","value":3}` and `{"type":"max_char_len","value":16}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6, MinLen=7, Matches=8, NotEquals=9, NotOneOf=10, NotContains=11, NotPrefix=12, NotSuffix=13, NotMatches=14, All=15, Any=16, Not=17, FloatRange=18, LenRange=19, CharLenRange=20, PrefixOneOf=21, SuffixOneOf=22, ContainsAny=23, ContainsNone=24, MatchesAny=25, MatchesNone=26, PrefixNone=27, SuffixNone=28, IntOneOf=29, IntNone=30, FloatOneOf=31, FloatNone=32, LenOneOf=33, LenNone=34, CharLenOneOf=35, CharLenNone=36, MinCharLen=37, MaxCharLen=38
+- Tokens without the new types still encode identically to 0.34.0
+
+### Notes
+- Stored and encoded as a single big-endian u64 (same layout as MinLen / MaxLen, scalar-count unit)
+- Attenuation only tightens: a new MinCharLen must be ≥ the old minimum; a new MaxCharLen must be ≤ the old maximum
+- Exact may replace MinCharLen/MaxCharLen when the exact value's Unicode scalar count meets the bound
+- OneOf may replace MinCharLen/MaxCharLen when every allowed value's scalar count satisfies the same rule
+- CharLenRange may replace MinCharLen by adding an upper bound while keeping or raising the minimum; CharLenRange may replace MaxCharLen by adding a lower bound while keeping or lowering the maximum
+- MinCharLen may replace CharLenRange when the new min is `>=` the old min and the old max is still respected (`usize::MAX`); MaxCharLen may replace CharLenRange when the old min is 0 and the new max is `<=` the old max
+- CharLenOneOf may replace MinCharLen/MaxCharLen when every listed count satisfies the old bound
+- MinCharLen may replace CharLenNone when no denied count is still allowed by the new minimum; MaxCharLen may replace CharLenNone when no denied count is still allowed by the new maximum
+- MaxCharLen may replace CharLenOneOf when every count in `[0, max]` is listed
+- CharLen versus LenRange/MinLen/MaxLen/LenOneOf/LenNone fails closed; byte vs scalar length is not a safe subset in general
+- `MinCharLen(0)` is valid and accepts every value, including the empty string
+- `MaxCharLen(0)` is valid and accepts only the empty string
+- Unclear cross-type pairs fail closed
+
 ## [0.34.0] - 2026-10-14
 
 ### Added
