@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.34.0] - 2026-10-14
+
+### Added
+- **`Constraint::CharLenOneOf(Vec<usize>)`**: value Unicode scalar count (`chars().count()`, not bytes) must be one of the listed lengths
+- **`Constraint::CharLenNone(Vec<usize>)`**: value Unicode scalar count must be none of the listed lengths
+- CLI JSON forms `{"type":"char_len_one_of","value":[4,8,16]}` and `{"type":"char_len_none","value":[0,1]}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6, MinLen=7, Matches=8, NotEquals=9, NotOneOf=10, NotContains=11, NotPrefix=12, NotSuffix=13, NotMatches=14, All=15, Any=16, Not=17, FloatRange=18, LenRange=19, CharLenRange=20, PrefixOneOf=21, SuffixOneOf=22, ContainsAny=23, ContainsNone=24, MatchesAny=25, MatchesNone=26, PrefixNone=27, SuffixNone=28, IntOneOf=29, IntNone=30, FloatOneOf=31, FloatNone=32, LenOneOf=33, LenNone=34, CharLenOneOf=35, CharLenNone=36
+- Tokens without the new types still encode identically to 0.33.0
+
+### Notes
+- Stored and encoded as sorted unique usizes (same spirit as LenOneOf / LenNone): u8 type + u16 count + each big-endian u64 scalar count
+- Attenuation only tightens: CharLenOneOf children must be a subset of the parent allowlist; CharLenNone must cover every parent denial and may add extra denials
+- Exact may replace CharLenOneOf/CharLenNone when the exact value's Unicode scalar count is listed / not denied
+- OneOf may replace CharLenOneOf/CharLenNone when every allowed value's scalar count satisfies the same rule
+- CharLenOneOf may replace CharLenRange when every listed count lies inside the old range; CharLenRange may replace CharLenOneOf when every count in the range is listed
+- CharLenRange may replace CharLenNone when no denied count lies inside the new range; CharLenOneOf may replace CharLenNone when every remaining count avoids the denylist
+- CharLen versus LenRange/MinLen/MaxLen/LenOneOf/LenNone fails closed; byte vs scalar length is not a safe subset in general
+- Empty lists are rejected at mint/validate and never match a value (fail closed)
+- `0` is a valid list member (empty string allowed / denied)
+- Unclear cross-type pairs fail closed
+
 ## [0.33.0] - 2026-10-14
 
 ### Added
