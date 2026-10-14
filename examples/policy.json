@@ -7,7 +7,7 @@
   "tools": [
     {
       "name": "read_file",
-      "arg_keys": ["path", "roots", "limit", "score", "query", "title", "ext", "note", "memo", "file", "skip", "dest", "name", "mode", "port", "choice", "bias", "pin", "label", "caption", "handle"],
+      "arg_keys": ["path", "roots", "limit", "score", "query", "title", "ext", "note", "memo", "file", "skip", "dest", "name", "mode", "port", "choice", "bias", "pin", "label", "caption", "handle", "blurb", "nick"],
       "required_keys": ["path"],
       "constraints": {
         "path": { "type": "prefix", "value": "/tmp/" },
@@ -30,7 +30,9 @@
         "pin": { "type": "len_one_of", "value": [4, 8, 16] },
         "label": { "type": "len_none", "value": [0, 1] },
         "caption": { "type": "char_len_one_of", "value": [4, 8, 16] },
-        "handle": { "type": "char_len_none", "value": [0, 1] }
+        "handle": { "type": "char_len_none", "value": [0, 1] },
+        "blurb": { "type": "min_char_len", "value": 3 },
+        "nick": { "type": "max_char_len", "value": 16 }
       }
     },
     {

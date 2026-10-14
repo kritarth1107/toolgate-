@@ -1805,6 +1805,35 @@ mod tests {
     }
 
     #[test]
+    fn from_json_parses_min_char_len_and_max_char_len() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 60,
+                "tools": [{
+                    "name": "file_op",
+                    "arg_keys": ["title", "blurb"],
+                    "constraints": {
+                        "title": {"type": "min_char_len", "value": 3},
+                        "blurb": {"type": "max_char_len", "value": 16}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        policy.validate().unwrap();
+        let grant = policy.grant("file_op").unwrap();
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("title"),
+            Some(&Constraint::MinCharLen(3))
+        );
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("blurb"),
+            Some(&Constraint::MaxCharLen(16))
+        );
+    }
+
+    #[test]
     fn from_json_parses_char_len_one_of_and_char_len_none() {
         let policy = Policy::from_json(
             r#"{

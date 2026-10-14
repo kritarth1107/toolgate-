@@ -6538,6 +6538,228 @@ fn mint_from_policy_accepts_char_len_one_of() {
     let _ = fs::remove_file(&path);
 }
 
+fn mint_min_char_len_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["title"],
+            "expiry": 2000000000,
+            "constraints": {
+                "title": {"type": "min_char_len", "value": 3}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+fn mint_max_char_len_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["title"],
+            "expiry": 2000000000,
+            "constraints": {
+                "title": {"type": "max_char_len", "value": 4}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+#[test]
+fn mint_accepts_min_char_len_and_max_char_len() {
+    let min = mint_min_char_len_token();
+    assert_eq!(min["constraints"]["title"]["type"], "min_char_len");
+    assert_eq!(min["constraints"]["title"]["value"], 3);
+
+    let max = mint_max_char_len_token();
+    assert_eq!(max["constraints"]["title"]["type"], "max_char_len");
+    assert_eq!(max["constraints"]["title"]["value"], 4);
+}
+
+#[test]
+fn check_call_enforces_min_char_len() {
+    let token = mint_min_char_len_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"title": "日本語"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"title": "éé"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn check_call_enforces_max_char_len() {
+    let token = mint_max_char_len_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"title": "café"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"title": "abcde"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn attenuate_can_raise_min_char_len() {
+    let token = mint_min_char_len_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "title": {"type": "min_char_len", "value": 8}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(attenuated["constraints"]["title"]["type"], "min_char_len");
+    assert_eq!(attenuated["constraints"]["title"]["value"], 8);
+}
+
+#[test]
+fn attenuate_rejects_looser_min_char_len() {
+    let token = mint_min_char_len_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"title": {"type": "min_char_len", "value": 1}}
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("attenuation"),
+        "looser min_char_len should fail closed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn attenuate_can_lower_max_char_len() {
+    let token = mint_max_char_len_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "title": {"type": "max_char_len", "value": 2}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(attenuated["constraints"]["title"]["type"], "max_char_len");
+    assert_eq!(attenuated["constraints"]["title"]["value"], 2);
+}
+
+#[test]
+fn attenuate_rejects_wider_max_char_len() {
+    let token = mint_max_char_len_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"title": {"type": "max_char_len", "value": 16}}
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("attenuation"),
+        "wider max_char_len should fail closed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn mint_from_policy_accepts_min_char_len() {
+    let path = write_temp_policy(
+        "min-char-len-grant",
+        r#"{
+            "version": "1",
+            "default_ttl_seconds": 60,
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["title", "blurb"],
+                "constraints": {
+                    "title": {"type": "min_char_len", "value": 3},
+                    "blurb": {"type": "max_char_len", "value": 16}
+                }
+            }]
+        }"#,
+    );
+    let out = run_json(
+        &[
+            "mint",
+            "--policy",
+            path.to_str().unwrap(),
+            "--tool",
+            "read_file",
+        ],
+        &json!({
+            "secret": "cli-secret",
+            "current_time": 1700000000
+        }),
+    );
+    let token = &out["token"];
+    assert_eq!(token["tool_name"], "read_file");
+    assert_eq!(token["constraints"]["title"]["type"], "min_char_len");
+    assert_eq!(token["constraints"]["blurb"]["type"], "max_char_len");
+    let _ = fs::remove_file(&path);
+}
+
 fn mint_required_path_token() -> Value {
     run_json(
         &["mint"],
