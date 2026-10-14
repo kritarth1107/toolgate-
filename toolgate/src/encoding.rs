@@ -20,7 +20,7 @@
 //! - constraints_count: u16
 //! - for each constraint (sorted by key):
 //!   - key: u16 length + UTF-8 bytes
-//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone, 27=PrefixNone, 28=SuffixNone, 29=IntOneOf, 30=IntNone, 31=FloatOneOf, 32=FloatNone, 33=LenOneOf, 34=LenNone, 35=CharLenOneOf, 36=CharLenNone, 37=MinCharLen, 38=MaxCharLen)
+//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone, 27=PrefixNone, 28=SuffixNone, 29=IntOneOf, 30=IntNone, 31=FloatOneOf, 32=FloatNone, 33=LenOneOf, 34=LenNone, 35=CharLenOneOf, 36=CharLenNone, 37=MinCharLen, 38=MaxCharLen, 39=MinInt, 40=MaxInt)
 //!   - constraint_data: type-specific encoding
 //!
 //! Format v5 (backward-compatible extension):
@@ -85,6 +85,8 @@
 //! - CharLenNone: u16 count + (for each value, sorted unique: u64 big-endian scalar count)
 //! - MinCharLen: u64 (same length encoding as MinLen, scalar-count unit)
 //! - MaxCharLen: u64 (same length encoding as MaxLen, scalar-count unit)
+//! - MinInt: i64 (same integer encoding as one IntRange bound)
+//! - MaxInt: i64 (same integer encoding as one IntRange bound)
 //!
 //! The v5 format appends jti after constraints. Tokens without jti
 //! encode identically to v4. Tokens without constraints and without jti
@@ -1646,6 +1648,71 @@ mod tests {
             0x00, 0x05, b't', b'i', b't', b'l', b'e', // key "title"
             0x26, // type = MaxCharLen
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, // u64 16
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_min_int() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("limit".to_string(), Constraint::MinInt(1));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x05, b'l', b'i', b'm', b'i', b't', // key "limit"
+            0x27, // type = MinInt
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // i64 1
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_max_int() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("limit".to_string(), Constraint::MaxInt(100));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x05, b'l', b'i', b'm', b'i', b't', // key "limit"
+            0x28, // type = MaxInt
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, // i64 100
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_min_int_negative() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("offset".to_string(), Constraint::MinInt(-1));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x06, b'o', b'f', b'f', b's', b'e', b't', // key "offset"
+            0x27, // type = MinInt
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // i64 -1
+        ]));
+    }
+
+    #[test]
+    fn encoding_without_min_int_identical_to_prior() {
+        // Tokens that do not use MinInt/MaxInt must keep the 0.35.0 bytes.
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("title".to_string(), Constraint::MinCharLen(3));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x05, b't', b'i', b't', b'l', b'e', // key "title"
+            0x25, // type = MinCharLen
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, // u64 3
         ]));
     }
 

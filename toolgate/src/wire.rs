@@ -17,7 +17,7 @@
 //! | audience | u16 length + UTF-8 bytes (0 = none) |
 //! | kid | u16 length + UTF-8 bytes (0 = none) |
 //! | constraints_count | u16 (0 = none) |
-//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone, 27=PrefixNone, 28=SuffixNone, 29=IntOneOf, 30=IntNone, 31=FloatOneOf, 32=FloatNone, 33=LenOneOf, 34=LenNone, 35=CharLenOneOf, 36=CharLenNone, 37=MinCharLen, 38=MaxCharLen) |
+//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone, 27=PrefixNone, 28=SuffixNone, 29=IntOneOf, 30=IntNone, 31=FloatOneOf, 32=FloatNone, 33=LenOneOf, 34=LenNone, 35=CharLenOneOf, 36=CharLenNone, 37=MinCharLen, 38=MaxCharLen, 39=MinInt, 40=MaxInt) |
 //! | jti | u16 length + UTF-8 bytes (0 = none) |
 //! | nbf_flag | u8 (v5+ only; 0 = none, 1 = present) |
 //! | nbf | u64 (v5+ only, if nbf_flag = 1) |
@@ -2213,6 +2213,124 @@ mod tests {
             wire.windows(8)
                 .any(|w| w == [0x00, 0x05, b't', b'i', b't', b'l', b'e', 38]),
             "wire must include MaxCharLen type tag 38 after key title"
+        );
+    }
+
+    #[test]
+    fn wire_roundtrip_constraint_min_int() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("limit".to_string(), Constraint::MinInt(1));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+        assert!(
+            wire.windows(8)
+                .any(|w| w == [0x00, 0x05, b'l', b'i', b'm', b'i', b't', 39]),
+            "wire must include MinInt type tag 39 after key limit"
+        );
+    }
+
+    #[test]
+    fn wire_roundtrip_constraint_max_int() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("limit".to_string(), Constraint::MaxInt(100));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+        assert!(
+            wire.windows(8)
+                .any(|w| w == [0x00, 0x05, b'l', b'i', b'm', b'i', b't', 40]),
+            "wire must include MaxInt type tag 40 after key limit"
+        );
+    }
+
+    #[test]
+    fn wire_roundtrip_constraint_min_int_negative() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("offset".to_string(), Constraint::MinInt(-1));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["offset".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+        match decoded.constraints.as_ref().unwrap().get("offset").unwrap() {
+            Constraint::MinInt(min) => assert_eq!(*min, -1),
+            other => panic!("expected MinInt(-1), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wire_without_min_int_keeps_prior_type_tags() {
+        // Tokens that do not use MinInt/MaxInt must keep the 0.35.0 tags.
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("title".to_string(), Constraint::MinCharLen(3));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["title".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(
+            wire.windows(8)
+                .any(|w| w == [0x00, 0x05, b't', b'i', b't', b'l', b'e', 37]),
+            "MinCharLen must keep type tag 37"
         );
     }
 
