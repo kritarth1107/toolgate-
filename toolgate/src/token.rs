@@ -5452,6 +5452,183 @@ mod tests {
     }
 
     #[test]
+    fn attenuation_can_tighten_char_len_one_of() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("pin".to_string(), Constraint::CharLenOneOf(vec![4, 8, 16]));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["pin".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut tighter: BTreeMap<String, Constraint> = BTreeMap::new();
+        tighter.insert("pin".to_string(), Constraint::CharLenOneOf(vec![4, 8]));
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(tighter))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("pin"),
+            Some(&Constraint::CharLenOneOf(vec![4, 8]))
+        );
+    }
+
+    #[test]
+    fn attenuation_cannot_widen_char_len_one_of() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("pin".to_string(), Constraint::CharLenOneOf(vec![4, 8, 16]));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["pin".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut wider: BTreeMap<String, Constraint> = BTreeMap::new();
+        wider.insert(
+            "pin".to_string(),
+            Constraint::CharLenOneOf(vec![4, 8, 16, 32]),
+        );
+        assert_eq!(
+            token.attenuate_with_constraints(SECRET, None, None, Some(wider)),
+            Err(TokenError::AttenuationWidens)
+        );
+    }
+
+    #[test]
+    fn attenuation_exact_can_replace_char_len_one_of() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("pin".to_string(), Constraint::CharLenOneOf(vec![4, 8, 16]));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["pin".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut exact: BTreeMap<String, Constraint> = BTreeMap::new();
+        exact.insert("pin".to_string(), Constraint::Exact("café".to_string()));
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(exact))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("pin"),
+            Some(&Constraint::Exact("café".to_string()))
+        );
+
+        let mut bad: BTreeMap<String, Constraint> = BTreeMap::new();
+        bad.insert("pin".to_string(), Constraint::Exact("abc".to_string()));
+        assert_eq!(
+            token.attenuate_with_constraints(SECRET, None, None, Some(bad)),
+            Err(TokenError::AttenuationWidens)
+        );
+    }
+
+    #[test]
+    fn attenuation_can_tighten_char_len_none() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("name".to_string(), Constraint::CharLenNone(vec![0, 1]));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["name".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut tighter: BTreeMap<String, Constraint> = BTreeMap::new();
+        tighter.insert("name".to_string(), Constraint::CharLenNone(vec![0, 1, 3]));
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(tighter))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("name"),
+            Some(&Constraint::CharLenNone(vec![0, 1, 3]))
+        );
+    }
+
+    #[test]
+    fn attenuation_cannot_widen_char_len_none() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("name".to_string(), Constraint::CharLenNone(vec![0, 1]));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["name".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut wider: BTreeMap<String, Constraint> = BTreeMap::new();
+        wider.insert("name".to_string(), Constraint::CharLenNone(vec![0]));
+        assert_eq!(
+            token.attenuate_with_constraints(SECRET, None, None, Some(wider)),
+            Err(TokenError::AttenuationWidens)
+        );
+    }
+
+    #[test]
+    fn attenuation_empty_char_len_one_of_fails_closed() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("pin".to_string(), Constraint::CharLenOneOf(vec![4]));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["pin".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut empty: BTreeMap<String, Constraint> = BTreeMap::new();
+        empty.insert("pin".to_string(), Constraint::CharLenOneOf(vec![]));
+        assert_eq!(
+            token.attenuate_with_constraints(SECRET, None, None, Some(empty)),
+            Err(TokenError::AttenuationWidens)
+        );
+    }
+
+    #[test]
     fn attenuation_can_tighten_suffix() {
         use crate::constraint::Constraint;
         use std::collections::BTreeMap;
@@ -7377,6 +7554,134 @@ mod tests {
 
         let mut args = std::collections::BTreeMap::new();
         args.insert("pin".to_string(), "abcd".to_string());
+        args.insert("name".to_string(), "ab".to_string());
+        let result = token.verify_call_with_args(SECRET, 1999999999, "file_op", &args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { .. })
+        ));
+    }
+
+    #[test]
+    fn verify_call_with_args_char_len_one_of_satisfied() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("pin".to_string(), Constraint::CharLenOneOf(vec![4, 8, 16]));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["pin".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("pin".to_string(), "café".to_string());
+        assert!(token
+            .verify_call_with_args(SECRET, 1999999999, "read_file", &args, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_call_with_args_char_len_one_of_violated() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("pin".to_string(), Constraint::CharLenOneOf(vec![4, 8, 16]));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["pin".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("pin".to_string(), "abc".to_string());
+        let result = token.verify_call_with_args(SECRET, 1999999999, "read_file", &args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { key }) if key == "pin"
+        ));
+    }
+
+    #[test]
+    fn verify_call_with_args_char_len_none_satisfied() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("name".to_string(), Constraint::CharLenNone(vec![0, 1]));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["name".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("name".to_string(), "éé".to_string());
+        assert!(token
+            .verify_call_with_args(SECRET, 1999999999, "read_file", &args, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_call_with_args_char_len_none_violated() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("name".to_string(), Constraint::CharLenNone(vec![0, 1]));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["name".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("name".to_string(), "é".to_string());
+        let result = token.verify_call_with_args(SECRET, 1999999999, "read_file", &args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { key }) if key == "name"
+        ));
+    }
+
+    #[test]
+    fn verify_call_with_args_empty_char_len_one_of_fail_closed() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("pin".to_string(), Constraint::CharLenOneOf(vec![]));
+        constraints.insert("name".to_string(), Constraint::CharLenNone(vec![]));
+
+        let token = Token::mint_full(
+            SECRET,
+            "file_op",
+            vec!["pin".into(), "name".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("pin".to_string(), "café".to_string());
         args.insert("name".to_string(), "ab".to_string());
         let result = token.verify_call_with_args(SECRET, 1999999999, "file_op", &args, None);
         assert!(matches!(
