@@ -1036,9 +1036,7 @@ impl Constraint {
             (Constraint::OneOf(values), Constraint::CharLenOneOf(allowed)) => {
                 usize_list_is_valid(allowed)
                     && !values.is_empty()
-                    && values
-                        .iter()
-                        .all(|v| allowed.contains(&v.chars().count()))
+                    && values.iter().all(|v| allowed.contains(&v.chars().count()))
             }
 
             // OneOf is subset of CharLenNone if every allowed value's
@@ -1046,9 +1044,7 @@ impl Constraint {
             (Constraint::OneOf(values), Constraint::CharLenNone(denied)) => {
                 usize_list_is_valid(denied)
                     && !values.is_empty()
-                    && values
-                        .iter()
-                        .all(|v| !denied.contains(&v.chars().count()))
+                    && values.iter().all(|v| !denied.contains(&v.chars().count()))
             }
 
             // OneOf is subset of PrefixOneOf if every allowed value
@@ -4644,7 +4640,9 @@ mod tests {
             Constraint::OneOf(vec!["ab".to_string(), "abcd".to_string()]).is_subset_of(&parent)
         );
         assert!(!Constraint::OneOf(vec!["ab".to_string(), "a".to_string()]).is_subset_of(&parent));
-        assert!(Constraint::OneOf(vec!["éé".to_string(), "café".to_string()]).is_subset_of(&parent));
+        assert!(
+            Constraint::OneOf(vec!["éé".to_string(), "café".to_string()]).is_subset_of(&parent)
+        );
 
         assert!(parent.is_subset_of(&Constraint::CharLenRange { min: 2, max: 8 }));
         assert!(parent.is_subset_of(&Constraint::CharLenRange { min: 0, max: 16 }));
