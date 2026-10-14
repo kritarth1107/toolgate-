@@ -86,8 +86,9 @@ pub enum PolicyError {
     /// An empty suffix, contains, matches, NotOneOf, PrefixOneOf,
     /// SuffixOneOf, ContainsAny, ContainsNone, MatchesAny, MatchesNone,
     /// PrefixNone, SuffixNone, IntOneOf, IntNone, FloatOneOf, FloatNone,
-    /// LenOneOf, LenNone, NotContains, NotPrefix, NotSuffix, NotMatches,
-    /// All, Any, or Not constraint is rejected.
+    /// LenOneOf, LenNone, CharLenOneOf, CharLenNone, NotContains,
+    /// NotPrefix, NotSuffix, NotMatches, All, Any, or Not constraint is
+    /// rejected.
     EmptyConstraintPattern { tool: String, key: String },
     /// An All/Any/Not tree deeper than [`crate::MAX_CONSTRAINT_NESTING`] is rejected.
     ConstraintNestingTooDeep { tool: String, key: String },
@@ -140,7 +141,7 @@ impl std::fmt::Display for PolicyError {
             PolicyError::EmptyConstraintPattern { tool, key } => {
                 write!(
                     f,
-                    "empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any/not/prefix_one_of/suffix_one_of/contains_any/contains_none/matches_any/matches_none/prefix_none/suffix_none/int_one_of/int_none/float_one_of/float_none/len_one_of/len_none constraint for '{key}' on tool '{tool}' is rejected"
+                    "empty suffix/contains/matches/not_one_of/not_contains/not_prefix/not_suffix/not_matches/all/any/not/prefix_one_of/suffix_one_of/contains_any/contains_none/matches_any/matches_none/prefix_none/suffix_none/int_one_of/int_none/float_one_of/float_none/len_one_of/len_none/char_len_one_of/char_len_none constraint for '{key}' on tool '{tool}' is rejected"
                 )
             }
             PolicyError::ConstraintNestingTooDeep { tool, key } => {
@@ -1790,6 +1791,76 @@ mod tests {
                     "name": "read_file",
                     "arg_keys": ["name"],
                     "constraints": {"name": {"type": "len_none", "value": []}}
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            empty_none.validate(),
+            Err(PolicyError::EmptyConstraintPattern {
+                tool: "read_file".into(),
+                key: "name".into()
+            })
+        );
+    }
+
+    #[test]
+    fn from_json_parses_char_len_one_of_and_char_len_none() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 60,
+                "tools": [{
+                    "name": "file_op",
+                    "arg_keys": ["pin", "name"],
+                    "constraints": {
+                        "pin": {"type": "char_len_one_of", "value": [4, 8, 16]},
+                        "name": {"type": "char_len_none", "value": [0, 1]}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        policy.validate().unwrap();
+        let grant = policy.grant("file_op").unwrap();
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("pin"),
+            Some(&Constraint::CharLenOneOf(vec![4, 8, 16]))
+        );
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("name"),
+            Some(&Constraint::CharLenNone(vec![0, 1]))
+        );
+    }
+
+    #[test]
+    fn validate_empty_char_len_one_of_and_char_len_none_are_rejected() {
+        let empty_one_of = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["pin"],
+                    "constraints": {"pin": {"type": "char_len_one_of", "value": []}}
+                }]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            empty_one_of.validate(),
+            Err(PolicyError::EmptyConstraintPattern {
+                tool: "read_file".into(),
+                key: "pin".into()
+            })
+        );
+
+        let empty_none = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "read_file",
+                    "arg_keys": ["name"],
+                    "constraints": {"name": {"type": "char_len_none", "value": []}}
                 }]
             }"#,
         )
