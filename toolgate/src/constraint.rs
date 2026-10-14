@@ -788,6 +788,18 @@ impl Constraint {
                 len_range_is_valid(*min, *max) && count >= *min && count <= *max
             }
 
+            // Exact is subset of CharLenOneOf if the value's Unicode
+            // scalar count is listed.
+            (Constraint::Exact(a), Constraint::CharLenOneOf(allowed)) => {
+                usize_list_is_valid(allowed) && allowed.contains(&a.chars().count())
+            }
+
+            // Exact is subset of CharLenNone if the value's Unicode
+            // scalar count is not in the denylist.
+            (Constraint::Exact(a), Constraint::CharLenNone(denied)) => {
+                usize_list_is_valid(denied) && !denied.contains(&a.chars().count())
+            }
+
             // Exact is subset of PrefixOneOf if the value starts with
             // at least one listed prefix.
             (Constraint::Exact(a), Constraint::PrefixOneOf(prefixes)) => {
@@ -1017,6 +1029,26 @@ impl Constraint {
                         let count = v.chars().count();
                         count >= *min && count <= *max
                     })
+            }
+
+            // OneOf is subset of CharLenOneOf if every allowed value's
+            // Unicode scalar count is listed.
+            (Constraint::OneOf(values), Constraint::CharLenOneOf(allowed)) => {
+                usize_list_is_valid(allowed)
+                    && !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|v| allowed.contains(&v.chars().count()))
+            }
+
+            // OneOf is subset of CharLenNone if every allowed value's
+            // Unicode scalar count is not denied.
+            (Constraint::OneOf(values), Constraint::CharLenNone(denied)) => {
+                usize_list_is_valid(denied)
+                    && !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|v| !denied.contains(&v.chars().count()))
             }
 
             // OneOf is subset of PrefixOneOf if every allowed value
@@ -1617,9 +1649,55 @@ impl Constraint {
                     && *new_max <= *old_max
             }
 
-            // CharLenRange vs LenRange/MinLen/MaxLen is not a safe subset
-            // in general (byte length vs Unicode scalar count). Fail closed
-            // unless the replacement is Exact/OneOf, handled above.
+            // CharLenOneOf → CharLenOneOf: every remaining scalar count
+            // must already be allowed (shrink/narrow only). Empty lists
+            // fail closed.
+            (Constraint::CharLenOneOf(new), Constraint::CharLenOneOf(old)) => {
+                usize_one_of_tightens(new, old)
+            }
+
+            // CharLenNone → CharLenNone: every old denial must stay
+            // covered; extra denials are allowed. Empty lists fail
+            // closed.
+            (Constraint::CharLenNone(new), Constraint::CharLenNone(old)) => {
+                usize_none_tightens(new, old)
+            }
+
+            // CharLenOneOf is subset of CharLenRange when every listed
+            // scalar count lies inside the inclusive interval.
+            (Constraint::CharLenOneOf(allowed), Constraint::CharLenRange { min, max }) => {
+                usize_list_is_valid(allowed)
+                    && len_range_is_valid(*min, *max)
+                    && allowed.iter().all(|&n| n >= *min && n <= *max)
+            }
+
+            // CharLenRange is subset of CharLenOneOf when every scalar
+            // count in the range is a listed member. Overflowing or
+            // inverted ranges fail closed.
+            (Constraint::CharLenRange { min, max }, Constraint::CharLenOneOf(allowed)) => {
+                len_range_subset_of_one_of(*min, *max, allowed)
+            }
+
+            // CharLenOneOf is subset of CharLenNone when every remaining
+            // allowed scalar count avoids the denylist.
+            (Constraint::CharLenOneOf(allowed), Constraint::CharLenNone(denied)) => {
+                usize_list_is_valid(allowed)
+                    && usize_list_is_valid(denied)
+                    && allowed.iter().all(|n| !denied.contains(n))
+            }
+
+            // CharLenRange is subset of CharLenNone when no denied
+            // scalar count lies inside the inclusive interval.
+            (Constraint::CharLenRange { min, max }, Constraint::CharLenNone(denied)) => {
+                len_range_is_valid(*min, *max)
+                    && usize_list_is_valid(denied)
+                    && denied.iter().all(|&n| n < *min || n > *max)
+            }
+
+            // CharLen versus LenRange/MinLen/MaxLen/LenOneOf/LenNone is
+            // not a safe subset in general (byte length vs Unicode
+            // scalar count). Fail closed unless the replacement is
+            // Exact/OneOf, handled above.
 
             // Cross-type comparisons that don't make sense as subsets
             (Constraint::OneOf(_), Constraint::Exact(_)) => false,
