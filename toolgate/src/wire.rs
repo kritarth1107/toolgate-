@@ -17,7 +17,7 @@
 //! | audience | u16 length + UTF-8 bytes (0 = none) |
 //! | kid | u16 length + UTF-8 bytes (0 = none) |
 //! | constraints_count | u16 (0 = none) |
-//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone, 27=PrefixNone, 28=SuffixNone, 29=IntOneOf, 30=IntNone, 31=FloatOneOf, 32=FloatNone) |
+//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone, 27=PrefixNone, 28=SuffixNone, 29=IntOneOf, 30=IntNone, 31=FloatOneOf, 32=FloatNone, 33=LenOneOf, 34=LenNone) |
 //! | jti | u16 length + UTF-8 bytes (0 = none) |
 //! | nbf_flag | u8 (v5+ only; 0 = none, 1 = present) |
 //! | nbf | u64 (v5+ only, if nbf_flag = 1) |
@@ -244,6 +244,14 @@ fn encode_constraint_value_to_wire(buf: &mut Vec<u8>, constraint: &Constraint) {
             buf.push(32);
             encode_sorted_unique_f64s(buf, values);
         }
+        Constraint::LenOneOf(values) => {
+            buf.push(33);
+            encode_sorted_unique_usizes(buf, values);
+        }
+        Constraint::LenNone(values) => {
+            buf.push(34);
+            encode_sorted_unique_usizes(buf, values);
+        }
     }
 }
 
@@ -280,6 +288,16 @@ fn encode_sorted_unique_f64s(buf: &mut Vec<u8>, values: &[f64]) {
     buf.extend_from_slice(&(sorted.len() as u16).to_be_bytes());
     for value in sorted {
         buf.extend_from_slice(&value.to_be_bytes());
+    }
+}
+
+fn encode_sorted_unique_usizes(buf: &mut Vec<u8>, values: &[usize]) {
+    let mut sorted = values.to_vec();
+    sorted.sort();
+    sorted.dedup();
+    buf.extend_from_slice(&(sorted.len() as u16).to_be_bytes());
+    for value in sorted {
+        buf.extend_from_slice(&(value as u64).to_be_bytes());
     }
 }
 
@@ -329,6 +347,16 @@ fn read_wire_f64_list(data: &[u8], pos: &mut usize) -> Result<Vec<f64>, WireErro
         values.push(f64::from_be_bytes(
             read_wire_bytes(data, pos, 8)?.try_into().unwrap(),
         ));
+    }
+    Ok(values)
+}
+
+fn read_wire_usize_list(data: &[u8], pos: &mut usize) -> Result<Vec<usize>, WireError> {
+    let count = read_wire_u16(data, pos)?;
+    let mut values = Vec::with_capacity(count);
+    for _ in 0..count {
+        values
+            .push(u64::from_be_bytes(read_wire_bytes(data, pos, 8)?.try_into().unwrap()) as usize);
     }
     Ok(values)
 }
@@ -440,6 +468,8 @@ fn decode_constraint_value_from_wire(
         30 => Constraint::IntNone(read_wire_i64_list(data, pos)?),
         31 => Constraint::FloatOneOf(read_wire_f64_list(data, pos)?),
         32 => Constraint::FloatNone(read_wire_f64_list(data, pos)?),
+        33 => Constraint::LenOneOf(read_wire_usize_list(data, pos)?),
+        34 => Constraint::LenNone(read_wire_usize_list(data, pos)?),
         _ => return Err(WireError::UnexpectedEof), // Invalid constraint type
     };
 
@@ -1903,6 +1933,125 @@ mod tests {
             }
             other => panic!("expected FloatOneOf, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn wire_roundtrip_constraint_len_one_of() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("pin".to_string(), Constraint::LenOneOf(vec![4, 8, 16]));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["pin".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+        assert!(
+            wire.windows(6)
+                .any(|w| w == [0x00, 0x03, b'p', b'i', b'n', 33]),
+            "wire must include LenOneOf type tag 33 after key pin"
+        );
+    }
+
+    #[test]
+    fn wire_roundtrip_constraint_len_none() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("name".to_string(), Constraint::LenNone(vec![0, 1]));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["name".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+        assert!(
+            wire.windows(7)
+                .any(|w| w == [0x00, 0x04, b'n', b'a', b'm', b'e', 34]),
+            "wire must include LenNone type tag 34 after key name"
+        );
+    }
+
+    #[test]
+    fn wire_len_one_of_sorts_and_uniques() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("pin".to_string(), Constraint::LenOneOf(vec![16, 4, 4, 8]));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["pin".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let decoded = Token::from_wire(&token.to_wire()).unwrap();
+        match decoded.constraints.as_ref().unwrap().get("pin").unwrap() {
+            Constraint::LenOneOf(values) => {
+                assert_eq!(values, &vec![4, 8, 16]);
+            }
+            other => panic!("expected LenOneOf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wire_without_len_one_of_keeps_prior_type_tags() {
+        // Tokens that do not use LenOneOf/LenNone must keep the 0.32.0 tags.
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert(
+            "score".to_string(),
+            Constraint::FloatOneOf(vec![0.5, 1.5, 2.5]),
+        );
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["score".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(
+            wire.windows(8)
+                .any(|w| w == [0x00, 0x05, b's', b'c', b'o', b'r', b'e', 31]),
+            "wire must keep FloatOneOf type tag 31"
+        );
     }
 
     #[test]
