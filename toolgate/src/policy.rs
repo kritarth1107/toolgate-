@@ -1834,6 +1834,35 @@ mod tests {
     }
 
     #[test]
+    fn from_json_parses_min_int_and_max_int() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 60,
+                "tools": [{
+                    "name": "file_op",
+                    "arg_keys": ["limit", "offset"],
+                    "constraints": {
+                        "limit": {"type": "min_int", "value": 1},
+                        "offset": {"type": "max_int", "value": 100}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        policy.validate().unwrap();
+        let grant = policy.grant("file_op").unwrap();
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("limit"),
+            Some(&Constraint::MinInt(1))
+        );
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("offset"),
+            Some(&Constraint::MaxInt(100))
+        );
+    }
+
+    #[test]
     fn from_json_parses_char_len_one_of_and_char_len_none() {
         let policy = Policy::from_json(
             r#"{

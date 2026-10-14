@@ -1021,18 +1021,18 @@ impl Constraint {
             // and meets the minimum.
             (Constraint::OneOf(values), Constraint::MinInt(min)) => {
                 !values.is_empty()
-                    && values.iter().all(|v| {
-                        v.parse::<i64>().map(|n| n >= *min).unwrap_or(false)
-                    })
+                    && values
+                        .iter()
+                        .all(|v| v.parse::<i64>().map(|n| n >= *min).unwrap_or(false))
             }
 
             // OneOf is subset of MaxInt if every allowed value parses
             // and is within the maximum.
             (Constraint::OneOf(values), Constraint::MaxInt(max)) => {
                 !values.is_empty()
-                    && values.iter().all(|v| {
-                        v.parse::<i64>().map(|n| n <= *max).unwrap_or(false)
-                    })
+                    && values
+                        .iter()
+                        .all(|v| v.parse::<i64>().map(|n| n <= *max).unwrap_or(false))
             }
 
             // OneOf is subset of IntOneOf if every allowed value parses
@@ -1472,15 +1472,23 @@ impl Constraint {
 
             // IntRange may replace MinInt by adding an upper bound while
             // keeping or raising the minimum.
-            (Constraint::IntRange { min: new_min, max: new_max }, Constraint::MinInt(old)) => {
-                new_min <= new_max && *new_min >= *old
-            }
+            (
+                Constraint::IntRange {
+                    min: new_min,
+                    max: new_max,
+                },
+                Constraint::MinInt(old),
+            ) => new_min <= new_max && *new_min >= *old,
 
             // IntRange may replace MaxInt by adding a lower bound while
             // keeping or lowering the maximum.
-            (Constraint::IntRange { min: new_min, max: new_max }, Constraint::MaxInt(old)) => {
-                new_min <= new_max && *new_max <= *old
-            }
+            (
+                Constraint::IntRange {
+                    min: new_min,
+                    max: new_max,
+                },
+                Constraint::MaxInt(old),
+            ) => new_min <= new_max && *new_max <= *old,
 
             // MinInt may replace IntRange when the new min is at least
             // the old min and the old max is still respected (only
@@ -5153,7 +5161,10 @@ mod tests {
         assert!(!Constraint::MinInt(1).is_subset_of(&Constraint::IntOneOf(vec![1, 2, 3])));
         // Unclear cross-type pairs fail closed.
         assert!(!lower.is_subset_of(&Constraint::MinLen(1)));
-        assert!(!lower.is_subset_of(&Constraint::FloatRange { min: 1.0, max: 100.0 }));
+        assert!(!lower.is_subset_of(&Constraint::FloatRange {
+            min: 1.0,
+            max: 100.0
+        }));
         assert!(!lower.is_subset_of(&Constraint::Exact("1".to_string())));
     }
 
@@ -5189,7 +5200,10 @@ mod tests {
         assert!(!Constraint::MaxInt(2).is_subset_of(&Constraint::IntNone(vec![1, 2])));
         // Unclear cross-type pairs fail closed.
         assert!(!tight.is_subset_of(&Constraint::MaxLen(10)));
-        assert!(!tight.is_subset_of(&Constraint::FloatRange { min: 0.0, max: 10.0 }));
+        assert!(!tight.is_subset_of(&Constraint::FloatRange {
+            min: 0.0,
+            max: 10.0
+        }));
         assert!(!tight.is_subset_of(&Constraint::Exact("10".to_string())));
     }
 
@@ -5590,7 +5604,8 @@ mod tests {
         let parsed: Constraint = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed, c);
 
-        let from_cli: Constraint = serde_json::from_str(r#"{"type":"min_int","value":-1}"#).unwrap();
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"min_int","value":-1}"#).unwrap();
         assert_eq!(from_cli, Constraint::MinInt(-1));
     }
 

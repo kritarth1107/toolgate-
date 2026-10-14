@@ -8,7 +8,7 @@ toolgate issues capability tokens that bind:
 - **Tool name**: which tool the token authorizes
 - **Argument keys**: an allowlist of permitted argument names
 - **Required argument keys** (optional): keys that must be present on every verified call
-- **Argument constraints** (optional): restrict argument values (prefix, suffix, prefix-one-of, suffix-one-of, prefix-none, suffix-none, contains, contains-any/none, exact, one-of, not-equals, not-one-of, not-contains, not-prefix, min/max length, length-one-of/none, char-length range, min/max char-length, char-length-one-of/none, int range, int-one-of/none, float range, float-one-of/none, simple glob, matches-any/none, All/Any/Not composition)
+- **Argument constraints** (optional): restrict argument values (prefix, suffix, prefix-one-of, suffix-one-of, prefix-none, suffix-none, contains, contains-any/none, exact, one-of, not-equals, not-one-of, not-contains, not-prefix, min/max length, length-one-of/none, char-length range, min/max char-length, char-length-one-of/none, int range, min/max int, int-one-of/none, float range, float-one-of/none, simple glob, matches-any/none, All/Any/Not composition)
 - **Expiry**: unix timestamp when the token becomes invalid
 - **Not-before (`nbf`)** (optional): unix timestamp before which the token is rejected
 - **Audience** (optional): restrict token to a specific client/service
@@ -26,7 +26,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-toolgate = "0.35"
+toolgate = "0.36"
 ```
 
 Or install the CLI:
@@ -217,6 +217,8 @@ constraints.insert("deny_roots".to_string(), Constraint::PrefixNone(vec!["/etc/"
 constraints.insert("deny_ext".to_string(), Constraint::SuffixNone(vec![".bak".into(), ".tmp".into()]));
 constraints.insert("mode".to_string(), Constraint::OneOf(vec!["read".into(), "list".into()]));
 constraints.insert("limit".to_string(), Constraint::IntRange { min: 1, max: 100 });
+constraints.insert("retries".to_string(), Constraint::MinInt(1));
+constraints.insert("cap".to_string(), Constraint::MaxInt(100));
 constraints.insert("choice".to_string(), Constraint::IntOneOf(vec![1, 2, 3]));
 constraints.insert("port".to_string(), Constraint::IntNone(vec![0, -1]));
 constraints.insert("score".to_string(), Constraint::FloatRange { min: 0.5, max: 10.5 });
@@ -255,7 +257,7 @@ constraints.insert("not_tmp".to_string(), Constraint::Not(Box::new(
 let token = Token::mint_full(
     secret,
     "file_op",
-    vec!["path".into(), "name".into(), "note".into(), "needles".into(), "memo_block".into(), "names".into(), "blocked".into(), "deny_roots".into(), "deny_ext".into(), "mode".into(), "choice".into(), "port".into(), "limit".into(), "score".into(), "choice_f".into(), "bias".into(), "pin".into(), "deny_len".into(), "query".into(), "snippet".into(), "title".into(), "caption".into(), "handle".into(), "label".into(), "file".into(), "role".into(), "actor".into(), "memo".into(), "dest".into(), "backup".into(), "skip".into(), "path_and_name".into(), "tmp_or_var".into(), "not_tmp".into()],
+    vec!["path".into(), "name".into(), "note".into(), "needles".into(), "memo_block".into(), "names".into(), "blocked".into(), "deny_roots".into(), "deny_ext".into(), "mode".into(), "choice".into(), "port".into(), "limit".into(), "retries".into(), "cap".into(), "score".into(), "choice_f".into(), "bias".into(), "pin".into(), "deny_len".into(), "query".into(), "snippet".into(), "title".into(), "caption".into(), "handle".into(), "label".into(), "file".into(), "role".into(), "actor".into(), "memo".into(), "dest".into(), "backup".into(), "skip".into(), "path_and_name".into(), "tmp_or_var".into(), "not_tmp".into()],
     2000000000,
     None,  // audience
     None,  // kid
@@ -277,6 +279,8 @@ args.insert("mode".to_string(), "read".to_string());
 args.insert("choice".to_string(), "2".to_string());
 args.insert("port".to_string(), "22".to_string());
 args.insert("limit".to_string(), "50".to_string());
+args.insert("retries".to_string(), "2".to_string());
+args.insert("cap".to_string(), "10".to_string());
 args.insert("score".to_string(), "2.5".to_string());
 args.insert("choice_f".to_string(), "1.5".to_string());
 args.insert("bias".to_string(), "2.5".to_string());
@@ -334,6 +338,8 @@ token.verify_call_with_args(
 | `Any(Vec<Constraint>)` | Value must satisfy at least one child (OR) | `Any(vec![Prefix("/tmp/".into()), Prefix("/var/".into())])` |
 | `Not(Box<Constraint>)` | Value must not satisfy the child (NOT) | `Not(Box::new(Prefix("/tmp/".into())))` |
 | `IntRange { min, max }` | Value must parse as integer in range | `IntRange { min: 1, max: 100 }` |
+| `MinInt(i64)` | Value must parse as an `i64` that is at least N | `MinInt(1)` |
+| `MaxInt(i64)` | Value must parse as an `i64` that is at most N | `MaxInt(100)` |
 | `IntOneOf(Vec<i64>)` | Value must parse as an `i64` that is one of the listed integers | `IntOneOf(vec![1, 2, 3])` |
 | `IntNone(Vec<i64>)` | Value must parse as an `i64` that is none of the listed integers | `IntNone(vec![0, -1])` |
 | `FloatRange { min, max }` | Value must parse as a finite `f64` in range | `FloatRange { min: 0.5, max: 10.5 }` |
@@ -348,7 +354,7 @@ token.verify_call_with_args(
 | `CharLenOneOf(Vec<usize>)` | Value Unicode scalar count must be one of the listed lengths | `CharLenOneOf(vec![4, 8, 16])` |
 | `CharLenNone(Vec<usize>)` | Value Unicode scalar count must be none of the listed lengths | `CharLenNone(vec![0, 1])` |
 
-JSON forms match the Rust names: `{"type":"all","value":[...]}`, `{"type":"any","value":[...]}`, `{"type":"not","value":{...}}`, `{"type":"float_range","value":{"min":...,"max":...}}`, `{"type":"len_range","value":{"min":...,"max":...}}`, `{"type":"char_len_range","value":{"min":...,"max":...}}`, `{"type":"prefix_one_of","value":["/tmp/","/var/"]}`, `{"type":"suffix_one_of","value":[".txt",".md"]}`, `{"type":"contains_any","value":["tmp","var"]}`, `{"type":"contains_none","value":["secret","password"]}`, `{"type":"matches_any","value":["*.txt","*.md"]}`, `{"type":"matches_none","value":["*.tmp","*.bak"]}`, `{"type":"prefix_none","value":["/etc/","/root/"]}`, `{"type":"suffix_none","value":[".bak",".tmp"]}`, `{"type":"int_one_of","value":[1,2,3]}`, `{"type":"int_none","value":[0,-1]}`, `{"type":"float_one_of","value":[0.5,1.5,2.5]}`, `{"type":"float_none","value":[0.0,-1.0]}`, `{"type":"len_one_of","value":[4,8,16]}`, `{"type":"len_none","value":[0,1]}`, `{"type":"char_len_one_of","value":[4,8,16]}`, `{"type":"char_len_none","value":[0,1]}`, `{"type":"min_char_len","value":3}`, and `{"type":"max_char_len","value":16}` where children are existing constraint objects. `MinLen(0)` and `MinCharLen(0)` are valid and accept the empty string. `MaxCharLen(0)` is valid and accepts only the empty string. `LenRange { min: 0, max: N }` and `CharLenRange { min: 0, max: N }` are valid and accept the empty string when `N` allows it. `LenOneOf` / `LenNone` / `CharLenOneOf` / `CharLenNone` may include `0` (empty string allowed / denied). Empty suffix, contains, matches, not-contains, not-prefix, not-suffix, or not-matches patterns, empty NotOneOf denylists, empty PrefixOneOf, SuffixOneOf, ContainsAny, ContainsNone, MatchesAny, MatchesNone, PrefixNone, SuffixNone, IntOneOf, IntNone, FloatOneOf, FloatNone, LenOneOf, LenNone, CharLenOneOf, or CharLenNone lists (or a list containing an empty member), empty All/Any composites, a `Not` whose child is an empty pattern, FloatRange bounds that are non-finite or have `min > max`, FloatOneOf or FloatNone lists containing a non-finite member, and LenRange or CharLenRange bounds with `min > max` are rejected at mint/validate and never match a value. Nested All/Any/Not trees deeper than `MAX_CONSTRAINT_NESTING` (8) are rejected at mint/validate.
+JSON forms match the Rust names: `{"type":"all","value":[...]}`, `{"type":"any","value":[...]}`, `{"type":"not","value":{...}}`, `{"type":"float_range","value":{"min":...,"max":...}}`, `{"type":"len_range","value":{"min":...,"max":...}}`, `{"type":"char_len_range","value":{"min":...,"max":...}}`, `{"type":"prefix_one_of","value":["/tmp/","/var/"]}`, `{"type":"suffix_one_of","value":[".txt",".md"]}`, `{"type":"contains_any","value":["tmp","var"]}`, `{"type":"contains_none","value":["secret","password"]}`, `{"type":"matches_any","value":["*.txt","*.md"]}`, `{"type":"matches_none","value":["*.tmp","*.bak"]}`, `{"type":"prefix_none","value":["/etc/","/root/"]}`, `{"type":"suffix_none","value":[".bak",".tmp"]}`, `{"type":"int_one_of","value":[1,2,3]}`, `{"type":"int_none","value":[0,-1]}`, `{"type":"min_int","value":1}`, `{"type":"max_int","value":100}`, `{"type":"float_one_of","value":[0.5,1.5,2.5]}`, `{"type":"float_none","value":[0.0,-1.0]}`, `{"type":"len_one_of","value":[4,8,16]}`, `{"type":"len_none","value":[0,1]}`, `{"type":"char_len_one_of","value":[4,8,16]}`, `{"type":"char_len_none","value":[0,1]}`, `{"type":"min_char_len","value":3}`, and `{"type":"max_char_len","value":16}` where children are existing constraint objects. `MinLen(0)` and `MinCharLen(0)` are valid and accept the empty string. `MinInt(i64::MIN)` and `MaxInt(i64::MAX)` are valid and accept every parseable integer. `MaxCharLen(0)` is valid and accepts only the empty string. `LenRange { min: 0, max: N }` and `CharLenRange { min: 0, max: N }` are valid and accept the empty string when `N` allows it. `LenOneOf` / `LenNone` / `CharLenOneOf` / `CharLenNone` may include `0` (empty string allowed / denied). Empty suffix, contains, matches, not-contains, not-prefix, not-suffix, or not-matches patterns, empty NotOneOf denylists, empty PrefixOneOf, SuffixOneOf, ContainsAny, ContainsNone, MatchesAny, MatchesNone, PrefixNone, SuffixNone, IntOneOf, IntNone, FloatOneOf, FloatNone, LenOneOf, LenNone, CharLenOneOf, or CharLenNone lists (or a list containing an empty member), empty All/Any composites, a `Not` whose child is an empty pattern, FloatRange bounds that are non-finite or have `min > max`, FloatOneOf or FloatNone lists containing a non-finite member, and LenRange or CharLenRange bounds with `min > max` are rejected at mint/validate and never match a value. Nested All/Any/Not trees deeper than `MAX_CONSTRAINT_NESTING` (8) are rejected at mint/validate.
 
 `Matches` is not a regex: only `*` (any sequence, including empty) and `?` (exactly one Unicode scalar) are special. `.` `[` `]` and every other character match literally. There are no character classes, `**` path semantics, or escape sequences.
 
@@ -394,8 +400,10 @@ Valid attenuation rules:
 - **All**: new children must cover every old child with an equal-or-tighter child; extra children (more ANDs) are allowed
 - **Any**: each new child must tighten some old alternative (fewer ORs or tighter alternatives)
 - **Not**: `Not(new)` tightens `Not(old)` when `old` is a subset of `new` (widening the inner constraint strengthens the outer negation)
-- **IntRange**: new range must be within old range
-- **IntOneOf**: every remaining integer must already be allowed (shrink/narrow only)
+- **IntRange**: new range must be within old range. IntRange may replace MinInt/MaxInt by adding the missing bound
+- **MinInt**: new min must be ≥ old min. MinInt may replace IntRange only when the old max is still respected (`i64::MAX`); MinInt may replace IntNone when no denied integer is still allowed by the new minimum
+- **MaxInt**: new max must be ≤ old max. MaxInt may replace IntRange only when the old min is `i64::MIN`; MaxInt may replace IntOneOf when every integer in `[i64::MIN, max]` is listed; MaxInt may replace IntNone when no denied integer is still allowed by the new maximum
+- **IntOneOf**: every remaining integer must already be allowed (shrink/narrow only). IntOneOf may replace MinInt/MaxInt when every listed integer satisfies the old bound
 - **IntNone**: every old denial must stay covered; extra denials are allowed
 - **FloatOneOf**: every remaining float must already be allowed (shrink/narrow only)
 - **FloatNone**: every old denial must stay covered; extra denials are allowed
@@ -408,7 +416,7 @@ Valid attenuation rules:
 - **MaxCharLen**: new max must be ≤ old max. MaxCharLen may replace CharLenRange only when the old min is 0; MaxCharLen may replace CharLenOneOf when every count in `[0, max]` is listed; MaxCharLen may replace CharLenNone when no denied count is still allowed by the new maximum
 - **CharLenOneOf**: every remaining Unicode scalar count must already be allowed (shrink/narrow only). CharLenOneOf may replace CharLenRange when every listed count lies inside the old range; CharLenRange may replace CharLenOneOf when every count in the range is listed. CharLenOneOf may replace MinCharLen/MaxCharLen when every listed count satisfies the old bound. Byte versus scalar pairs fail closed
 - **CharLenNone**: every old denial must stay covered; extra denials are allowed. CharLenRange may replace CharLenNone when no denied count lies inside the new range; CharLenOneOf may replace CharLenNone when every remaining count avoids the denylist
-- **Exact**: can replace any constraint if the exact value satisfies it (for denylists, the exact value must not be forbidden; for All, every child; for Any, at least one child; for Not, the exact value must not satisfy the child; for FloatRange, the exact string must parse as a finite `f64` inside the old range; for LenRange, the exact value's byte length must lie inside the old range; for CharLenRange, the exact value's Unicode scalar count must lie inside the old range; for PrefixOneOf, the exact value must start with a listed prefix; for SuffixOneOf, the exact value must end with a listed suffix; for ContainsAny, the exact value must contain a listed needle; for ContainsNone, the exact value must contain none of the listed needles; for MatchesAny, the exact value must match a listed glob; for MatchesNone, the exact value must match none of the listed globs; for PrefixNone, the exact value must start with none of the listed prefixes; for SuffixNone, the exact value must end with none of the listed suffixes; for IntOneOf, the exact value must parse to a listed integer; for IntNone, the exact value must parse to an integer that is not denied; for FloatOneOf, the exact value must parse to a listed finite `f64`; for FloatNone, the exact value must parse to a finite `f64` that is not denied; for LenOneOf, the exact value's byte length must be listed; for LenNone, the exact value's byte length must not be denied; for CharLenOneOf, the exact value's Unicode scalar count must be listed; for CharLenNone, the exact value's Unicode scalar count must not be denied; for MinCharLen, the exact value's Unicode scalar count must meet the minimum; for MaxCharLen, the exact value's Unicode scalar count must be within the maximum)
+- **Exact**: can replace any constraint if the exact value satisfies it (for denylists, the exact value must not be forbidden; for All, every child; for Any, at least one child; for Not, the exact value must not satisfy the child; for FloatRange, the exact string must parse as a finite `f64` inside the old range; for LenRange, the exact value's byte length must lie inside the old range; for CharLenRange, the exact value's Unicode scalar count must lie inside the old range; for PrefixOneOf, the exact value must start with a listed prefix; for SuffixOneOf, the exact value must end with a listed suffix; for ContainsAny, the exact value must contain a listed needle; for ContainsNone, the exact value must contain none of the listed needles; for MatchesAny, the exact value must match a listed glob; for MatchesNone, the exact value must match none of the listed globs; for PrefixNone, the exact value must start with none of the listed prefixes; for SuffixNone, the exact value must end with none of the listed suffixes; for IntOneOf, the exact value must parse to a listed integer; for IntNone, the exact value must parse to an integer that is not denied; for MinInt, the exact value must parse to an integer that meets the minimum; for MaxInt, the exact value must parse to an integer that is within the maximum; for FloatOneOf, the exact value must parse to a listed finite `f64`; for FloatNone, the exact value must parse to a finite `f64` that is not denied; for LenOneOf, the exact value's byte length must be listed; for LenNone, the exact value's byte length must not be denied; for CharLenOneOf, the exact value's Unicode scalar count must be listed; for CharLenNone, the exact value's Unicode scalar count must not be denied; for MinCharLen, the exact value's Unicode scalar count must meet the minimum; for MaxCharLen, the exact value's Unicode scalar count must be within the maximum)
 
 ## Key Rotation
 
@@ -666,6 +674,8 @@ echo '{
     "names": {"type": "matches_any", "value": ["*.txt", "*.md"]},
     "blocked": {"type": "matches_none", "value": ["*.tmp", "*.bak"]},
     "limit": {"type": "int_range", "value": {"min": 1, "max": 100}},
+    "retries": {"type": "min_int", "value": 1},
+    "cap": {"type": "max_int", "value": 100},
     "score": {"type": "float_range", "value": {"min": 0.5, "max": 10.5}},
     "choice_f": {"type": "float_one_of", "value": [0.5, 1.5, 2.5]},
     "bias": {"type": "float_none", "value": [0.0, -1.0]},
@@ -1176,6 +1186,7 @@ let info = check_tools_call(&verifier, &token, &request)?;
 
 ## Version History
 
+- **0.36.0**: `Constraint::MinInt` and `Constraint::MaxInt` (canonical/wire tags 39 and 40), one-sided integer companions to IntRange, with tighten-only attenuation
 - **0.35.0**: `Constraint::MinCharLen` and `Constraint::MaxCharLen` (canonical/wire tags 37 and 38), Unicode scalar-count companions to MinLen/MaxLen, with tighten-only attenuation
 - **0.34.0**: `Constraint::CharLenOneOf` and `Constraint::CharLenNone` (canonical/wire tags 35 and 36), with fail-closed empty lists and tighten-only attenuation
 - **0.33.0**: `Constraint::LenOneOf` and `Constraint::LenNone` (canonical/wire tags 33 and 34), with fail-closed empty lists and tighten-only attenuation

@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.36.0] - 2026-10-14
+
+### Added
+- **`Constraint::MinInt(i64)`**: value must parse as an `i64` that is at least N
+- **`Constraint::MaxInt(i64)`**: value must parse as an `i64` that is at most N
+- CLI JSON forms `{"type":"min_int","value":1}` and `{"type":"max_int","value":100}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6, MinLen=7, Matches=8, NotEquals=9, NotOneOf=10, NotContains=11, NotPrefix=12, NotSuffix=13, NotMatches=14, All=15, Any=16, Not=17, FloatRange=18, LenRange=19, CharLenRange=20, PrefixOneOf=21, SuffixOneOf=22, ContainsAny=23, ContainsNone=24, MatchesAny=25, MatchesNone=26, PrefixNone=27, SuffixNone=28, IntOneOf=29, IntNone=30, FloatOneOf=31, FloatNone=32, LenOneOf=33, LenNone=34, CharLenOneOf=35, CharLenNone=36, MinCharLen=37, MaxCharLen=38, MinInt=39, MaxInt=40
+- Tokens without the new types still encode identically to 0.35.0
+
+### Notes
+- Stored and encoded as a single big-endian i64 (same layout as one IntRange bound)
+- Attenuation only tightens: a new MinInt must be ≥ the old minimum; a new MaxInt must be ≤ the old maximum
+- Exact may replace MinInt/MaxInt when the exact value parses to an integer that meets the bound
+- OneOf may replace MinInt/MaxInt when every allowed value parses and satisfies the same rule
+- IntRange may replace MinInt by adding an upper bound while keeping or raising the minimum; IntRange may replace MaxInt by adding a lower bound while keeping or lowering the maximum
+- MinInt may replace IntRange when the new min is `>=` the old min and the old max is still respected (`i64::MAX`); MaxInt may replace IntRange when the old min is `i64::MIN` and the new max is `<=` the old max
+- IntOneOf may replace MinInt/MaxInt when every listed integer satisfies the old bound
+- MinInt may replace IntNone when no denied integer is still allowed by the new minimum; MaxInt may replace IntNone when no denied integer is still allowed by the new maximum
+- MaxInt may replace IntOneOf when every integer in `[i64::MIN, max]` is listed (huge ranges fail closed)
+- MinInt may replace IntOneOf when every integer in `[min, i64::MAX]` is listed (huge ranges fail closed)
+- Values that do not parse as `i64` fail closed at check time (same spirit as IntRange)
+- `MinInt(i64::MIN)` is valid and accepts every parseable integer
+- `MaxInt(i64::MAX)` is valid and accepts every parseable integer
+- Unclear cross-type pairs fail closed
+
 ## [0.35.0] - 2026-10-14
 
 ### Added
