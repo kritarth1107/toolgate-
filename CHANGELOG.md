@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.33.0] - 2026-10-14
+
+### Added
+- **`Constraint::LenOneOf(Vec<usize>)`**: value UTF-8 byte length must be one of the listed lengths
+- **`Constraint::LenNone(Vec<usize>)`**: value UTF-8 byte length must be none of the listed lengths
+- CLI JSON forms `{"type":"len_one_of","value":[4,8,16]}` and `{"type":"len_none","value":[0,1]}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6, MinLen=7, Matches=8, NotEquals=9, NotOneOf=10, NotContains=11, NotPrefix=12, NotSuffix=13, NotMatches=14, All=15, Any=16, Not=17, FloatRange=18, LenRange=19, CharLenRange=20, PrefixOneOf=21, SuffixOneOf=22, ContainsAny=23, ContainsNone=24, MatchesAny=25, MatchesNone=26, PrefixNone=27, SuffixNone=28, IntOneOf=29, IntNone=30, FloatOneOf=31, FloatNone=32, LenOneOf=33, LenNone=34
+- Tokens without the new types still encode identically to 0.32.0
+
+### Notes
+- Stored and encoded as sorted unique usizes (same spirit as IntOneOf / IntNone): u8 type + u16 count + each big-endian u64 length
+- Attenuation only tightens: LenOneOf children must be a subset of the parent allowlist; LenNone must cover every parent denial and may add extra denials
+- Exact may replace LenOneOf/LenNone when the exact value's byte length is listed / not denied
+- OneOf may replace LenOneOf/LenNone when every allowed value's byte length satisfies the same rule
+- LenOneOf may replace LenRange when every listed length lies inside the old range; LenRange may replace LenOneOf when every length in the range is listed
+- LenRange may replace LenNone when no denied length lies inside the new range; LenOneOf may replace LenNone when every remaining length avoids the denylist
+- LenOneOf may replace MinLen/MaxLen when every listed length satisfies the old bound
+- MinLen may replace LenNone when no denied length is still allowed by the new minimum; MaxLen may replace LenNone when no denied length is still allowed by the new maximum
+- MaxLen may replace LenOneOf when every length in `[0, max]` is listed
+- Empty lists are rejected at mint/validate and never match a value (fail closed)
+- `0` is a valid list member (empty string allowed / denied)
+- Unclear cross-type pairs fail closed
+
 ## [0.32.0] - 2026-10-13
 
 ### Added
