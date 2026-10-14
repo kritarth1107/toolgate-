@@ -3142,6 +3142,37 @@ mod tests {
     }
 
     #[test]
+    fn min_char_len_check() {
+        let c = Constraint::MinCharLen(3);
+        assert!(c.check("abc"));
+        assert!(c.check("abcd"));
+        assert!(c.check("日本語")); // 3 scalars, 9 bytes
+        assert!(c.check("café")); // 4 scalars
+        assert!(!c.check("ab"));
+        assert!(!c.check("éé")); // 2 scalars, 4 bytes
+        assert!(!c.check(""));
+        assert!(Constraint::MinCharLen(1).check("é"));
+        assert!(!Constraint::MinCharLen(2).check("é"));
+        assert!(Constraint::MinCharLen(0).check(""));
+        assert!(Constraint::MinCharLen(0).check("x"));
+    }
+
+    #[test]
+    fn max_char_len_check() {
+        let c = Constraint::MaxCharLen(4);
+        assert!(c.check(""));
+        assert!(c.check("ab"));
+        assert!(c.check("café")); // 4 scalars, 5 bytes
+        assert!(c.check("éééé")); // 4 scalars, 8 bytes
+        assert!(!c.check("abcde"));
+        assert!(!c.check("日本語語語")); // 5 scalars
+        assert!(Constraint::MaxCharLen(0).check(""));
+        assert!(!Constraint::MaxCharLen(0).check("x"));
+        assert!(!Constraint::MaxCharLen(1).check("éé"));
+        assert!(Constraint::MaxCharLen(1).check("é"));
+    }
+
+    #[test]
     fn suffix_check() {
         let c = Constraint::Suffix(".txt".to_string());
         assert!(c.check("notes.txt"));
@@ -4840,6 +4871,85 @@ mod tests {
     }
 
     #[test]
+    fn min_char_len_subset_tightens_only() {
+        let lower = Constraint::MinCharLen(3);
+        let higher = Constraint::MinCharLen(8);
+        assert!(higher.is_subset_of(&lower));
+        assert!(!lower.is_subset_of(&higher));
+        assert!(Constraint::MinCharLen(0).is_subset_of(&Constraint::MinCharLen(0)));
+
+        assert!(Constraint::Exact("hello".to_string()).is_subset_of(&lower));
+        assert!(Constraint::Exact("日本語".to_string()).is_subset_of(&lower));
+        assert!(!Constraint::Exact("éé".to_string()).is_subset_of(&lower));
+        assert!(Constraint::Exact(String::new()).is_subset_of(&Constraint::MinCharLen(0)));
+        assert!(!Constraint::Exact(String::new()).is_subset_of(&lower));
+        assert!(
+            Constraint::OneOf(vec!["abc".to_string(), "日本語".to_string()]).is_subset_of(&lower)
+        );
+        assert!(!Constraint::OneOf(vec!["abc".to_string(), "é".to_string()]).is_subset_of(&lower));
+
+        assert!(Constraint::CharLenRange { min: 3, max: 16 }.is_subset_of(&lower));
+        assert!(!Constraint::CharLenRange { min: 1, max: 16 }.is_subset_of(&lower));
+        assert!(
+            Constraint::MinCharLen(5).is_subset_of(&Constraint::CharLenRange {
+                min: 3,
+                max: usize::MAX
+            })
+        );
+        assert!(
+            !Constraint::MinCharLen(5).is_subset_of(&Constraint::CharLenRange { min: 3, max: 16 })
+        );
+        assert!(Constraint::CharLenOneOf(vec![4, 8, 16]).is_subset_of(&lower));
+        assert!(!Constraint::CharLenOneOf(vec![2, 4, 8]).is_subset_of(&lower));
+        assert!(Constraint::MinCharLen(2).is_subset_of(&Constraint::CharLenNone(vec![0, 1])));
+        assert!(!Constraint::MinCharLen(1).is_subset_of(&Constraint::CharLenNone(vec![0, 1])));
+        // Byte versus scalar: fail closed.
+        assert!(!lower.is_subset_of(&Constraint::MinLen(3)));
+        assert!(!Constraint::MinLen(3).is_subset_of(&lower));
+        assert!(!lower.is_subset_of(&Constraint::LenRange { min: 3, max: 16 }));
+        assert!(!lower.is_subset_of(&Constraint::Exact("hello".to_string())));
+    }
+
+    #[test]
+    fn max_char_len_subset_tightens_only() {
+        let loose = Constraint::MaxCharLen(10);
+        let tight = Constraint::MaxCharLen(4);
+        assert!(tight.is_subset_of(&loose));
+        assert!(!loose.is_subset_of(&tight));
+        assert!(Constraint::MaxCharLen(0).is_subset_of(&Constraint::MaxCharLen(0)));
+
+        assert!(Constraint::Exact("café".to_string()).is_subset_of(&tight));
+        assert!(Constraint::Exact("éé".to_string()).is_subset_of(&tight));
+        assert!(Constraint::Exact(String::new()).is_subset_of(&tight));
+        assert!(!Constraint::Exact("abcdefghij".to_string()).is_subset_of(&tight));
+        assert!(Constraint::OneOf(vec!["ab".to_string(), "café".to_string()]).is_subset_of(&tight));
+        assert!(
+            !Constraint::OneOf(vec!["ab".to_string(), "abcde".to_string()]).is_subset_of(&tight)
+        );
+
+        assert!(Constraint::CharLenRange { min: 0, max: 4 }.is_subset_of(&loose));
+        assert!(Constraint::CharLenRange { min: 1, max: 4 }.is_subset_of(&tight));
+        assert!(!Constraint::CharLenRange { min: 0, max: 8 }.is_subset_of(&tight));
+        assert!(
+            Constraint::MaxCharLen(4).is_subset_of(&Constraint::CharLenRange { min: 0, max: 8 })
+        );
+        assert!(
+            !Constraint::MaxCharLen(4).is_subset_of(&Constraint::CharLenRange { min: 1, max: 8 })
+        );
+        assert!(Constraint::CharLenOneOf(vec![0, 2, 4]).is_subset_of(&tight));
+        assert!(!Constraint::CharLenOneOf(vec![4, 8]).is_subset_of(&tight));
+        assert!(Constraint::MaxCharLen(0).is_subset_of(&Constraint::CharLenOneOf(vec![0])));
+        assert!(!Constraint::MaxCharLen(2).is_subset_of(&Constraint::CharLenOneOf(vec![0, 2])));
+        assert!(Constraint::MaxCharLen(0).is_subset_of(&Constraint::CharLenNone(vec![1, 2])));
+        assert!(!Constraint::MaxCharLen(2).is_subset_of(&Constraint::CharLenNone(vec![1, 2])));
+        // Byte versus scalar: fail closed.
+        assert!(!tight.is_subset_of(&Constraint::MaxLen(4)));
+        assert!(!Constraint::MaxLen(4).is_subset_of(&tight));
+        assert!(!tight.is_subset_of(&Constraint::LenRange { min: 0, max: 4 }));
+        assert!(!tight.is_subset_of(&Constraint::Exact("café".to_string())));
+    }
+
+    #[test]
     fn json_exact() {
         let c = Constraint::Exact("hello".to_string());
         let json = serde_json::to_string(&c).unwrap();
@@ -5194,6 +5304,36 @@ mod tests {
         let from_cli: Constraint =
             serde_json::from_str(r#"{"type":"char_len_one_of","value":[4,8,16]}"#).unwrap();
         assert_eq!(from_cli, c);
+    }
+
+    #[test]
+    fn json_min_char_len() {
+        let c = Constraint::MinCharLen(3);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"min_char_len\""));
+        assert!(json.contains("\"value\":3"));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"min_char_len","value":0}"#).unwrap();
+        assert_eq!(from_cli, Constraint::MinCharLen(0));
+    }
+
+    #[test]
+    fn json_max_char_len() {
+        let c = Constraint::MaxCharLen(16);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"max_char_len\""));
+        assert!(json.contains("\"value\":16"));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"max_char_len","value":0}"#).unwrap();
+        assert_eq!(from_cli, Constraint::MaxCharLen(0));
     }
 
     #[test]
