@@ -268,6 +268,14 @@ fn encode_constraint_value_to_wire(buf: &mut Vec<u8>, constraint: &Constraint) {
             buf.push(38);
             buf.extend_from_slice(&(*max as u64).to_be_bytes());
         }
+        Constraint::MinInt(min) => {
+            buf.push(39);
+            buf.extend_from_slice(&min.to_be_bytes());
+        }
+        Constraint::MaxInt(max) => {
+            buf.push(40);
+            buf.extend_from_slice(&max.to_be_bytes());
+        }
     }
 }
 
@@ -497,6 +505,14 @@ fn decode_constraint_value_from_wire(
             let max =
                 u64::from_be_bytes(read_wire_bytes(data, pos, 8)?.try_into().unwrap()) as usize;
             Constraint::MaxCharLen(max)
+        }
+        39 => {
+            let min = i64::from_be_bytes(read_wire_bytes(data, pos, 8)?.try_into().unwrap());
+            Constraint::MinInt(min)
+        }
+        40 => {
+            let max = i64::from_be_bytes(read_wire_bytes(data, pos, 8)?.try_into().unwrap());
+            Constraint::MaxInt(max)
         }
         _ => return Err(WireError::UnexpectedEof), // Invalid constraint type
     };

@@ -29,8 +29,10 @@
 //! `{"type":"len_none","value":[0,1]}`,
 //! `{"type":"char_len_one_of","value":[4,8,16]}`,
 //! `{"type":"char_len_none","value":[0,1]}`,
-//! `{"type":"min_char_len","value":3}`, and
-//! `{"type":"max_char_len","value":16}`.
+//! `{"type":"min_char_len","value":3}`,
+//! `{"type":"max_char_len","value":16}`,
+//! `{"type":"min_int","value":1}`, and
+//! `{"type":"max_int","value":100}`.
 //! [`Constraint::PrefixOneOf`] requires the value to start with at least
 //! one listed UTF-8 prefix. [`Constraint::SuffixOneOf`] requires the value
 //! to end with at least one listed UTF-8 suffix. [`Constraint::ContainsAny`]
@@ -57,8 +59,11 @@
 //! count to be none of the listed lengths. [`Constraint::MinCharLen`]
 //! requires the value's Unicode scalar count to be at least N.
 //! [`Constraint::MaxCharLen`] requires the value's Unicode scalar
-//! count to be at most N. Empty lists and empty members are rejected
-//! at mint/validate and never match (fail closed).
+//! count to be at most N. [`Constraint::MinInt`] requires the value
+//! to parse as an `i64` that is at least N. [`Constraint::MaxInt`]
+//! requires the value to parse as an `i64` that is at most N. Empty
+//! lists and empty members are rejected at mint/validate and never
+//! match (fail closed).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -397,6 +402,25 @@ pub enum Constraint {
     /// JSON: `{"type":"max_char_len","value":16}`
     #[serde(rename = "max_char_len")]
     MaxCharLen(usize),
+    /// Value must parse as an `i64` that is at least N.
+    ///
+    /// Same parse rules as [`IntRange`]: `"1"`, `"+1"`, and `"01"`
+    /// are the same integer. Values that do not parse as `i64` fail
+    /// closed at check time. `MinInt(i64::MIN)` is valid and accepts
+    /// every parseable integer.
+    ///
+    /// JSON: `{"type":"min_int","value":1}`
+    #[serde(rename = "min_int")]
+    MinInt(i64),
+    /// Value must parse as an `i64` that is at most N.
+    ///
+    /// Same parse rules as [`IntRange`]. Values that do not parse as
+    /// `i64` fail closed at check time. `MaxInt(i64::MAX)` is valid
+    /// and accepts every parseable integer.
+    ///
+    /// JSON: `{"type":"max_int","value":100}`
+    #[serde(rename = "max_int")]
+    MaxInt(i64),
 }
 
 impl PartialEq for Constraint {
@@ -483,6 +507,8 @@ impl PartialEq for Constraint {
             (Constraint::CharLenNone(a), Constraint::CharLenNone(b)) => a == b,
             (Constraint::MinCharLen(a), Constraint::MinCharLen(b)) => a == b,
             (Constraint::MaxCharLen(a), Constraint::MaxCharLen(b)) => a == b,
+            (Constraint::MinInt(a), Constraint::MinInt(b)) => a == b,
+            (Constraint::MaxInt(a), Constraint::MaxInt(b)) => a == b,
             _ => false,
         }
     }
@@ -629,6 +655,10 @@ impl Constraint {
             // Unicode scalar count, the same unit as CharLenRange.
             Constraint::MinCharLen(min) => value.chars().count() >= *min,
             Constraint::MaxCharLen(max) => value.chars().count() <= *max,
+            // Parse as i64, the same spirit as IntRange; non-integers
+            // fail closed.
+            Constraint::MinInt(min) => value.parse::<i64>().map(|n| n >= *min).unwrap_or(false),
+            Constraint::MaxInt(max) => value.parse::<i64>().map(|n| n <= *max).unwrap_or(false),
         }
     }
 
