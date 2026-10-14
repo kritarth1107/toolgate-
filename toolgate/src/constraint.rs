@@ -23,8 +23,10 @@
 //! `{"type":"suffix_none","value":[".bak",".tmp"]}`,
 //! `{"type":"int_one_of","value":[1,2,3]}`,
 //! `{"type":"int_none","value":[0,-1]}`,
-//! `{"type":"float_one_of","value":[0.5,1.5,2.5]}`, and
-//! `{"type":"float_none","value":[0.0,-1.0]}`.
+//! `{"type":"float_one_of","value":[0.5,1.5,2.5]}`,
+//! `{"type":"float_none","value":[0.0,-1.0]}`,
+//! `{"type":"len_one_of","value":[16,32]}`, and
+//! `{"type":"len_none","value":[0,1]}`.
 //! [`Constraint::PrefixOneOf`] requires the value to start with at least
 //! one listed UTF-8 prefix. [`Constraint::SuffixOneOf`] requires the value
 //! to end with at least one listed UTF-8 suffix. [`Constraint::ContainsAny`]
@@ -41,9 +43,12 @@
 //! `i64` that is none of the listed integers. [`Constraint::FloatOneOf`]
 //! requires the value to parse as a finite `f64` that is one of the
 //! listed floats. [`Constraint::FloatNone`] requires the value to parse
-//! as a finite `f64` that is none of the listed floats. Empty lists and
-//! empty members are rejected at mint/validate and never match (fail
-//! closed).
+//! as a finite `f64` that is none of the listed floats.
+//! [`Constraint::LenOneOf`] requires the value's UTF-8 byte length to be
+//! one of the listed lengths. [`Constraint::LenNone`] requires the
+//! value's UTF-8 byte length to be none of the listed lengths. Empty
+//! lists and empty members are rejected at mint/validate and never
+//! match (fail closed).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -318,6 +323,27 @@ pub enum Constraint {
     /// JSON: `{"type":"float_none","value":[0.0,-1.0]}`
     #[serde(rename = "float_none")]
     FloatNone(Vec<f64>),
+    /// Value UTF-8 byte length must be one of the listed lengths.
+    ///
+    /// Stored and encoded as sorted unique `usize`s, the same spirit as
+    /// [`IntOneOf`] but compared against `value.len()` (the same unit as
+    /// [`LenRange`], [`MaxLen`], and [`MinLen`]). An empty list is
+    /// rejected at mint/validate and never matches a value (fail closed).
+    /// `0` is a valid member and accepts the empty string.
+    ///
+    /// JSON: `{"type":"len_one_of","value":[16,32]}`
+    #[serde(rename = "len_one_of")]
+    LenOneOf(Vec<usize>),
+    /// Value UTF-8 byte length must be none of the listed lengths.
+    ///
+    /// Stored and encoded as sorted unique `usize`s, the same spirit as
+    /// [`IntNone`] but compared against `value.len()`. An empty list is
+    /// rejected at mint/validate and never matches a value (fail closed).
+    /// `0` is a valid member and denies the empty string.
+    ///
+    /// JSON: `{"type":"len_none","value":[0,1]}`
+    #[serde(rename = "len_none")]
+    LenNone(Vec<usize>),
 }
 
 impl PartialEq for Constraint {
@@ -398,6 +424,8 @@ impl PartialEq for Constraint {
             // are still rejected at mint/validate).
             (Constraint::FloatOneOf(a), Constraint::FloatOneOf(b)) => float_list_eq(a, b),
             (Constraint::FloatNone(a), Constraint::FloatNone(b)) => float_list_eq(a, b),
+            (Constraint::LenOneOf(a), Constraint::LenOneOf(b)) => a == b,
+            (Constraint::LenNone(a), Constraint::LenNone(b)) => a == b,
             _ => false,
         }
     }
@@ -525,17 +553,25 @@ impl Constraint {
                         .map(|n| !float_list_contains(denied, n))
                         .unwrap_or(false)
             }
+            // Empty allow/deny lists match nothing; otherwise compare
+            // UTF-8 byte length, the same unit as LenRange/MinLen/MaxLen.
+            Constraint::LenOneOf(allowed) => {
+                usize_list_is_valid(allowed) && allowed.contains(&value.len())
+            }
+            Constraint::LenNone(denied) => {
+                usize_list_is_valid(denied) && !denied.contains(&value.len())
+            }
         }
     }
 
     /// Empty suffix/contains/matches/not_contains/not_prefix/not_suffix/
     /// not_matches needles, empty NotOneOf denylists, empty PrefixOneOf,
     /// SuffixOneOf, ContainsAny, ContainsNone, MatchesAny, MatchesNone,
-    /// PrefixNone, SuffixNone, IntOneOf, IntNone, FloatOneOf, or
-    /// FloatNone lists (or a list containing an empty member), empty
-    /// All/Any composites, and a `Not` whose child is an empty pattern
-    /// match nothing and must not be treated as wildcards. A composite
-    /// that contains an empty child is also empty.
+    /// PrefixNone, SuffixNone, IntOneOf, IntNone, FloatOneOf,
+    /// FloatNone, LenOneOf, or LenNone lists (or a list containing an
+    /// empty member), empty All/Any composites, and a `Not` whose child
+    /// is an empty pattern match nothing and must not be treated as
+    /// wildcards. A composite that contains an empty child is also empty.
     pub fn is_empty_pattern(&self) -> bool {
         match self {
             Constraint::Suffix(value)
@@ -558,6 +594,9 @@ impl Constraint {
                 !int_list_is_valid(values)
             }
             Constraint::FloatOneOf(values) | Constraint::FloatNone(values) => values.is_empty(),
+            Constraint::LenOneOf(values) | Constraint::LenNone(values) => {
+                !usize_list_is_valid(values)
+            }
             Constraint::All(children) | Constraint::Any(children) => {
                 children.is_empty() || children.iter().any(|c| c.is_empty_pattern())
             }
@@ -683,6 +722,17 @@ impl Constraint {
                     Some(n) if float_range_is_valid(*min, *max) => n >= *min && n <= *max,
                     _ => false,
                 }
+            }
+
+            // Exact is subset of LenOneOf if the value's byte length is listed.
+            (Constraint::Exact(a), Constraint::LenOneOf(allowed)) => {
+                usize_list_is_valid(allowed) && allowed.contains(&a.len())
+            }
+
+            // Exact is subset of LenNone if the value's byte length is
+            // not in the denylist.
+            (Constraint::Exact(a), Constraint::LenNone(denied)) => {
+                usize_list_is_valid(denied) && !denied.contains(&a.len())
             }
 
             // Exact is subset of LenRange if the value's byte length lies
@@ -892,6 +942,22 @@ impl Constraint {
                         Some(n) => n >= *min && n <= *max,
                         None => false,
                     })
+            }
+
+            // OneOf is subset of LenOneOf if every allowed value's
+            // byte length is listed.
+            (Constraint::OneOf(values), Constraint::LenOneOf(allowed)) => {
+                usize_list_is_valid(allowed)
+                    && !values.is_empty()
+                    && values.iter().all(|v| allowed.contains(&v.len()))
+            }
+
+            // OneOf is subset of LenNone if every allowed value's
+            // byte length is not denied.
+            (Constraint::OneOf(values), Constraint::LenNone(denied)) => {
+                usize_list_is_valid(denied)
+                    && !values.is_empty()
+                    && values.iter().all(|v| !denied.contains(&v.len()))
             }
 
             // OneOf is subset of LenRange if every allowed value's length
@@ -1422,6 +1488,77 @@ impl Constraint {
                 },
             ) => len_range_is_valid(*old_min, *old_max) && *old_min == 0 && *new <= *old_max,
 
+            // LenOneOf → LenOneOf: every remaining length must already
+            // be allowed (shrink/narrow only). Empty lists fail closed.
+            (Constraint::LenOneOf(new), Constraint::LenOneOf(old)) => {
+                usize_one_of_tightens(new, old)
+            }
+
+            // LenNone → LenNone: every old denial must stay covered;
+            // extra denials are allowed. Empty lists fail closed.
+            (Constraint::LenNone(new), Constraint::LenNone(old)) => usize_none_tightens(new, old),
+
+            // LenOneOf is subset of LenRange when every listed length
+            // lies inside the inclusive interval.
+            (Constraint::LenOneOf(allowed), Constraint::LenRange { min, max }) => {
+                usize_list_is_valid(allowed)
+                    && len_range_is_valid(*min, *max)
+                    && allowed.iter().all(|&n| n >= *min && n <= *max)
+            }
+
+            // LenRange is subset of LenOneOf when every length in the
+            // range is a listed member. Overflowing or inverted ranges
+            // fail closed.
+            (Constraint::LenRange { min, max }, Constraint::LenOneOf(allowed)) => {
+                len_range_subset_of_one_of(*min, *max, allowed)
+            }
+
+            // LenOneOf is subset of LenNone when every remaining
+            // allowed length avoids the denylist.
+            (Constraint::LenOneOf(allowed), Constraint::LenNone(denied)) => {
+                usize_list_is_valid(allowed)
+                    && usize_list_is_valid(denied)
+                    && allowed.iter().all(|n| !denied.contains(n))
+            }
+
+            // LenRange is subset of LenNone when no denied length lies
+            // inside the inclusive interval.
+            (Constraint::LenRange { min, max }, Constraint::LenNone(denied)) => {
+                len_range_is_valid(*min, *max)
+                    && usize_list_is_valid(denied)
+                    && denied.iter().all(|&n| n < *min || n > *max)
+            }
+
+            // LenOneOf may replace MinLen when every listed length
+            // satisfies the old minimum.
+            (Constraint::LenOneOf(allowed), Constraint::MinLen(old)) => {
+                usize_list_is_valid(allowed) && allowed.iter().all(|&n| n >= *old)
+            }
+
+            // LenOneOf may replace MaxLen when every listed length
+            // satisfies the old maximum.
+            (Constraint::LenOneOf(allowed), Constraint::MaxLen(old)) => {
+                usize_list_is_valid(allowed) && allowed.iter().all(|&n| n <= *old)
+            }
+
+            // MinLen is subset of LenNone when no denied length is
+            // still allowed by the new minimum.
+            (Constraint::MinLen(new), Constraint::LenNone(denied)) => {
+                usize_list_is_valid(denied) && denied.iter().all(|&n| n < *new)
+            }
+
+            // MaxLen is subset of LenNone when no denied length is
+            // still allowed by the new maximum.
+            (Constraint::MaxLen(new), Constraint::LenNone(denied)) => {
+                usize_list_is_valid(denied) && denied.iter().all(|&n| n > *new)
+            }
+
+            // MaxLen is subset of LenOneOf when every length in
+            // `[0, max]` is listed. Overflowing ranges fail closed.
+            (Constraint::MaxLen(new), Constraint::LenOneOf(allowed)) => {
+                len_range_subset_of_one_of(0, *new, allowed)
+            }
+
             // CharLenRange is subset of CharLenRange if the new interval
             // is within the old one. Inverted bounds fail closed.
             (
@@ -1935,6 +2072,41 @@ fn float_range_is_valid(min: f64, max: f64) -> bool {
 /// Inclusive length bounds are valid only when they are ordered.
 fn len_range_is_valid(min: usize, max: usize) -> bool {
     min <= max
+}
+
+/// LenOneOf / LenNone lists are valid only when non-empty.
+fn usize_list_is_valid(values: &[usize]) -> bool {
+    !values.is_empty()
+}
+
+/// Every child length must already be allowed by the parent.
+/// Empty lists fail closed.
+fn usize_one_of_tightens(new: &[usize], old: &[usize]) -> bool {
+    usize_list_is_valid(new) && usize_list_is_valid(old) && new.iter().all(|n| old.contains(n))
+}
+
+/// Every old denial must stay in the new denylist. Extra denials are
+/// allowed. Empty lists fail closed.
+fn usize_none_tightens(new: &[usize], old: &[usize]) -> bool {
+    usize_list_is_valid(new) && usize_list_is_valid(old) && old.iter().all(|n| new.contains(n))
+}
+
+/// True when every length in `[min, max]` is a member of `allowed`.
+/// Overflowing or inverted ranges fail closed.
+fn len_range_subset_of_one_of(min: usize, max: usize, allowed: &[usize]) -> bool {
+    if !usize_list_is_valid(allowed) || min > max {
+        return false;
+    }
+    let Some(span) = max.checked_sub(min).and_then(|d| d.checked_add(1)) else {
+        return false;
+    };
+    let mut seen = BTreeSet::new();
+    for &n in allowed {
+        if n >= min && n <= max {
+            seen.insert(n);
+        }
+    }
+    seen.len() == span
 }
 
 /// PrefixOneOf / SuffixOneOf / ContainsAny / ContainsNone / MatchesAny /
@@ -2476,6 +2648,32 @@ mod tests {
     }
 
     #[test]
+    fn len_one_of_check() {
+        let c = Constraint::LenOneOf(vec![2, 4, 8]);
+        assert!(c.check("ab"));
+        assert!(c.check("abcd"));
+        assert!(c.check("abcdefgh"));
+        assert!(c.check("éé")); // 4 bytes
+        assert!(!c.check("a"));
+        assert!(!c.check("abc"));
+        assert!(!c.check(""));
+        assert!(!c.check("abcdefghi"));
+        assert!(Constraint::LenOneOf(vec![0]).check(""));
+        assert!(!Constraint::LenOneOf(vec![0]).check("a"));
+    }
+
+    #[test]
+    fn len_none_check() {
+        let c = Constraint::LenNone(vec![0, 1]);
+        assert!(c.check("ab"));
+        assert!(c.check("hello"));
+        assert!(c.check("é")); // 2 bytes
+        assert!(!c.check(""));
+        assert!(!c.check("a"));
+        assert!(!c.check("x"));
+    }
+
+    #[test]
     fn maxlen_check() {
         let c = Constraint::MaxLen(5);
         assert!(c.check("hello"));
@@ -2941,6 +3139,26 @@ mod tests {
         assert!(!inf.check("1.0"));
         assert!(!Constraint::FloatOneOf(vec![0.5, 1.5]).is_invalid_range());
         assert!(!Constraint::FloatNone(vec![0.0, -1.0]).is_invalid_range());
+    }
+
+    #[test]
+    fn empty_len_one_of_fail_closed() {
+        let empty = Constraint::LenOneOf(vec![]);
+        assert!(empty.is_empty_pattern());
+        assert!(!empty.check(""));
+        assert!(!empty.check("ab"));
+        assert!(!empty.check("anything"));
+        assert!(!Constraint::LenOneOf(vec![2]).is_empty_pattern());
+    }
+
+    #[test]
+    fn empty_len_none_fail_closed() {
+        let empty = Constraint::LenNone(vec![]);
+        assert!(empty.is_empty_pattern());
+        assert!(!empty.check(""));
+        assert!(!empty.check("ab"));
+        assert!(!empty.check("anything"));
+        assert!(!Constraint::LenNone(vec![0]).is_empty_pattern());
     }
 
     #[test]
@@ -3667,6 +3885,88 @@ mod tests {
         assert!(!Constraint::IntRange { min: -1, max: 10 }.is_subset_of(&parent));
         assert!(Constraint::IntOneOf(vec![1, 2]).is_subset_of(&parent));
         assert!(!Constraint::IntOneOf(vec![0, 2]).is_subset_of(&parent));
+    }
+
+    #[test]
+    fn len_one_of_subset_tightens_only() {
+        let parent = Constraint::LenOneOf(vec![2, 4, 8]);
+        let shrink = Constraint::LenOneOf(vec![2, 4]);
+        let same = Constraint::LenOneOf(vec![8, 2, 4]);
+        let grow = Constraint::LenOneOf(vec![2, 4, 8, 16]);
+        let empty = Constraint::LenOneOf(vec![]);
+        let disjoint = Constraint::LenOneOf(vec![16, 32]);
+
+        assert!(shrink.is_subset_of(&parent));
+        assert!(same.is_subset_of(&parent));
+        assert!(!grow.is_subset_of(&parent));
+        assert!(parent.is_subset_of(&grow));
+        assert!(!empty.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&empty));
+        assert!(!disjoint.is_subset_of(&parent));
+
+        assert!(Constraint::Exact("ab".to_string()).is_subset_of(&parent));
+        assert!(Constraint::Exact("abcd".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("a".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("".to_string()).is_subset_of(&parent));
+        assert!(
+            Constraint::OneOf(vec!["ab".to_string(), "abcd".to_string()]).is_subset_of(&parent)
+        );
+        assert!(!Constraint::OneOf(vec!["ab".to_string(), "a".to_string()]).is_subset_of(&parent));
+
+        assert!(parent.is_subset_of(&Constraint::LenRange { min: 2, max: 8 }));
+        assert!(parent.is_subset_of(&Constraint::LenRange { min: 0, max: 16 }));
+        assert!(!parent.is_subset_of(&Constraint::LenRange { min: 4, max: 8 }));
+        assert!(Constraint::LenRange { min: 2, max: 2 }.is_subset_of(&parent));
+        assert!(Constraint::LenRange { min: 2, max: 4 }
+            .is_subset_of(&Constraint::LenOneOf(vec![2, 3, 4])));
+        assert!(!Constraint::LenRange { min: 2, max: 8 }.is_subset_of(&parent));
+
+        assert!(parent.is_subset_of(&Constraint::LenNone(vec![0, 1])));
+        assert!(!parent.is_subset_of(&Constraint::LenNone(vec![4])));
+        assert!(parent.is_subset_of(&Constraint::MinLen(2)));
+        assert!(!parent.is_subset_of(&Constraint::MinLen(3)));
+        assert!(parent.is_subset_of(&Constraint::MaxLen(8)));
+        assert!(!parent.is_subset_of(&Constraint::MaxLen(4)));
+        assert!(Constraint::MaxLen(2).is_subset_of(&Constraint::LenOneOf(vec![0, 1, 2])));
+        assert!(!Constraint::MaxLen(2).is_subset_of(&parent));
+        // Unclear: LenOneOf cannot replace Exact (many strings share a length).
+        assert!(!parent.is_subset_of(&Constraint::Exact("ab".to_string())));
+        assert!(!parent.is_subset_of(&Constraint::OneOf(vec!["ab".to_string()])));
+    }
+
+    #[test]
+    fn len_none_subset_tightens_only() {
+        let parent = Constraint::LenNone(vec![0, 1]);
+        let grow = Constraint::LenNone(vec![0, 1, 3]);
+        let same = Constraint::LenNone(vec![1, 0]);
+        let drop = Constraint::LenNone(vec![0]);
+        let empty = Constraint::LenNone(vec![]);
+
+        assert!(grow.is_subset_of(&parent));
+        assert!(same.is_subset_of(&parent));
+        assert!(!drop.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&grow));
+        assert!(parent.is_subset_of(&drop));
+        assert!(!empty.is_subset_of(&parent));
+        assert!(!parent.is_subset_of(&empty));
+
+        assert!(Constraint::Exact("ab".to_string()).is_subset_of(&parent));
+        assert!(Constraint::Exact("hello".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("".to_string()).is_subset_of(&parent));
+        assert!(!Constraint::Exact("a".to_string()).is_subset_of(&parent));
+        assert!(Constraint::OneOf(vec!["ab".to_string(), "cd".to_string()]).is_subset_of(&parent));
+        assert!(!Constraint::OneOf(vec!["ab".to_string(), "a".to_string()]).is_subset_of(&parent));
+
+        assert!(Constraint::LenRange { min: 2, max: 16 }.is_subset_of(&parent));
+        assert!(!Constraint::LenRange { min: 0, max: 16 }.is_subset_of(&parent));
+        assert!(!Constraint::LenRange { min: 1, max: 1 }.is_subset_of(&parent));
+        assert!(Constraint::MinLen(2).is_subset_of(&parent));
+        assert!(!Constraint::MinLen(1).is_subset_of(&parent));
+        assert!(!Constraint::MaxLen(8).is_subset_of(&parent));
+        assert!(Constraint::MaxLen(8).is_subset_of(&Constraint::LenNone(vec![9, 10])));
+        // Denying specific lengths is not a subset of a range.
+        assert!(!parent.is_subset_of(&Constraint::LenRange { min: 2, max: 16 }));
+        assert!(!parent.is_subset_of(&Constraint::LenOneOf(vec![2, 4, 8])));
     }
 
     #[test]
@@ -4446,6 +4746,38 @@ mod tests {
 
         let from_cli: Constraint =
             serde_json::from_str(r#"{"type":"float_none","value":[0.0,-1.0]}"#).unwrap();
+        assert_eq!(from_cli, c);
+    }
+
+    #[test]
+    fn json_len_one_of() {
+        let c = Constraint::LenOneOf(vec![16, 32]);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"len_one_of\""));
+        assert!(json.contains("16"));
+        assert!(json.contains("32"));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"len_one_of","value":[16,32]}"#).unwrap();
+        assert_eq!(from_cli, c);
+    }
+
+    #[test]
+    fn json_len_none() {
+        let c = Constraint::LenNone(vec![0, 1]);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"len_none\""));
+        assert!(json.contains('0'));
+        assert!(json.contains('1'));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"len_none","value":[0,1]}"#).unwrap();
         assert_eq!(from_cli, c);
     }
 
