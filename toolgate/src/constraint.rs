@@ -3309,6 +3309,43 @@ mod tests {
     }
 
     #[test]
+    fn min_int_check() {
+        let c = Constraint::MinInt(1);
+        assert!(c.check("1"));
+        assert!(c.check("01"));
+        assert!(c.check("+1"));
+        assert!(c.check("100"));
+        assert!(c.check(&i64::MAX.to_string()));
+        assert!(!c.check("0"));
+        assert!(!c.check("-1"));
+        assert!(!c.check("abc"));
+        assert!(!c.check("1.5"));
+        assert!(!c.check(""));
+        assert!(Constraint::MinInt(0).check("0"));
+        assert!(!Constraint::MinInt(0).check("-1"));
+        assert!(Constraint::MinInt(i64::MIN).check(&i64::MIN.to_string()));
+        assert!(Constraint::MinInt(i64::MIN).check("0"));
+    }
+
+    #[test]
+    fn max_int_check() {
+        let c = Constraint::MaxInt(100);
+        assert!(c.check("100"));
+        assert!(c.check("0"));
+        assert!(c.check("-1"));
+        assert!(c.check(&i64::MIN.to_string()));
+        assert!(!c.check("101"));
+        assert!(!c.check("abc"));
+        assert!(!c.check("10.5"));
+        assert!(!c.check(""));
+        assert!(Constraint::MaxInt(0).check("0"));
+        assert!(Constraint::MaxInt(0).check("-1"));
+        assert!(!Constraint::MaxInt(0).check("1"));
+        assert!(Constraint::MaxInt(i64::MAX).check(&i64::MAX.to_string()));
+        assert!(Constraint::MaxInt(i64::MAX).check("0"));
+    }
+
+    #[test]
     fn suffix_check() {
         let c = Constraint::Suffix(".txt".to_string());
         assert!(c.check("notes.txt"));
@@ -5086,6 +5123,77 @@ mod tests {
     }
 
     #[test]
+    fn min_int_subset_tightens_only() {
+        let lower = Constraint::MinInt(1);
+        let higher = Constraint::MinInt(10);
+        assert!(higher.is_subset_of(&lower));
+        assert!(!lower.is_subset_of(&higher));
+        assert!(Constraint::MinInt(0).is_subset_of(&Constraint::MinInt(0)));
+        assert!(Constraint::MinInt(i64::MIN).is_subset_of(&Constraint::MinInt(i64::MIN)));
+
+        assert!(Constraint::Exact("10".to_string()).is_subset_of(&lower));
+        assert!(Constraint::Exact("01".to_string()).is_subset_of(&lower));
+        assert!(!Constraint::Exact("0".to_string()).is_subset_of(&lower));
+        assert!(!Constraint::Exact("abc".to_string()).is_subset_of(&lower));
+        assert!(Constraint::OneOf(vec!["1".to_string(), "02".to_string()]).is_subset_of(&lower));
+        assert!(!Constraint::OneOf(vec!["1".to_string(), "0".to_string()]).is_subset_of(&lower));
+
+        assert!(Constraint::IntRange { min: 1, max: 100 }.is_subset_of(&lower));
+        assert!(!Constraint::IntRange { min: 0, max: 100 }.is_subset_of(&lower));
+        assert!(Constraint::MinInt(5).is_subset_of(&Constraint::IntRange {
+            min: 1,
+            max: i64::MAX
+        }));
+        assert!(!Constraint::MinInt(5).is_subset_of(&Constraint::IntRange { min: 1, max: 100 }));
+        assert!(Constraint::IntOneOf(vec![1, 2, 3]).is_subset_of(&lower));
+        assert!(!Constraint::IntOneOf(vec![0, 1, 2]).is_subset_of(&lower));
+        assert!(Constraint::MinInt(1).is_subset_of(&Constraint::IntNone(vec![0, -1])));
+        assert!(!Constraint::MinInt(0).is_subset_of(&Constraint::IntNone(vec![0, -1])));
+        assert!(Constraint::MinInt(i64::MAX).is_subset_of(&Constraint::IntOneOf(vec![i64::MAX])));
+        assert!(!Constraint::MinInt(1).is_subset_of(&Constraint::IntOneOf(vec![1, 2, 3])));
+        // Unclear cross-type pairs fail closed.
+        assert!(!lower.is_subset_of(&Constraint::MinLen(1)));
+        assert!(!lower.is_subset_of(&Constraint::FloatRange { min: 1.0, max: 100.0 }));
+        assert!(!lower.is_subset_of(&Constraint::Exact("1".to_string())));
+    }
+
+    #[test]
+    fn max_int_subset_tightens_only() {
+        let loose = Constraint::MaxInt(100);
+        let tight = Constraint::MaxInt(10);
+        assert!(tight.is_subset_of(&loose));
+        assert!(!loose.is_subset_of(&tight));
+        assert!(Constraint::MaxInt(0).is_subset_of(&Constraint::MaxInt(0)));
+        assert!(Constraint::MaxInt(i64::MAX).is_subset_of(&Constraint::MaxInt(i64::MAX)));
+
+        assert!(Constraint::Exact("10".to_string()).is_subset_of(&tight));
+        assert!(Constraint::Exact("-1".to_string()).is_subset_of(&tight));
+        assert!(!Constraint::Exact("11".to_string()).is_subset_of(&tight));
+        assert!(!Constraint::Exact("abc".to_string()).is_subset_of(&tight));
+        assert!(Constraint::OneOf(vec!["0".to_string(), "10".to_string()]).is_subset_of(&tight));
+        assert!(!Constraint::OneOf(vec!["0".to_string(), "11".to_string()]).is_subset_of(&tight));
+
+        assert!(Constraint::IntRange { min: 0, max: 10 }.is_subset_of(&loose));
+        assert!(Constraint::IntRange { min: -5, max: 10 }.is_subset_of(&tight));
+        assert!(!Constraint::IntRange { min: 0, max: 20 }.is_subset_of(&tight));
+        assert!(Constraint::MaxInt(10).is_subset_of(&Constraint::IntRange {
+            min: i64::MIN,
+            max: 100
+        }));
+        assert!(!Constraint::MaxInt(10).is_subset_of(&Constraint::IntRange { min: 0, max: 100 }));
+        assert!(Constraint::IntOneOf(vec![-1, 0, 10]).is_subset_of(&tight));
+        assert!(!Constraint::IntOneOf(vec![10, 20]).is_subset_of(&tight));
+        assert!(Constraint::MaxInt(i64::MIN).is_subset_of(&Constraint::IntOneOf(vec![i64::MIN])));
+        assert!(!Constraint::MaxInt(10).is_subset_of(&Constraint::IntOneOf(vec![0, 10])));
+        assert!(Constraint::MaxInt(0).is_subset_of(&Constraint::IntNone(vec![1, 2])));
+        assert!(!Constraint::MaxInt(2).is_subset_of(&Constraint::IntNone(vec![1, 2])));
+        // Unclear cross-type pairs fail closed.
+        assert!(!tight.is_subset_of(&Constraint::MaxLen(10)));
+        assert!(!tight.is_subset_of(&Constraint::FloatRange { min: 0.0, max: 10.0 }));
+        assert!(!tight.is_subset_of(&Constraint::Exact("10".to_string())));
+    }
+
+    #[test]
     fn json_exact() {
         let c = Constraint::Exact("hello".to_string());
         let json = serde_json::to_string(&c).unwrap();
@@ -5470,6 +5578,34 @@ mod tests {
         let from_cli: Constraint =
             serde_json::from_str(r#"{"type":"max_char_len","value":0}"#).unwrap();
         assert_eq!(from_cli, Constraint::MaxCharLen(0));
+    }
+
+    #[test]
+    fn json_min_int() {
+        let c = Constraint::MinInt(1);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"min_int\""));
+        assert!(json.contains("\"value\":1"));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint = serde_json::from_str(r#"{"type":"min_int","value":-1}"#).unwrap();
+        assert_eq!(from_cli, Constraint::MinInt(-1));
+    }
+
+    #[test]
+    fn json_max_int() {
+        let c = Constraint::MaxInt(100);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"max_int\""));
+        assert!(json.contains("\"value\":100"));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint = serde_json::from_str(r#"{"type":"max_int","value":0}"#).unwrap();
+        assert_eq!(from_cli, Constraint::MaxInt(0));
     }
 
     #[test]
