@@ -25,8 +25,10 @@
 //! `{"type":"int_none","value":[0,-1]}`,
 //! `{"type":"float_one_of","value":[0.5,1.5,2.5]}`,
 //! `{"type":"float_none","value":[0.0,-1.0]}`,
-//! `{"type":"len_one_of","value":[16,32]}`, and
-//! `{"type":"len_none","value":[0,1]}`.
+//! `{"type":"len_one_of","value":[16,32]}`,
+//! `{"type":"len_none","value":[0,1]}`,
+//! `{"type":"char_len_one_of","value":[4,8,16]}`, and
+//! `{"type":"char_len_none","value":[0,1]}`.
 //! [`Constraint::PrefixOneOf`] requires the value to start with at least
 //! one listed UTF-8 prefix. [`Constraint::SuffixOneOf`] requires the value
 //! to end with at least one listed UTF-8 suffix. [`Constraint::ContainsAny`]
@@ -46,9 +48,12 @@
 //! as a finite `f64` that is none of the listed floats.
 //! [`Constraint::LenOneOf`] requires the value's UTF-8 byte length to be
 //! one of the listed lengths. [`Constraint::LenNone`] requires the
-//! value's UTF-8 byte length to be none of the listed lengths. Empty
-//! lists and empty members are rejected at mint/validate and never
-//! match (fail closed).
+//! value's UTF-8 byte length to be none of the listed lengths.
+//! [`Constraint::CharLenOneOf`] requires the value's Unicode scalar
+//! count (`chars().count()`) to be one of the listed lengths.
+//! [`Constraint::CharLenNone`] requires the value's Unicode scalar
+//! count to be none of the listed lengths. Empty lists and empty
+//! members are rejected at mint/validate and never match (fail closed).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -344,6 +349,29 @@ pub enum Constraint {
     /// JSON: `{"type":"len_none","value":[0,1]}`
     #[serde(rename = "len_none")]
     LenNone(Vec<usize>),
+    /// Value Unicode scalar count must be one of the listed lengths.
+    ///
+    /// Stored and encoded as sorted unique `usize`s, the same spirit as
+    /// [`LenOneOf`] but compared against `value.chars().count()` (the
+    /// same unit as [`CharLenRange`], not UTF-8 byte length). An empty
+    /// list is rejected at mint/validate and never matches a value
+    /// (fail closed). `0` is a valid member and accepts the empty
+    /// string.
+    ///
+    /// JSON: `{"type":"char_len_one_of","value":[4,8,16]}`
+    #[serde(rename = "char_len_one_of")]
+    CharLenOneOf(Vec<usize>),
+    /// Value Unicode scalar count must be none of the listed lengths.
+    ///
+    /// Stored and encoded as sorted unique `usize`s, the same spirit as
+    /// [`LenNone`] but compared against `value.chars().count()`. An
+    /// empty list is rejected at mint/validate and never matches a
+    /// value (fail closed). `0` is a valid member and denies the empty
+    /// string.
+    ///
+    /// JSON: `{"type":"char_len_none","value":[0,1]}`
+    #[serde(rename = "char_len_none")]
+    CharLenNone(Vec<usize>),
 }
 
 impl PartialEq for Constraint {
@@ -426,6 +454,8 @@ impl PartialEq for Constraint {
             (Constraint::FloatNone(a), Constraint::FloatNone(b)) => float_list_eq(a, b),
             (Constraint::LenOneOf(a), Constraint::LenOneOf(b)) => a == b,
             (Constraint::LenNone(a), Constraint::LenNone(b)) => a == b,
+            (Constraint::CharLenOneOf(a), Constraint::CharLenOneOf(b)) => a == b,
+            (Constraint::CharLenNone(a), Constraint::CharLenNone(b)) => a == b,
             _ => false,
         }
     }
@@ -561,6 +591,14 @@ impl Constraint {
             Constraint::LenNone(denied) => {
                 usize_list_is_valid(denied) && !denied.contains(&value.len())
             }
+            // Empty allow/deny lists match nothing; otherwise compare
+            // Unicode scalar count, the same unit as CharLenRange.
+            Constraint::CharLenOneOf(allowed) => {
+                usize_list_is_valid(allowed) && allowed.contains(&value.chars().count())
+            }
+            Constraint::CharLenNone(denied) => {
+                usize_list_is_valid(denied) && !denied.contains(&value.chars().count())
+            }
         }
     }
 
@@ -568,10 +606,11 @@ impl Constraint {
     /// not_matches needles, empty NotOneOf denylists, empty PrefixOneOf,
     /// SuffixOneOf, ContainsAny, ContainsNone, MatchesAny, MatchesNone,
     /// PrefixNone, SuffixNone, IntOneOf, IntNone, FloatOneOf,
-    /// FloatNone, LenOneOf, or LenNone lists (or a list containing an
-    /// empty member), empty All/Any composites, and a `Not` whose child
-    /// is an empty pattern match nothing and must not be treated as
-    /// wildcards. A composite that contains an empty child is also empty.
+    /// FloatNone, LenOneOf, LenNone, CharLenOneOf, or CharLenNone lists
+    /// (or a list containing an empty member), empty All/Any composites,
+    /// and a `Not` whose child is an empty pattern match nothing and
+    /// must not be treated as wildcards. A composite that contains an
+    /// empty child is also empty.
     pub fn is_empty_pattern(&self) -> bool {
         match self {
             Constraint::Suffix(value)
@@ -594,9 +633,10 @@ impl Constraint {
                 !int_list_is_valid(values)
             }
             Constraint::FloatOneOf(values) | Constraint::FloatNone(values) => values.is_empty(),
-            Constraint::LenOneOf(values) | Constraint::LenNone(values) => {
-                !usize_list_is_valid(values)
-            }
+            Constraint::LenOneOf(values)
+            | Constraint::LenNone(values)
+            | Constraint::CharLenOneOf(values)
+            | Constraint::CharLenNone(values) => !usize_list_is_valid(values),
             Constraint::All(children) | Constraint::Any(children) => {
                 children.is_empty() || children.iter().any(|c| c.is_empty_pattern())
             }
@@ -2074,7 +2114,8 @@ fn len_range_is_valid(min: usize, max: usize) -> bool {
     min <= max
 }
 
-/// LenOneOf / LenNone lists are valid only when non-empty.
+/// LenOneOf / LenNone / CharLenOneOf / CharLenNone lists are valid only
+/// when non-empty.
 fn usize_list_is_valid(values: &[usize]) -> bool {
     !values.is_empty()
 }
