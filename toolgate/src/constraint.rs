@@ -830,6 +830,14 @@ impl Constraint {
                 usize_list_is_valid(denied) && !denied.contains(&a.chars().count())
             }
 
+            // Exact is subset of MinCharLen if the value's Unicode
+            // scalar count meets the minimum.
+            (Constraint::Exact(a), Constraint::MinCharLen(min)) => a.chars().count() >= *min,
+
+            // Exact is subset of MaxCharLen if the value's Unicode
+            // scalar count is within the maximum.
+            (Constraint::Exact(a), Constraint::MaxCharLen(max)) => a.chars().count() <= *max,
+
             // Exact is subset of PrefixOneOf if the value starts with
             // at least one listed prefix.
             (Constraint::Exact(a), Constraint::PrefixOneOf(prefixes)) => {
@@ -1075,6 +1083,18 @@ impl Constraint {
                 usize_list_is_valid(denied)
                     && !values.is_empty()
                     && values.iter().all(|v| !denied.contains(&v.chars().count()))
+            }
+
+            // OneOf is subset of MinCharLen if every allowed value's
+            // Unicode scalar count meets the minimum.
+            (Constraint::OneOf(values), Constraint::MinCharLen(min)) => {
+                !values.is_empty() && values.iter().all(|v| v.chars().count() >= *min)
+            }
+
+            // OneOf is subset of MaxCharLen if every allowed value's
+            // Unicode scalar count is within the maximum.
+            (Constraint::OneOf(values), Constraint::MaxCharLen(max)) => {
+                !values.is_empty() && values.iter().all(|v| v.chars().count() <= *max)
             }
 
             // OneOf is subset of PrefixOneOf if every allowed value
@@ -1720,10 +1740,94 @@ impl Constraint {
                     && denied.iter().all(|&n| n < *min || n > *max)
             }
 
-            // CharLen versus LenRange/MinLen/MaxLen/LenOneOf/LenNone is
-            // not a safe subset in general (byte length vs Unicode
+            // MinCharLen is subset of MinCharLen if new min >= old min
+            // (raise only).
+            (Constraint::MinCharLen(new), Constraint::MinCharLen(old)) => new >= old,
+
+            // MaxCharLen is subset of MaxCharLen if new max <= old max
+            // (lower only).
+            (Constraint::MaxCharLen(new), Constraint::MaxCharLen(old)) => new <= old,
+
+            // CharLenRange may replace MinCharLen by adding an upper
+            // bound while keeping or raising the minimum.
+            (
+                Constraint::CharLenRange {
+                    min: new_min,
+                    max: new_max,
+                },
+                Constraint::MinCharLen(old),
+            ) => len_range_is_valid(*new_min, *new_max) && *new_min >= *old,
+
+            // CharLenRange may replace MaxCharLen by adding a lower
+            // bound while keeping or lowering the maximum.
+            (
+                Constraint::CharLenRange {
+                    min: new_min,
+                    max: new_max,
+                },
+                Constraint::MaxCharLen(old),
+            ) => len_range_is_valid(*new_min, *new_max) && *new_max <= *old,
+
+            // MinCharLen may replace CharLenRange when the new min is
+            // at least the old min and the old max is still respected
+            // (only when the old max is usize::MAX).
+            (
+                Constraint::MinCharLen(new),
+                Constraint::CharLenRange {
+                    min: old_min,
+                    max: old_max,
+                },
+            ) => {
+                len_range_is_valid(*old_min, *old_max) && *new >= *old_min && *old_max == usize::MAX
+            }
+
+            // MaxCharLen may replace CharLenRange when the old min is
+            // 0 (still respected by MaxCharLen) and the new max is
+            // within the old max.
+            (
+                Constraint::MaxCharLen(new),
+                Constraint::CharLenRange {
+                    min: old_min,
+                    max: old_max,
+                },
+            ) => len_range_is_valid(*old_min, *old_max) && *old_min == 0 && *new <= *old_max,
+
+            // CharLenOneOf may replace MinCharLen when every listed
+            // scalar count satisfies the old minimum.
+            (Constraint::CharLenOneOf(allowed), Constraint::MinCharLen(old)) => {
+                usize_list_is_valid(allowed) && allowed.iter().all(|&n| n >= *old)
+            }
+
+            // CharLenOneOf may replace MaxCharLen when every listed
+            // scalar count satisfies the old maximum.
+            (Constraint::CharLenOneOf(allowed), Constraint::MaxCharLen(old)) => {
+                usize_list_is_valid(allowed) && allowed.iter().all(|&n| n <= *old)
+            }
+
+            // MinCharLen is subset of CharLenNone when no denied
+            // scalar count is still allowed by the new minimum.
+            (Constraint::MinCharLen(new), Constraint::CharLenNone(denied)) => {
+                usize_list_is_valid(denied) && denied.iter().all(|&n| n < *new)
+            }
+
+            // MaxCharLen is subset of CharLenNone when no denied
+            // scalar count is still allowed by the new maximum.
+            (Constraint::MaxCharLen(new), Constraint::CharLenNone(denied)) => {
+                usize_list_is_valid(denied) && denied.iter().all(|&n| n > *new)
+            }
+
+            // MaxCharLen is subset of CharLenOneOf when every scalar
+            // count in `[0, max]` is listed. Overflowing ranges fail
+            // closed.
+            (Constraint::MaxCharLen(new), Constraint::CharLenOneOf(allowed)) => {
+                len_range_subset_of_one_of(0, *new, allowed)
+            }
+
+            // CharLen versus LenRange/MinLen/MaxLen/LenOneOf/LenNone
+            // is not a safe subset in general (byte length vs Unicode
             // scalar count). Fail closed unless the replacement is
-            // Exact/OneOf, handled above.
+            // Exact/OneOf, handled above. MinCharLen/MaxCharLen use
+            // the same scalar unit as the other CharLen* types.
 
             // Cross-type comparisons that don't make sense as subsets
             (Constraint::OneOf(_), Constraint::Exact(_)) => false,
