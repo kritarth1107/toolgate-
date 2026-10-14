@@ -6241,6 +6241,303 @@ fn mint_from_policy_accepts_len_one_of() {
     let _ = fs::remove_file(&path);
 }
 
+fn mint_char_len_one_of_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["pin"],
+            "expiry": 2000000000,
+            "constraints": {
+                "pin": {"type": "char_len_one_of", "value": [4, 8, 16]}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+fn mint_char_len_none_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["name"],
+            "expiry": 2000000000,
+            "constraints": {
+                "name": {"type": "char_len_none", "value": [0, 1]}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+#[test]
+fn mint_accepts_char_len_one_of_and_char_len_none() {
+    let one_of = mint_char_len_one_of_token();
+    assert_eq!(one_of["constraints"]["pin"]["type"], "char_len_one_of");
+    assert_eq!(one_of["constraints"]["pin"]["value"], json!([4, 8, 16]));
+
+    let none = mint_char_len_none_token();
+    assert_eq!(none["constraints"]["name"]["type"], "char_len_none");
+    assert_eq!(none["constraints"]["name"]["value"], json!([0, 1]));
+}
+
+#[test]
+fn check_call_enforces_char_len_one_of() {
+    let token = mint_char_len_one_of_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"pin": "café"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"pin": "abc"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn check_call_enforces_char_len_none() {
+    let token = mint_char_len_none_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"name": "éé"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"name": "é"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn attenuate_can_tighten_char_len_one_of() {
+    let token = mint_char_len_one_of_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "pin": {"type": "char_len_one_of", "value": [4, 8]}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(attenuated["constraints"]["pin"]["type"], "char_len_one_of");
+    assert_eq!(attenuated["constraints"]["pin"]["value"], json!([4, 8]));
+}
+
+#[test]
+fn attenuate_rejects_widening_char_len_one_of() {
+    let token = mint_char_len_one_of_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "pin": {"type": "char_len_one_of", "value": [4, 8, 16, 32]}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("attenuation"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn attenuate_can_tighten_char_len_none() {
+    let token = mint_char_len_none_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "name": {"type": "char_len_none", "value": [0, 1, 3]}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(attenuated["constraints"]["name"]["type"], "char_len_none");
+    assert_eq!(attenuated["constraints"]["name"]["value"], json!([0, 1, 3]));
+}
+
+#[test]
+fn attenuate_rejects_widening_char_len_none() {
+    let token = mint_char_len_none_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "name": {"type": "char_len_none", "value": [0]}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("attenuation"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn mint_rejects_empty_char_len_one_of() {
+    let out = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["pin"],
+            "expiry": 2000000000,
+            "constraints": {
+                "pin": {"type": "char_len_one_of", "value": []}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("char_len_one_of"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn mint_rejects_empty_char_len_none() {
+    let out = run_with_status(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["name"],
+            "expiry": 2000000000,
+            "constraints": {
+                "name": {"type": "char_len_none", "value": []}
+            }
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("char_len_none"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn policy_lint_rejects_empty_char_len_one_of() {
+    let path = write_temp_policy(
+        "empty-char-len-one-of",
+        r#"{
+            "version": "1",
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["pin"],
+                "constraints": {
+                    "pin": {"type": "char_len_one_of", "value": []}
+                }
+            }]
+        }"#,
+    );
+    let output = tg()
+        .args(["policy", "lint", path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("char_len_one_of"),
+        "stdout={stdout:?} stderr={:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_file(&path);
+}
+
+#[test]
+fn mint_from_policy_accepts_char_len_one_of() {
+    let path = write_temp_policy(
+        "char-len-one-of-grant",
+        r#"{
+            "version": "1",
+            "default_ttl_seconds": 60,
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["pin"],
+                "constraints": {
+                    "pin": {"type": "char_len_one_of", "value": [4, 8, 16]}
+                }
+            }]
+        }"#,
+    );
+    let out = run_json(
+        &[
+            "mint",
+            "--policy",
+            path.to_str().unwrap(),
+            "--tool",
+            "read_file",
+        ],
+        &json!({
+            "secret": "cli-secret",
+            "current_time": 1700000000
+        }),
+    );
+    let token = &out["token"];
+    assert_eq!(token["tool_name"], "read_file");
+    assert_eq!(token["constraints"]["pin"]["type"], "char_len_one_of");
+    let _ = fs::remove_file(&path);
+}
+
 fn mint_required_path_token() -> Value {
     run_json(
         &["mint"],
