@@ -20,7 +20,7 @@
 //! - constraints_count: u16
 //! - for each constraint (sorted by key):
 //!   - key: u16 length + UTF-8 bytes
-//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone, 27=PrefixNone, 28=SuffixNone, 29=IntOneOf, 30=IntNone, 31=FloatOneOf, 32=FloatNone, 33=LenOneOf, 34=LenNone)
+//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone, 27=PrefixNone, 28=SuffixNone, 29=IntOneOf, 30=IntNone, 31=FloatOneOf, 32=FloatNone, 33=LenOneOf, 34=LenNone, 35=CharLenOneOf, 36=CharLenNone)
 //!   - constraint_data: type-specific encoding
 //!
 //! Format v5 (backward-compatible extension):
@@ -81,6 +81,8 @@
 //! - FloatNone: u16 count + (for each value, sorted unique: IEEE-754 f64 big-endian bits)
 //! - LenOneOf: u16 count + (for each value, sorted unique: u64 big-endian length)
 //! - LenNone: u16 count + (for each value, sorted unique: u64 big-endian length)
+//! - CharLenOneOf: u16 count + (for each value, sorted unique: u64 big-endian scalar count)
+//! - CharLenNone: u16 count + (for each value, sorted unique: u64 big-endian scalar count)
 //!
 //! The v5 format appends jti after constraints. Tokens without jti
 //! encode identically to v4. Tokens without constraints and without jti
@@ -533,6 +535,14 @@ fn encode_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
         }
         Constraint::LenNone(values) => {
             buf.push(34); // type = LenNone
+            encode_sorted_unique_usizes(buf, values);
+        }
+        Constraint::CharLenOneOf(values) => {
+            buf.push(35); // type = CharLenOneOf
+            encode_sorted_unique_usizes(buf, values);
+        }
+        Constraint::CharLenNone(values) => {
+            buf.push(36); // type = CharLenNone
             encode_sorted_unique_usizes(buf, values);
         }
     }
@@ -1546,6 +1556,66 @@ mod tests {
             0x00, 0x02, // 2 values after sort+unique
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // 1
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_char_len_one_of() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "pin".to_string(),
+            Constraint::CharLenOneOf(vec![8, 4, 4, 16]),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x03, b'p', b'i', b'n', // key "pin"
+            0x23, // type = CharLenOneOf
+            0x00, 0x03, // 3 values after sort+unique
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, // 4
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, // 8
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, // 16
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_char_len_none() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("name".to_string(), Constraint::CharLenNone(vec![0, 1, 0]));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x04, b'n', b'a', b'm', b'e', // key "name"
+            0x24, // type = CharLenNone
+            0x00, 0x02, // 2 values after sort+unique
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // 1
+        ]));
+    }
+
+    #[test]
+    fn encoding_without_char_len_one_of_identical_to_prior() {
+        // Tokens that do not use CharLenOneOf/CharLenNone must keep the 0.33.0 bytes.
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("pin".to_string(), Constraint::LenOneOf(vec![8, 4, 4, 16]));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x03, b'p', b'i', b'n', // key "pin"
+            0x21, // type = LenOneOf
+            0x00, 0x03, // 3 values after sort+unique
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, // 4
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, // 8
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, // 16
         ]));
     }
 
