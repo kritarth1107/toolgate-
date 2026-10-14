@@ -20,7 +20,7 @@
 //! - constraints_count: u16
 //! - for each constraint (sorted by key):
 //!   - key: u16 length + UTF-8 bytes
-//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone, 27=PrefixNone, 28=SuffixNone, 29=IntOneOf, 30=IntNone, 31=FloatOneOf, 32=FloatNone, 33=LenOneOf, 34=LenNone, 35=CharLenOneOf, 36=CharLenNone)
+//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone, 27=PrefixNone, 28=SuffixNone, 29=IntOneOf, 30=IntNone, 31=FloatOneOf, 32=FloatNone, 33=LenOneOf, 34=LenNone, 35=CharLenOneOf, 36=CharLenNone, 37=MinCharLen, 38=MaxCharLen)
 //!   - constraint_data: type-specific encoding
 //!
 //! Format v5 (backward-compatible extension):
@@ -83,6 +83,8 @@
 //! - LenNone: u16 count + (for each value, sorted unique: u64 big-endian length)
 //! - CharLenOneOf: u16 count + (for each value, sorted unique: u64 big-endian scalar count)
 //! - CharLenNone: u16 count + (for each value, sorted unique: u64 big-endian scalar count)
+//! - MinCharLen: u64 (same length encoding as MinLen, scalar-count unit)
+//! - MaxCharLen: u64 (same length encoding as MaxLen, scalar-count unit)
 //!
 //! The v5 format appends jti after constraints. Tokens without jti
 //! encode identically to v4. Tokens without constraints and without jti
@@ -1604,6 +1606,61 @@ mod tests {
             0x00, 0x02, // 2 values after sort+unique
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0
             0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // 1
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_min_char_len() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("title".to_string(), Constraint::MinCharLen(3));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x05, b't', b'i', b't', b'l', b'e', // key "title"
+            0x25, // type = MinCharLen
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, // u64 3
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_max_char_len() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("title".to_string(), Constraint::MaxCharLen(16));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x05, b't', b'i', b't', b'l', b'e', // key "title"
+            0x26, // type = MaxCharLen
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, // u64 16
+        ]));
+    }
+
+    #[test]
+    fn encoding_without_min_char_len_identical_to_prior() {
+        // Tokens that do not use MinCharLen/MaxCharLen must keep the 0.34.0 bytes.
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert(
+            "pin".to_string(),
+            Constraint::CharLenOneOf(vec![8, 4, 4, 16]),
+        );
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x03, b'p', b'i', b'n', // key "pin"
+            0x23, // type = CharLenOneOf
+            0x00, 0x03, // 3 values after sort+unique
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, // 4
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x08, // 8
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, // 16
         ]));
     }
 
