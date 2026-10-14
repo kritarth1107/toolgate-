@@ -780,6 +780,18 @@ impl Constraint {
                 }
             }
 
+            // Exact is subset of MinInt if the value parses to an
+            // integer that meets the minimum.
+            (Constraint::Exact(a), Constraint::MinInt(min)) => {
+                a.parse::<i64>().map(|n| n >= *min).unwrap_or(false)
+            }
+
+            // Exact is subset of MaxInt if the value parses to an
+            // integer that is within the maximum.
+            (Constraint::Exact(a), Constraint::MaxInt(max)) => {
+                a.parse::<i64>().map(|n| n <= *max).unwrap_or(false)
+            }
+
             // Exact is subset of IntOneOf if the value parses to a listed int.
             (Constraint::Exact(a), Constraint::IntOneOf(allowed)) => {
                 int_list_is_valid(allowed)
@@ -1003,6 +1015,24 @@ impl Constraint {
                         false
                     }
                 })
+            }
+
+            // OneOf is subset of MinInt if every allowed value parses
+            // and meets the minimum.
+            (Constraint::OneOf(values), Constraint::MinInt(min)) => {
+                !values.is_empty()
+                    && values.iter().all(|v| {
+                        v.parse::<i64>().map(|n| n >= *min).unwrap_or(false)
+                    })
+            }
+
+            // OneOf is subset of MaxInt if every allowed value parses
+            // and is within the maximum.
+            (Constraint::OneOf(values), Constraint::MaxInt(max)) => {
+                !values.is_empty()
+                    && values.iter().all(|v| {
+                        v.parse::<i64>().map(|n| n <= *max).unwrap_or(false)
+                    })
             }
 
             // OneOf is subset of IntOneOf if every allowed value parses
@@ -1432,6 +1462,82 @@ impl Constraint {
                 *min <= *max
                     && int_list_is_valid(denied)
                     && denied.iter().all(|&n| n < *min || n > *max)
+            }
+
+            // MinInt is subset of MinInt if new min >= old min (raise only).
+            (Constraint::MinInt(new), Constraint::MinInt(old)) => new >= old,
+
+            // MaxInt is subset of MaxInt if new max <= old max (lower only).
+            (Constraint::MaxInt(new), Constraint::MaxInt(old)) => new <= old,
+
+            // IntRange may replace MinInt by adding an upper bound while
+            // keeping or raising the minimum.
+            (Constraint::IntRange { min: new_min, max: new_max }, Constraint::MinInt(old)) => {
+                new_min <= new_max && *new_min >= *old
+            }
+
+            // IntRange may replace MaxInt by adding a lower bound while
+            // keeping or lowering the maximum.
+            (Constraint::IntRange { min: new_min, max: new_max }, Constraint::MaxInt(old)) => {
+                new_min <= new_max && *new_max <= *old
+            }
+
+            // MinInt may replace IntRange when the new min is at least
+            // the old min and the old max is still respected (only
+            // when the old max is i64::MAX).
+            (
+                Constraint::MinInt(new),
+                Constraint::IntRange {
+                    min: old_min,
+                    max: old_max,
+                },
+            ) => *old_min <= *old_max && *new >= *old_min && *old_max == i64::MAX,
+
+            // MaxInt may replace IntRange when the old min is i64::MIN
+            // (still respected by MaxInt) and the new max is within
+            // the old max.
+            (
+                Constraint::MaxInt(new),
+                Constraint::IntRange {
+                    min: old_min,
+                    max: old_max,
+                },
+            ) => *old_min <= *old_max && *old_min == i64::MIN && *new <= *old_max,
+
+            // IntOneOf may replace MinInt when every listed integer
+            // satisfies the old minimum.
+            (Constraint::IntOneOf(allowed), Constraint::MinInt(old)) => {
+                int_list_is_valid(allowed) && allowed.iter().all(|&n| n >= *old)
+            }
+
+            // IntOneOf may replace MaxInt when every listed integer
+            // satisfies the old maximum.
+            (Constraint::IntOneOf(allowed), Constraint::MaxInt(old)) => {
+                int_list_is_valid(allowed) && allowed.iter().all(|&n| n <= *old)
+            }
+
+            // MinInt is subset of IntNone when no denied integer is
+            // still allowed by the new minimum.
+            (Constraint::MinInt(new), Constraint::IntNone(denied)) => {
+                int_list_is_valid(denied) && denied.iter().all(|&n| n < *new)
+            }
+
+            // MaxInt is subset of IntNone when no denied integer is
+            // still allowed by the new maximum.
+            (Constraint::MaxInt(new), Constraint::IntNone(denied)) => {
+                int_list_is_valid(denied) && denied.iter().all(|&n| n > *new)
+            }
+
+            // MaxInt is subset of IntOneOf when every integer in
+            // `[i64::MIN, max]` is listed. Huge ranges fail closed.
+            (Constraint::MaxInt(new), Constraint::IntOneOf(allowed)) => {
+                int_range_subset_of_one_of(i64::MIN, *new, allowed)
+            }
+
+            // MinInt is subset of IntOneOf when every integer in
+            // `[min, i64::MAX]` is listed. Huge ranges fail closed.
+            (Constraint::MinInt(new), Constraint::IntOneOf(allowed)) => {
+                int_range_subset_of_one_of(*new, i64::MAX, allowed)
             }
 
             // FloatOneOf → FloatOneOf: every remaining float must already
