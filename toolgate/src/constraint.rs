@@ -27,8 +27,10 @@
 //! `{"type":"float_none","value":[0.0,-1.0]}`,
 //! `{"type":"len_one_of","value":[16,32]}`,
 //! `{"type":"len_none","value":[0,1]}`,
-//! `{"type":"char_len_one_of","value":[4,8,16]}`, and
-//! `{"type":"char_len_none","value":[0,1]}`.
+//! `{"type":"char_len_one_of","value":[4,8,16]}`,
+//! `{"type":"char_len_none","value":[0,1]}`,
+//! `{"type":"min_char_len","value":3}`, and
+//! `{"type":"max_char_len","value":16}`.
 //! [`Constraint::PrefixOneOf`] requires the value to start with at least
 //! one listed UTF-8 prefix. [`Constraint::SuffixOneOf`] requires the value
 //! to end with at least one listed UTF-8 suffix. [`Constraint::ContainsAny`]
@@ -52,8 +54,11 @@
 //! [`Constraint::CharLenOneOf`] requires the value's Unicode scalar
 //! count (`chars().count()`) to be one of the listed lengths.
 //! [`Constraint::CharLenNone`] requires the value's Unicode scalar
-//! count to be none of the listed lengths. Empty lists and empty
-//! members are rejected at mint/validate and never match (fail closed).
+//! count to be none of the listed lengths. [`Constraint::MinCharLen`]
+//! requires the value's Unicode scalar count to be at least N.
+//! [`Constraint::MaxCharLen`] requires the value's Unicode scalar
+//! count to be at most N. Empty lists and empty members are rejected
+//! at mint/validate and never match (fail closed).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -372,6 +377,26 @@ pub enum Constraint {
     /// JSON: `{"type":"char_len_none","value":[0,1]}`
     #[serde(rename = "char_len_none")]
     CharLenNone(Vec<usize>),
+    /// Value Unicode scalar count must be at least N.
+    ///
+    /// Count is `value.chars().count()`, the same unit as
+    /// [`CharLenRange`], [`CharLenOneOf`], and [`CharLenNone`], not
+    /// UTF-8 byte length ([`MinLen`]). `MinCharLen(0)` is valid and
+    /// accepts every value, including the empty string.
+    ///
+    /// JSON: `{"type":"min_char_len","value":3}`
+    #[serde(rename = "min_char_len")]
+    MinCharLen(usize),
+    /// Value Unicode scalar count must be at most N.
+    ///
+    /// Count is `value.chars().count()`, the same unit as
+    /// [`CharLenRange`], [`CharLenOneOf`], and [`CharLenNone`], not
+    /// UTF-8 byte length ([`MaxLen`]). `MaxCharLen(0)` is valid and
+    /// accepts only the empty string.
+    ///
+    /// JSON: `{"type":"max_char_len","value":16}`
+    #[serde(rename = "max_char_len")]
+    MaxCharLen(usize),
 }
 
 impl PartialEq for Constraint {
@@ -456,6 +481,8 @@ impl PartialEq for Constraint {
             (Constraint::LenNone(a), Constraint::LenNone(b)) => a == b,
             (Constraint::CharLenOneOf(a), Constraint::CharLenOneOf(b)) => a == b,
             (Constraint::CharLenNone(a), Constraint::CharLenNone(b)) => a == b,
+            (Constraint::MinCharLen(a), Constraint::MinCharLen(b)) => a == b,
+            (Constraint::MaxCharLen(a), Constraint::MaxCharLen(b)) => a == b,
             _ => false,
         }
     }
@@ -599,6 +626,9 @@ impl Constraint {
             Constraint::CharLenNone(denied) => {
                 usize_list_is_valid(denied) && !denied.contains(&value.chars().count())
             }
+            // Unicode scalar count, the same unit as CharLenRange.
+            Constraint::MinCharLen(min) => value.chars().count() >= *min,
+            Constraint::MaxCharLen(max) => value.chars().count() <= *max,
         }
     }
 
