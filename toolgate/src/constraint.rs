@@ -953,6 +953,18 @@ impl Constraint {
                 max.is_finite() && parse_finite_f64(a).map(|n| n < *max).unwrap_or(false)
             }
 
+            // Exact is subset of ExclusiveMinInt if the value parses
+            // to an integer strictly greater than the bound.
+            (Constraint::Exact(a), Constraint::ExclusiveMinInt(min)) => {
+                a.parse::<i64>().map(|n| n > *min).unwrap_or(false)
+            }
+
+            // Exact is subset of ExclusiveMaxInt if the value parses
+            // to an integer strictly less than the bound.
+            (Constraint::Exact(a), Constraint::ExclusiveMaxInt(max)) => {
+                a.parse::<i64>().map(|n| n < *max).unwrap_or(false)
+            }
+
             // Exact is subset of IntOneOf if the value parses to a listed int.
             (Constraint::Exact(a), Constraint::IntOneOf(allowed)) => {
                 int_list_is_valid(allowed)
@@ -1236,6 +1248,24 @@ impl Constraint {
                     && values
                         .iter()
                         .all(|v| parse_finite_f64(v).map(|n| n < *max).unwrap_or(false))
+            }
+
+            // OneOf is subset of ExclusiveMinInt if every allowed
+            // value parses as an i64 strictly greater than the bound.
+            (Constraint::OneOf(values), Constraint::ExclusiveMinInt(min)) => {
+                !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|v| v.parse::<i64>().map(|n| n > *min).unwrap_or(false))
+            }
+
+            // OneOf is subset of ExclusiveMaxInt if every allowed
+            // value parses as an i64 strictly less than the bound.
+            (Constraint::OneOf(values), Constraint::ExclusiveMaxInt(max)) => {
+                !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|v| v.parse::<i64>().map(|n| n < *max).unwrap_or(false))
             }
 
             // OneOf is subset of IntOneOf if every allowed value parses
@@ -1749,6 +1779,118 @@ impl Constraint {
             // `[min, i64::MAX]` is listed. Huge ranges fail closed.
             (Constraint::MinInt(new), Constraint::IntOneOf(allowed)) => {
                 int_range_subset_of_one_of(*new, i64::MAX, allowed)
+            }
+
+            // ExclusiveMinInt is subset of ExclusiveMinInt if new
+            // min >= old min (raise only).
+            (Constraint::ExclusiveMinInt(new), Constraint::ExclusiveMinInt(old)) => new >= old,
+
+            // ExclusiveMaxInt is subset of ExclusiveMaxInt if new
+            // max <= old max (lower only).
+            (Constraint::ExclusiveMaxInt(new), Constraint::ExclusiveMaxInt(old)) => new <= old,
+
+            // ExclusiveMinInt is subset of MinInt when the open
+            // bound is at least the inclusive minimum: (new, ∞) ⊆
+            // [old, ∞) iff new >= old.
+            (Constraint::ExclusiveMinInt(new), Constraint::MinInt(old)) => new >= old,
+
+            // MinInt is subset of ExclusiveMinInt only when the
+            // inclusive min sits strictly above the exclusive bound:
+            // [new, ∞) ⊆ (old, ∞) iff new > old.
+            (Constraint::MinInt(new), Constraint::ExclusiveMinInt(old)) => new > old,
+
+            // ExclusiveMaxInt is subset of MaxInt when the open
+            // bound is within the inclusive maximum: (-∞, new) ⊆
+            // (-∞, old] iff new <= old.
+            (Constraint::ExclusiveMaxInt(new), Constraint::MaxInt(old)) => new <= old,
+
+            // MaxInt is subset of ExclusiveMaxInt only when the
+            // inclusive max sits strictly below the exclusive bound:
+            // (-∞, new] ⊆ (-∞, old) iff new < old.
+            (Constraint::MaxInt(new), Constraint::ExclusiveMaxInt(old)) => new < old,
+
+            // IntRange may replace ExclusiveMinInt by adding an
+            // upper bound when the inclusive min is strictly above
+            // the exclusive bound (the range includes its min).
+            (
+                Constraint::IntRange {
+                    min: new_min,
+                    max: new_max,
+                },
+                Constraint::ExclusiveMinInt(old),
+            ) => new_min <= new_max && *new_min > *old,
+
+            // IntRange may replace ExclusiveMaxInt by adding a
+            // lower bound when the inclusive max is strictly below
+            // the exclusive bound.
+            (
+                Constraint::IntRange {
+                    min: new_min,
+                    max: new_max,
+                },
+                Constraint::ExclusiveMaxInt(old),
+            ) => new_min <= new_max && *new_max < *old,
+
+            // ExclusiveMinInt may replace IntRange when the new
+            // min is at least the old min and the old max is still
+            // respected (only when the old max is i64::MAX).
+            (
+                Constraint::ExclusiveMinInt(new),
+                Constraint::IntRange {
+                    min: old_min,
+                    max: old_max,
+                },
+            ) => *old_min <= *old_max && *new >= *old_min && *old_max == i64::MAX,
+
+            // ExclusiveMaxInt may replace IntRange when the old
+            // min is i64::MIN (still respected) and the new max is
+            // within the old max.
+            (
+                Constraint::ExclusiveMaxInt(new),
+                Constraint::IntRange {
+                    min: old_min,
+                    max: old_max,
+                },
+            ) => *old_min <= *old_max && *old_min == i64::MIN && *new <= *old_max,
+
+            // IntOneOf may replace ExclusiveMinInt when every
+            // listed integer is strictly greater than the old bound.
+            (Constraint::IntOneOf(allowed), Constraint::ExclusiveMinInt(old)) => {
+                int_list_is_valid(allowed) && allowed.iter().all(|&n| n > *old)
+            }
+
+            // IntOneOf may replace ExclusiveMaxInt when every
+            // listed integer is strictly less than the old bound.
+            (Constraint::IntOneOf(allowed), Constraint::ExclusiveMaxInt(old)) => {
+                int_list_is_valid(allowed) && allowed.iter().all(|&n| n < *old)
+            }
+
+            // ExclusiveMinInt is subset of IntNone when no denied
+            // integer is still allowed by the open minimum (all
+            // denied n <= new).
+            (Constraint::ExclusiveMinInt(new), Constraint::IntNone(denied)) => {
+                int_list_is_valid(denied) && denied.iter().all(|&n| n <= *new)
+            }
+
+            // ExclusiveMaxInt is subset of IntNone when no denied
+            // integer is still allowed by the open maximum (all
+            // denied n >= new).
+            (Constraint::ExclusiveMaxInt(new), Constraint::IntNone(denied)) => {
+                int_list_is_valid(denied) && denied.iter().all(|&n| n >= *new)
+            }
+
+            // ExclusiveMinInt is subset of IntOneOf when the open
+            // range matches nothing (new == i64::MAX; vacuous subset)
+            // or cannot be shown to be covered. Huge ranges fail
+            // closed; only the empty language succeeds.
+            (Constraint::ExclusiveMinInt(new), Constraint::IntOneOf(allowed)) => {
+                *new == i64::MAX && int_list_is_valid(allowed)
+            }
+
+            // ExclusiveMaxInt is subset of IntOneOf when the open
+            // range matches nothing (new == i64::MIN; vacuous subset).
+            (Constraint::ExclusiveMaxInt(new), Constraint::IntOneOf(allowed)) => {
+                *new == i64::MIN && int_list_is_valid(allowed)
             }
 
             // MinFloat is subset of MinFloat if new min >= old min
