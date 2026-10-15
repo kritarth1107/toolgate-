@@ -4521,7 +4521,8 @@ mod tests {
         assert!(c.check("ab"));
         assert!(!c.check("abc"));
         assert!(!c.check("abcd"));
-        assert!(Constraint::ExclusiveMaxLen(2).check("é"));
+        assert!(Constraint::ExclusiveMaxLen(3).check("é"));
+        assert!(!Constraint::ExclusiveMaxLen(2).check("é"));
         assert!(!Constraint::ExclusiveMaxLen(2).check("abc"));
         assert!(!Constraint::ExclusiveMaxLen(0).check(""));
         assert!(!Constraint::ExclusiveMaxLen(0).check("a"));
@@ -6791,8 +6792,9 @@ mod tests {
                 max: usize::MAX
             })
         );
-        assert!(!Constraint::ExclusiveMinLen(5)
-            .is_subset_of(&Constraint::LenRange { min: 1, max: 16 }));
+        assert!(
+            !Constraint::ExclusiveMinLen(5).is_subset_of(&Constraint::LenRange { min: 1, max: 16 })
+        );
         assert!(Constraint::LenOneOf(vec![2, 3, 4]).is_subset_of(&lower));
         assert!(!Constraint::LenOneOf(vec![0, 2, 3]).is_subset_of(&lower));
         assert!(Constraint::ExclusiveMinLen(1).is_subset_of(&Constraint::LenNone(vec![0, 1])));
@@ -6833,8 +6835,9 @@ mod tests {
         assert!(
             Constraint::ExclusiveMaxLen(3).is_subset_of(&Constraint::LenRange { min: 0, max: 16 })
         );
-        assert!(!Constraint::ExclusiveMaxLen(3)
-            .is_subset_of(&Constraint::LenRange { min: 1, max: 16 }));
+        assert!(
+            !Constraint::ExclusiveMaxLen(3).is_subset_of(&Constraint::LenRange { min: 1, max: 16 })
+        );
         assert!(Constraint::LenOneOf(vec![0, 1, 2]).is_subset_of(&tight));
         assert!(!Constraint::LenOneOf(vec![2, 3]).is_subset_of(&tight));
         assert!(Constraint::ExclusiveMaxLen(0).is_subset_of(&Constraint::LenOneOf(vec![0])));

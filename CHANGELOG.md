@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.40.0] - 2026-10-15
+
+### Added
+- **`Constraint::ExclusiveMinLen(usize)`**: value UTF-8 byte length must be strictly greater than N
+- **`Constraint::ExclusiveMaxLen(usize)`**: value UTF-8 byte length must be strictly less than N
+- CLI JSON forms `{"type":"exclusive_min_len","value":0}` and `{"type":"exclusive_max_len","value":256}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6, MinLen=7, Matches=8, NotEquals=9, NotOneOf=10, NotContains=11, NotPrefix=12, NotSuffix=13, NotMatches=14, All=15, Any=16, Not=17, FloatRange=18, LenRange=19, CharLenRange=20, PrefixOneOf=21, SuffixOneOf=22, ContainsAny=23, ContainsNone=24, MatchesAny=25, MatchesNone=26, PrefixNone=27, SuffixNone=28, IntOneOf=29, IntNone=30, FloatOneOf=31, FloatNone=32, LenOneOf=33, LenNone=34, CharLenOneOf=35, CharLenNone=36, MinCharLen=37, MaxCharLen=38, MinInt=39, MaxInt=40, MinFloat=41, MaxFloat=42, ExclusiveMinFloat=43, ExclusiveMaxFloat=44, ExclusiveMinInt=45, ExclusiveMaxInt=46, ExclusiveMinLen=47, ExclusiveMaxLen=48
+- Tokens without the new types still encode identically to 0.39.0
+
+### Notes
+- Stored and encoded as a single big-endian u64 (same layout as MinLen / MaxLen)
+- Attenuation only tightens: a new ExclusiveMinLen must be ≥ the old exclusive minimum; a new ExclusiveMaxLen must be ≤ the old exclusive maximum
+- Exact may replace ExclusiveMinLen/ExclusiveMaxLen when the exact value's byte length is strictly past the bound
+- OneOf may replace ExclusiveMinLen/ExclusiveMaxLen when every allowed value's byte length satisfies the same rule
+- ExclusiveMinLen may replace MinLen at the same or higher bound (open is a subset of closed); MinLen may replace ExclusiveMinLen only when the inclusive min is strictly greater than the exclusive bound
+- ExclusiveMaxLen may replace MaxLen at the same or lower bound; MaxLen may replace ExclusiveMaxLen only when the inclusive max is strictly less than the exclusive bound
+- LenRange may replace ExclusiveMinLen when the inclusive min is strictly greater than the exclusive bound; LenRange may replace ExclusiveMaxLen when the inclusive max is strictly less than the exclusive bound
+- ExclusiveMinLen may replace LenRange when the new min is `>=` the old min and the old max is still respected (`usize::MAX`); ExclusiveMaxLen may replace LenRange when the old min is 0 and the new max is `<=` the old max
+- LenOneOf may replace ExclusiveMinLen/ExclusiveMaxLen when every listed length is strictly past the exclusive bound
+- ExclusiveMinLen may replace LenNone when no denied length is still allowed by the open minimum; ExclusiveMaxLen may replace LenNone when no denied length is still allowed by the open maximum
+- ExclusiveMinLen(`usize::MAX`) matches no value and may replace LenOneOf (vacuous subset); ExclusiveMaxLen(`0`) matches no value and may replace LenOneOf the same way
+- `ExclusiveMinLen(0)` is valid and accepts every non-empty string
+- `ExclusiveMaxLen(0)` is valid and matches no value
+- `ExclusiveMaxLen(usize::MAX)` is valid and accepts every value except those of length `usize::MAX`
+- CharLen versus ExclusiveMinLen/ExclusiveMaxLen fails closed; byte vs scalar length is not a safe subset in general
+- Unclear cross-type pairs fail closed
+
 ## [0.39.0] - 2026-10-15
 
 ### Added
