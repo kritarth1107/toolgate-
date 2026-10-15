@@ -1783,11 +1783,9 @@ impl Constraint {
             (Constraint::IntOneOf(allowed), Constraint::MinFloat(old)) => {
                 old.is_finite()
                     && int_list_is_valid(allowed)
-                    && allowed.iter().all(|&n| {
-                        i64_as_exact_f64(n)
-                            .map(|f| f >= *old)
-                            .unwrap_or(false)
-                    })
+                    && allowed
+                        .iter()
+                        .all(|&n| i64_as_exact_f64(n).map(|f| f >= *old).unwrap_or(false))
             }
 
             // IntOneOf may replace MaxFloat when every listed integer
@@ -1795,11 +1793,9 @@ impl Constraint {
             (Constraint::IntOneOf(allowed), Constraint::MaxFloat(old)) => {
                 old.is_finite()
                     && int_list_is_valid(allowed)
-                    && allowed.iter().all(|&n| {
-                        i64_as_exact_f64(n)
-                            .map(|f| f <= *old)
-                            .unwrap_or(false)
-                    })
+                    && allowed
+                        .iter()
+                        .all(|&n| i64_as_exact_f64(n).map(|f| f <= *old).unwrap_or(false))
             }
 
             // FloatOneOf → FloatOneOf: every remaining float must already
@@ -5560,19 +5556,25 @@ mod tests {
             max: 10.5
         }
         .is_subset_of(&lower));
-        assert!(Constraint::MinFloat(1.0).is_subset_of(&Constraint::FloatRange {
-            min: 0.5,
-            max: f64::MAX
-        }));
-        assert!(!Constraint::MinFloat(1.0).is_subset_of(&Constraint::FloatRange {
-            min: 0.5,
-            max: 10.5
-        }));
+        assert!(
+            Constraint::MinFloat(1.0).is_subset_of(&Constraint::FloatRange {
+                min: 0.5,
+                max: f64::MAX
+            })
+        );
+        assert!(
+            !Constraint::MinFloat(1.0).is_subset_of(&Constraint::FloatRange {
+                min: 0.5,
+                max: 10.5
+            })
+        );
         assert!(Constraint::FloatOneOf(vec![0.5, 1.5, 2.5]).is_subset_of(&lower));
         assert!(!Constraint::FloatOneOf(vec![0.0, 0.5]).is_subset_of(&lower));
         assert!(Constraint::MinFloat(1.0).is_subset_of(&Constraint::FloatNone(vec![0.0, -1.0])));
         assert!(!Constraint::MinFloat(0.0).is_subset_of(&Constraint::FloatNone(vec![0.0, -1.0])));
-        assert!(Constraint::MinFloat(f64::MAX).is_subset_of(&Constraint::FloatOneOf(vec![f64::MAX])));
+        assert!(
+            Constraint::MinFloat(f64::MAX).is_subset_of(&Constraint::FloatOneOf(vec![f64::MAX]))
+        );
         assert!(!Constraint::MinFloat(0.5).is_subset_of(&Constraint::FloatOneOf(vec![0.5, 1.5])));
         assert!(Constraint::IntRange { min: 1, max: 10 }.is_subset_of(&lower));
         assert!(!Constraint::IntRange { min: 0, max: 10 }.is_subset_of(&lower));
@@ -5608,17 +5610,23 @@ mod tests {
         }
         .is_subset_of(&tight));
         assert!(!Constraint::FloatRange { min: 0.0, max: 2.0 }.is_subset_of(&tight));
-        assert!(Constraint::MaxFloat(1.5).is_subset_of(&Constraint::FloatRange {
-            min: f64::MIN,
-            max: 10.5
-        }));
-        assert!(!Constraint::MaxFloat(1.5).is_subset_of(&Constraint::FloatRange {
-            min: 0.0,
-            max: 10.5
-        }));
+        assert!(
+            Constraint::MaxFloat(1.5).is_subset_of(&Constraint::FloatRange {
+                min: f64::MIN,
+                max: 10.5
+            })
+        );
+        assert!(
+            !Constraint::MaxFloat(1.5).is_subset_of(&Constraint::FloatRange {
+                min: 0.0,
+                max: 10.5
+            })
+        );
         assert!(Constraint::FloatOneOf(vec![-1.0, 0.0, 1.5]).is_subset_of(&tight));
         assert!(!Constraint::FloatOneOf(vec![1.5, 2.0]).is_subset_of(&tight));
-        assert!(Constraint::MaxFloat(f64::MIN).is_subset_of(&Constraint::FloatOneOf(vec![f64::MIN])));
+        assert!(
+            Constraint::MaxFloat(f64::MIN).is_subset_of(&Constraint::FloatOneOf(vec![f64::MIN]))
+        );
         assert!(!Constraint::MaxFloat(1.5).is_subset_of(&Constraint::FloatOneOf(vec![0.0, 1.5])));
         assert!(Constraint::MaxFloat(0.0).is_subset_of(&Constraint::FloatNone(vec![1.0, 2.0])));
         assert!(!Constraint::MaxFloat(2.0).is_subset_of(&Constraint::FloatNone(vec![1.0, 2.0])));
