@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.38.0] - 2026-10-15
+
+### Added
+- **`Constraint::ExclusiveMinFloat(f64)`**: value must parse as a finite `f64` that is strictly greater than N
+- **`Constraint::ExclusiveMaxFloat(f64)`**: value must parse as a finite `f64` that is strictly less than N
+- CLI JSON forms `{"type":"exclusive_min_float","value":0.5}` and `{"type":"exclusive_max_float","value":10.5}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6, MinLen=7, Matches=8, NotEquals=9, NotOneOf=10, NotContains=11, NotPrefix=12, NotSuffix=13, NotMatches=14, All=15, Any=16, Not=17, FloatRange=18, LenRange=19, CharLenRange=20, PrefixOneOf=21, SuffixOneOf=22, ContainsAny=23, ContainsNone=24, MatchesAny=25, MatchesNone=26, PrefixNone=27, SuffixNone=28, IntOneOf=29, IntNone=30, FloatOneOf=31, FloatNone=32, LenOneOf=33, LenNone=34, CharLenOneOf=35, CharLenNone=36, MinCharLen=37, MaxCharLen=38, MinInt=39, MaxInt=40, MinFloat=41, MaxFloat=42, ExclusiveMinFloat=43, ExclusiveMaxFloat=44
+- Tokens without the new types still encode identically to 0.37.0
+
+### Notes
+- Stored and encoded as a single big-endian IEEE-754 f64 (same layout as one FloatRange bound)
+- Attenuation only tightens: a new ExclusiveMinFloat must be ≥ the old exclusive minimum; a new ExclusiveMaxFloat must be ≤ the old exclusive maximum
+- Exact may replace ExclusiveMinFloat/ExclusiveMaxFloat when the exact value parses to a finite `f64` strictly past the bound
+- OneOf may replace ExclusiveMinFloat/ExclusiveMaxFloat when every allowed value parses and satisfies the same rule
+- ExclusiveMinFloat may replace MinFloat at the same or higher bound (open is a subset of closed); MinFloat may replace ExclusiveMinFloat only when the inclusive min is strictly greater than the exclusive bound
+- ExclusiveMaxFloat may replace MaxFloat at the same or lower bound; MaxFloat may replace ExclusiveMaxFloat only when the inclusive max is strictly less than the exclusive bound
+- FloatRange may replace ExclusiveMinFloat when the inclusive min is strictly greater than the exclusive bound; FloatRange may replace ExclusiveMaxFloat when the inclusive max is strictly less than the exclusive bound
+- ExclusiveMinFloat may replace FloatRange when the new min is `>=` the old min and the old max is still respected (`f64::MAX`); ExclusiveMaxFloat may replace FloatRange when the old min is `f64::MIN` and the new max is `<=` the old max
+- FloatOneOf may replace ExclusiveMinFloat/ExclusiveMaxFloat when every listed float is strictly past the exclusive bound
+- ExclusiveMinFloat may replace FloatNone when no denied float is still allowed by the open minimum; ExclusiveMaxFloat may replace FloatNone when no denied float is still allowed by the open maximum
+- ExclusiveMinFloat(`f64::MAX`) matches no finite float and may replace FloatOneOf (vacuous subset); ExclusiveMaxFloat(`f64::MIN`) matches no finite float and may replace FloatOneOf the same way
+- IntRange may replace ExclusiveMinFloat/ExclusiveMaxFloat when every integer in the range converts exactly to `f64` and is strictly past the bound
+- IntOneOf may replace ExclusiveMinFloat/ExclusiveMaxFloat when every listed integer converts exactly to `f64` and is strictly past the bound
+- Values that do not parse as a finite `f64` fail closed at check time (same spirit as FloatRange)
+- Non-finite bounds (NaN, ±inf) are rejected at mint/validate and never match (fail closed)
+- `ExclusiveMinFloat(f64::MIN)` is valid and accepts every finite float except `f64::MIN`
+- `ExclusiveMaxFloat(f64::MAX)` is valid and accepts every finite float except `f64::MAX`
+- Unclear cross-type pairs fail closed
+
 ## [0.37.0] - 2026-10-15
 
 ### Added

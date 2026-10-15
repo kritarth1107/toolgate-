@@ -26,7 +26,7 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-toolgate = "0.37"
+toolgate = "0.38"
 ```
 
 Or install the CLI:
@@ -1204,6 +1204,7 @@ let info = check_tools_call(&verifier, &token, &request)?;
 
 ## Version History
 
+- **0.38.0**: `Constraint::ExclusiveMinFloat` and `Constraint::ExclusiveMaxFloat` (canonical/wire tags 43 and 44), exclusive one-sided float companions to MinFloat/MaxFloat, with tighten-only attenuation
 - **0.37.0**: `Constraint::MinFloat` and `Constraint::MaxFloat` (canonical/wire tags 41 and 42), one-sided float companions to FloatRange, with tighten-only attenuation
 - **0.36.0**: `Constraint::MinInt` and `Constraint::MaxInt` (canonical/wire tags 39 and 40), one-sided integer companions to IntRange, with tighten-only attenuation
 - **0.35.0**: `Constraint::MinCharLen` and `Constraint::MaxCharLen` (canonical/wire tags 37 and 38), Unicode scalar-count companions to MinLen/MaxLen, with tighten-only attenuation
