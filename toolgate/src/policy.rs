@@ -1951,6 +1951,35 @@ mod tests {
     }
 
     #[test]
+    fn from_json_parses_exclusive_min_len_and_exclusive_max_len() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 60,
+                "tools": [{
+                    "name": "file_op",
+                    "arg_keys": ["open_query", "open_body"],
+                    "constraints": {
+                        "open_query": {"type": "exclusive_min_len", "value": 0},
+                        "open_body": {"type": "exclusive_max_len", "value": 256}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        policy.validate().unwrap();
+        let grant = policy.grant("file_op").unwrap();
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("open_query"),
+            Some(&Constraint::ExclusiveMinLen(0))
+        );
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("open_body"),
+            Some(&Constraint::ExclusiveMaxLen(256))
+        );
+    }
+
+    #[test]
     fn validate_non_finite_min_float_is_rejected() {
         let mut policy = Policy::from_json(
             r#"{
