@@ -1983,17 +1983,13 @@ impl Constraint {
             // FloatOneOf may replace ExclusiveMinFloat when every
             // listed float is strictly greater than the old bound.
             (Constraint::FloatOneOf(allowed), Constraint::ExclusiveMinFloat(old)) => {
-                old.is_finite()
-                    && float_list_is_valid(allowed)
-                    && allowed.iter().all(|&n| n > *old)
+                old.is_finite() && float_list_is_valid(allowed) && allowed.iter().all(|&n| n > *old)
             }
 
             // FloatOneOf may replace ExclusiveMaxFloat when every
             // listed float is strictly less than the old bound.
             (Constraint::FloatOneOf(allowed), Constraint::ExclusiveMaxFloat(old)) => {
-                old.is_finite()
-                    && float_list_is_valid(allowed)
-                    && allowed.iter().all(|&n| n < *old)
+                old.is_finite() && float_list_is_valid(allowed) && allowed.iter().all(|&n| n < *old)
             }
 
             // ExclusiveMinFloat is subset of FloatNone when no denied
@@ -3964,6 +3960,86 @@ mod tests {
     }
 
     #[test]
+    fn exclusive_min_float_check() {
+        let c = Constraint::ExclusiveMinFloat(0.5);
+        assert!(!c.check("0.5"));
+        assert!(c.check("0.51"));
+        assert!(c.check("1"));
+        assert!(c.check("1.0"));
+        assert!(c.check("1e1"));
+        assert!(c.check(&f64::MAX.to_string()));
+        assert!(!c.check("0.49"));
+        assert!(!c.check("0"));
+        assert!(!c.check("-1"));
+        assert!(!c.check("abc"));
+        assert!(!c.check("NaN"));
+        assert!(!c.check("inf"));
+        assert!(!c.check("-inf"));
+        assert!(!c.check(""));
+        assert!(!Constraint::ExclusiveMinFloat(0.0).check("0"));
+        assert!(!Constraint::ExclusiveMinFloat(0.0).check("-0"));
+        assert!(Constraint::ExclusiveMinFloat(0.0).check("0.1"));
+        assert!(!Constraint::ExclusiveMinFloat(f64::MIN).check(&f64::MIN.to_string()));
+        assert!(Constraint::ExclusiveMinFloat(f64::MIN).check("0"));
+        assert!(!Constraint::ExclusiveMinFloat(f64::MAX).check(&f64::MAX.to_string()));
+        assert!(!Constraint::ExclusiveMinFloat(f64::MAX).check("0"));
+    }
+
+    #[test]
+    fn exclusive_max_float_check() {
+        let c = Constraint::ExclusiveMaxFloat(10.5);
+        assert!(!c.check("10.5"));
+        assert!(c.check("10.49"));
+        assert!(c.check("0"));
+        assert!(c.check("-1"));
+        assert!(c.check(&f64::MIN.to_string()));
+        assert!(!c.check("10.51"));
+        assert!(!c.check("abc"));
+        assert!(!c.check("NaN"));
+        assert!(!c.check("inf"));
+        assert!(!c.check(""));
+        assert!(!Constraint::ExclusiveMaxFloat(0.0).check("0"));
+        assert!(Constraint::ExclusiveMaxFloat(0.0).check("-1"));
+        assert!(!Constraint::ExclusiveMaxFloat(0.0).check("0.1"));
+        assert!(!Constraint::ExclusiveMaxFloat(f64::MAX).check(&f64::MAX.to_string()));
+        assert!(Constraint::ExclusiveMaxFloat(f64::MAX).check("0"));
+        assert!(!Constraint::ExclusiveMaxFloat(f64::MIN).check(&f64::MIN.to_string()));
+        assert!(!Constraint::ExclusiveMaxFloat(f64::MIN).check("0"));
+    }
+
+    #[test]
+    fn exclusive_min_float_invalid_bounds_fail_closed() {
+        let nan = Constraint::ExclusiveMinFloat(f64::NAN);
+        let inf = Constraint::ExclusiveMinFloat(f64::INFINITY);
+        let ninf = Constraint::ExclusiveMinFloat(f64::NEG_INFINITY);
+        assert!(nan.is_invalid_range());
+        assert!(inf.is_invalid_range());
+        assert!(ninf.is_invalid_range());
+        assert!(!nan.check("1"));
+        assert!(!inf.check("1"));
+        assert!(!ninf.check("-1"));
+        assert!(!Constraint::ExclusiveMinFloat(0.5).is_invalid_range());
+        assert!(!Constraint::ExclusiveMinFloat(f64::MIN).is_invalid_range());
+        assert!(!Constraint::ExclusiveMinFloat(f64::MAX).is_invalid_range());
+    }
+
+    #[test]
+    fn exclusive_max_float_invalid_bounds_fail_closed() {
+        let nan = Constraint::ExclusiveMaxFloat(f64::NAN);
+        let inf = Constraint::ExclusiveMaxFloat(f64::INFINITY);
+        let ninf = Constraint::ExclusiveMaxFloat(f64::NEG_INFINITY);
+        assert!(nan.is_invalid_range());
+        assert!(inf.is_invalid_range());
+        assert!(ninf.is_invalid_range());
+        assert!(!nan.check("1"));
+        assert!(!inf.check("1"));
+        assert!(!ninf.check("-1"));
+        assert!(!Constraint::ExclusiveMaxFloat(10.5).is_invalid_range());
+        assert!(!Constraint::ExclusiveMaxFloat(f64::MAX).is_invalid_range());
+        assert!(!Constraint::ExclusiveMaxFloat(f64::MIN).is_invalid_range());
+    }
+
+    #[test]
     fn suffix_check() {
         let c = Constraint::Suffix(".txt".to_string());
         assert!(c.check("notes.txt"));
@@ -5930,6 +6006,138 @@ mod tests {
     }
 
     #[test]
+    fn exclusive_min_float_subset_tightens_only() {
+        let lower = Constraint::ExclusiveMinFloat(0.5);
+        let higher = Constraint::ExclusiveMinFloat(1.5);
+        assert!(higher.is_subset_of(&lower));
+        assert!(!lower.is_subset_of(&higher));
+        assert!(
+            Constraint::ExclusiveMinFloat(0.0).is_subset_of(&Constraint::ExclusiveMinFloat(0.0))
+        );
+        assert!(Constraint::ExclusiveMinFloat(f64::MIN)
+            .is_subset_of(&Constraint::ExclusiveMinFloat(f64::MIN)));
+
+        assert!(Constraint::Exact("1.5".to_string()).is_subset_of(&lower));
+        assert!(Constraint::Exact("1".to_string()).is_subset_of(&lower));
+        assert!(Constraint::Exact("1e0".to_string()).is_subset_of(&lower));
+        assert!(!Constraint::Exact("0.5".to_string()).is_subset_of(&lower));
+        assert!(!Constraint::Exact("0.4".to_string()).is_subset_of(&lower));
+        assert!(!Constraint::Exact("abc".to_string()).is_subset_of(&lower));
+        assert!(Constraint::OneOf(vec!["0.6".to_string(), "2".to_string()]).is_subset_of(&lower));
+        assert!(!Constraint::OneOf(vec!["0.5".to_string(), "2".to_string()]).is_subset_of(&lower));
+
+        assert!(Constraint::ExclusiveMinFloat(0.5).is_subset_of(&Constraint::MinFloat(0.5)));
+        assert!(!Constraint::MinFloat(0.5).is_subset_of(&Constraint::ExclusiveMinFloat(0.5)));
+        assert!(Constraint::MinFloat(0.6).is_subset_of(&Constraint::ExclusiveMinFloat(0.5)));
+
+        assert!(Constraint::FloatRange {
+            min: 0.6,
+            max: 10.5
+        }
+        .is_subset_of(&lower));
+        assert!(!Constraint::FloatRange {
+            min: 0.5,
+            max: 10.5
+        }
+        .is_subset_of(&lower));
+        assert!(
+            Constraint::ExclusiveMinFloat(1.0).is_subset_of(&Constraint::FloatRange {
+                min: 0.5,
+                max: f64::MAX
+            })
+        );
+        assert!(
+            !Constraint::ExclusiveMinFloat(1.0).is_subset_of(&Constraint::FloatRange {
+                min: 0.5,
+                max: 10.5
+            })
+        );
+        assert!(Constraint::FloatOneOf(vec![0.6, 1.5, 2.5]).is_subset_of(&lower));
+        assert!(!Constraint::FloatOneOf(vec![0.5, 1.5]).is_subset_of(&lower));
+        assert!(Constraint::ExclusiveMinFloat(1.0)
+            .is_subset_of(&Constraint::FloatNone(vec![0.0, -1.0])));
+        assert!(Constraint::ExclusiveMinFloat(0.0)
+            .is_subset_of(&Constraint::FloatNone(vec![0.0, -1.0])));
+        assert!(!Constraint::ExclusiveMinFloat(-0.5)
+            .is_subset_of(&Constraint::FloatNone(vec![0.0, -1.0])));
+        assert!(Constraint::ExclusiveMinFloat(f64::MAX)
+            .is_subset_of(&Constraint::FloatOneOf(vec![f64::MAX])));
+        assert!(!Constraint::ExclusiveMinFloat(0.5)
+            .is_subset_of(&Constraint::FloatOneOf(vec![0.5, 1.5])));
+        assert!(Constraint::IntRange { min: 1, max: 10 }.is_subset_of(&lower));
+        assert!(!Constraint::IntRange { min: 0, max: 10 }.is_subset_of(&lower));
+        assert!(Constraint::IntOneOf(vec![1, 2, 3]).is_subset_of(&lower));
+        assert!(!Constraint::IntOneOf(vec![0, 1]).is_subset_of(&lower));
+        // Unclear cross-type pairs fail closed.
+        assert!(!lower.is_subset_of(&Constraint::MinInt(1)));
+        assert!(!lower.is_subset_of(&Constraint::MinLen(1)));
+        assert!(!lower.is_subset_of(&Constraint::Exact("0.6".to_string())));
+        assert!(!Constraint::ExclusiveMinFloat(f64::NAN).is_subset_of(&lower));
+    }
+
+    #[test]
+    fn exclusive_max_float_subset_tightens_only() {
+        let loose = Constraint::ExclusiveMaxFloat(10.5);
+        let tight = Constraint::ExclusiveMaxFloat(1.5);
+        assert!(tight.is_subset_of(&loose));
+        assert!(!loose.is_subset_of(&tight));
+        assert!(
+            Constraint::ExclusiveMaxFloat(0.0).is_subset_of(&Constraint::ExclusiveMaxFloat(0.0))
+        );
+        assert!(Constraint::ExclusiveMaxFloat(f64::MAX)
+            .is_subset_of(&Constraint::ExclusiveMaxFloat(f64::MAX)));
+
+        assert!(Constraint::Exact("1.4".to_string()).is_subset_of(&tight));
+        assert!(Constraint::Exact("-1".to_string()).is_subset_of(&tight));
+        assert!(!Constraint::Exact("1.5".to_string()).is_subset_of(&tight));
+        assert!(!Constraint::Exact("abc".to_string()).is_subset_of(&tight));
+        assert!(Constraint::OneOf(vec!["0".to_string(), "1.4".to_string()]).is_subset_of(&tight));
+        assert!(!Constraint::OneOf(vec!["0".to_string(), "1.5".to_string()]).is_subset_of(&tight));
+
+        assert!(Constraint::ExclusiveMaxFloat(10.5).is_subset_of(&Constraint::MaxFloat(10.5)));
+        assert!(!Constraint::MaxFloat(10.5).is_subset_of(&Constraint::ExclusiveMaxFloat(10.5)));
+        assert!(Constraint::MaxFloat(10.0).is_subset_of(&Constraint::ExclusiveMaxFloat(10.5)));
+
+        assert!(Constraint::FloatRange { min: 0.0, max: 1.4 }.is_subset_of(&tight));
+        assert!(!Constraint::FloatRange { min: 0.0, max: 1.5 }.is_subset_of(&tight));
+        assert!(
+            Constraint::ExclusiveMaxFloat(1.5).is_subset_of(&Constraint::FloatRange {
+                min: f64::MIN,
+                max: 10.5
+            })
+        );
+        assert!(
+            !Constraint::ExclusiveMaxFloat(1.5).is_subset_of(&Constraint::FloatRange {
+                min: 0.0,
+                max: 10.5
+            })
+        );
+        assert!(Constraint::FloatOneOf(vec![-1.0, 0.0, 1.4]).is_subset_of(&tight));
+        assert!(!Constraint::FloatOneOf(vec![1.5, 0.0]).is_subset_of(&tight));
+        assert!(Constraint::ExclusiveMaxFloat(f64::MIN)
+            .is_subset_of(&Constraint::FloatOneOf(vec![f64::MIN])));
+        assert!(!Constraint::ExclusiveMaxFloat(1.5)
+            .is_subset_of(&Constraint::FloatOneOf(vec![0.0, 1.5])));
+        assert!(
+            Constraint::ExclusiveMaxFloat(0.0).is_subset_of(&Constraint::FloatNone(vec![1.0, 2.0]))
+        );
+        assert!(
+            Constraint::ExclusiveMaxFloat(1.0).is_subset_of(&Constraint::FloatNone(vec![1.0, 2.0]))
+        );
+        assert!(!Constraint::ExclusiveMaxFloat(2.0)
+            .is_subset_of(&Constraint::FloatNone(vec![1.0, 2.0])));
+        assert!(Constraint::IntRange { min: -5, max: 1 }.is_subset_of(&tight));
+        assert!(!Constraint::IntRange { min: 0, max: 2 }.is_subset_of(&tight));
+        assert!(Constraint::IntOneOf(vec![-1, 0, 1]).is_subset_of(&tight));
+        assert!(!Constraint::IntOneOf(vec![1, 2]).is_subset_of(&tight));
+        // Unclear cross-type pairs fail closed.
+        assert!(!tight.is_subset_of(&Constraint::MaxInt(10)));
+        assert!(!tight.is_subset_of(&Constraint::MaxLen(10)));
+        assert!(!tight.is_subset_of(&Constraint::Exact("1.4".to_string())));
+        assert!(!Constraint::ExclusiveMaxFloat(f64::NAN).is_subset_of(&tight));
+    }
+
+    #[test]
     fn json_exact() {
         let c = Constraint::Exact("hello".to_string());
         let json = serde_json::to_string(&c).unwrap();
@@ -6373,6 +6581,36 @@ mod tests {
         let from_cli: Constraint =
             serde_json::from_str(r#"{"type":"max_float","value":0.0}"#).unwrap();
         assert_eq!(from_cli, Constraint::MaxFloat(0.0));
+    }
+
+    #[test]
+    fn json_exclusive_min_float() {
+        let c = Constraint::ExclusiveMinFloat(0.5);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"exclusive_min_float\""));
+        assert!(json.contains("0.5"));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"exclusive_min_float","value":-1.0}"#).unwrap();
+        assert_eq!(from_cli, Constraint::ExclusiveMinFloat(-1.0));
+    }
+
+    #[test]
+    fn json_exclusive_max_float() {
+        let c = Constraint::ExclusiveMaxFloat(10.5);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"exclusive_max_float\""));
+        assert!(json.contains("10.5"));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"exclusive_max_float","value":0.0}"#).unwrap();
+        assert_eq!(from_cli, Constraint::ExclusiveMaxFloat(0.0));
     }
 
     #[test]
