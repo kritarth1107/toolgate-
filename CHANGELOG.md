@@ -5,6 +5,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.39.0] - 2026-10-15
+
+### Added
+- **`Constraint::ExclusiveMinInt(i64)`**: value must parse as an `i64` that is strictly greater than N
+- **`Constraint::ExclusiveMaxInt(i64)`**: value must parse as an `i64` that is strictly less than N
+- CLI JSON forms `{"type":"exclusive_min_int","value":1}` and `{"type":"exclusive_max_int","value":100}` on `tg mint`, `tg attenuate`, and `tg check-call`
+
+### Changed
+- Canonical and wire constraint type tags: Exact=0, OneOf=1, Prefix=2, MaxLen=3, IntRange=4, Suffix=5, Contains=6, MinLen=7, Matches=8, NotEquals=9, NotOneOf=10, NotContains=11, NotPrefix=12, NotSuffix=13, NotMatches=14, All=15, Any=16, Not=17, FloatRange=18, LenRange=19, CharLenRange=20, PrefixOneOf=21, SuffixOneOf=22, ContainsAny=23, ContainsNone=24, MatchesAny=25, MatchesNone=26, PrefixNone=27, SuffixNone=28, IntOneOf=29, IntNone=30, FloatOneOf=31, FloatNone=32, LenOneOf=33, LenNone=34, CharLenOneOf=35, CharLenNone=36, MinCharLen=37, MaxCharLen=38, MinInt=39, MaxInt=40, MinFloat=41, MaxFloat=42, ExclusiveMinFloat=43, ExclusiveMaxFloat=44, ExclusiveMinInt=45, ExclusiveMaxInt=46
+- Tokens without the new types still encode identically to 0.38.0
+
+### Notes
+- Stored and encoded as a single big-endian i64 (same layout as one IntRange bound)
+- Attenuation only tightens: a new ExclusiveMinInt must be ≥ the old exclusive minimum; a new ExclusiveMaxInt must be ≤ the old exclusive maximum
+- Exact may replace ExclusiveMinInt/ExclusiveMaxInt when the exact value parses to an integer strictly past the bound
+- OneOf may replace ExclusiveMinInt/ExclusiveMaxInt when every allowed value parses and satisfies the same rule
+- ExclusiveMinInt may replace MinInt at the same or higher bound (open is a subset of closed); MinInt may replace ExclusiveMinInt only when the inclusive min is strictly greater than the exclusive bound
+- ExclusiveMaxInt may replace MaxInt at the same or lower bound; MaxInt may replace ExclusiveMaxInt only when the inclusive max is strictly less than the exclusive bound
+- IntRange may replace ExclusiveMinInt when the inclusive min is strictly greater than the exclusive bound; IntRange may replace ExclusiveMaxInt when the inclusive max is strictly less than the exclusive bound
+- ExclusiveMinInt may replace IntRange when the new min is `>=` the old min and the old max is still respected (`i64::MAX`); ExclusiveMaxInt may replace IntRange when the old min is `i64::MIN` and the new max is `<=` the old max
+- IntOneOf may replace ExclusiveMinInt/ExclusiveMaxInt when every listed integer is strictly past the exclusive bound
+- ExclusiveMinInt may replace IntNone when no denied integer is still allowed by the open minimum; ExclusiveMaxInt may replace IntNone when no denied integer is still allowed by the open maximum
+- ExclusiveMinInt(`i64::MAX`) matches no integer and may replace IntOneOf (vacuous subset); ExclusiveMaxInt(`i64::MIN`) matches no integer and may replace IntOneOf the same way
+- Values that do not parse as `i64` fail closed at check time (same spirit as IntRange)
+- `ExclusiveMinInt(i64::MIN)` is valid and accepts every parseable integer except `i64::MIN`
+- `ExclusiveMaxInt(i64::MAX)` is valid and accepts every parseable integer except `i64::MAX`
+- Unclear cross-type pairs fail closed
+
 ## [0.38.0] - 2026-10-15
 
 ### Added
