@@ -837,6 +837,18 @@ impl Constraint {
                 a.parse::<i64>().map(|n| n <= *max).unwrap_or(false)
             }
 
+            // Exact is subset of MinFloat if the value parses to a
+            // finite f64 that meets the minimum.
+            (Constraint::Exact(a), Constraint::MinFloat(min)) => {
+                min.is_finite() && parse_finite_f64(a).map(|n| n >= *min).unwrap_or(false)
+            }
+
+            // Exact is subset of MaxFloat if the value parses to a
+            // finite f64 that is within the maximum.
+            (Constraint::Exact(a), Constraint::MaxFloat(max)) => {
+                max.is_finite() && parse_finite_f64(a).map(|n| n <= *max).unwrap_or(false)
+            }
+
             // Exact is subset of IntOneOf if the value parses to a listed int.
             (Constraint::Exact(a), Constraint::IntOneOf(allowed)) => {
                 int_list_is_valid(allowed)
@@ -1078,6 +1090,26 @@ impl Constraint {
                     && values
                         .iter()
                         .all(|v| v.parse::<i64>().map(|n| n <= *max).unwrap_or(false))
+            }
+
+            // OneOf is subset of MinFloat if every allowed value
+            // parses as a finite f64 that meets the minimum.
+            (Constraint::OneOf(values), Constraint::MinFloat(min)) => {
+                min.is_finite()
+                    && !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|v| parse_finite_f64(v).map(|n| n >= *min).unwrap_or(false))
+            }
+
+            // OneOf is subset of MaxFloat if every allowed value
+            // parses as a finite f64 that is within the maximum.
+            (Constraint::OneOf(values), Constraint::MaxFloat(max)) => {
+                max.is_finite()
+                    && !values.is_empty()
+                    && values
+                        .iter()
+                        .all(|v| parse_finite_f64(v).map(|n| n <= *max).unwrap_or(false))
             }
 
             // OneOf is subset of IntOneOf if every allowed value parses
@@ -1591,6 +1623,183 @@ impl Constraint {
             // `[min, i64::MAX]` is listed. Huge ranges fail closed.
             (Constraint::MinInt(new), Constraint::IntOneOf(allowed)) => {
                 int_range_subset_of_one_of(*new, i64::MAX, allowed)
+            }
+
+            // MinFloat is subset of MinFloat if new min >= old min
+            // (raise only). Non-finite bounds fail closed.
+            (Constraint::MinFloat(new), Constraint::MinFloat(old)) => {
+                new.is_finite() && old.is_finite() && new >= old
+            }
+
+            // MaxFloat is subset of MaxFloat if new max <= old max
+            // (lower only). Non-finite bounds fail closed.
+            (Constraint::MaxFloat(new), Constraint::MaxFloat(old)) => {
+                new.is_finite() && old.is_finite() && new <= old
+            }
+
+            // FloatRange may replace MinFloat by adding an upper bound
+            // while keeping or raising the minimum.
+            (
+                Constraint::FloatRange {
+                    min: new_min,
+                    max: new_max,
+                },
+                Constraint::MinFloat(old),
+            ) => float_range_is_valid(*new_min, *new_max) && old.is_finite() && *new_min >= *old,
+
+            // FloatRange may replace MaxFloat by adding a lower bound
+            // while keeping or lowering the maximum.
+            (
+                Constraint::FloatRange {
+                    min: new_min,
+                    max: new_max,
+                },
+                Constraint::MaxFloat(old),
+            ) => float_range_is_valid(*new_min, *new_max) && old.is_finite() && *new_max <= *old,
+
+            // MinFloat may replace FloatRange when the new min is at
+            // least the old min and the old max is still respected
+            // (only when the old max is f64::MAX).
+            (
+                Constraint::MinFloat(new),
+                Constraint::FloatRange {
+                    min: old_min,
+                    max: old_max,
+                },
+            ) => {
+                new.is_finite()
+                    && float_range_is_valid(*old_min, *old_max)
+                    && *new >= *old_min
+                    && *old_max == f64::MAX
+            }
+
+            // MaxFloat may replace FloatRange when the old min is
+            // f64::MIN (still respected by MaxFloat) and the new max
+            // is within the old max.
+            (
+                Constraint::MaxFloat(new),
+                Constraint::FloatRange {
+                    min: old_min,
+                    max: old_max,
+                },
+            ) => {
+                new.is_finite()
+                    && float_range_is_valid(*old_min, *old_max)
+                    && *old_min == f64::MIN
+                    && *new <= *old_max
+            }
+
+            // FloatOneOf may replace MinFloat when every listed float
+            // satisfies the old minimum.
+            (Constraint::FloatOneOf(allowed), Constraint::MinFloat(old)) => {
+                old.is_finite()
+                    && float_list_is_valid(allowed)
+                    && allowed.iter().all(|&n| n >= *old)
+            }
+
+            // FloatOneOf may replace MaxFloat when every listed float
+            // satisfies the old maximum.
+            (Constraint::FloatOneOf(allowed), Constraint::MaxFloat(old)) => {
+                old.is_finite()
+                    && float_list_is_valid(allowed)
+                    && allowed.iter().all(|&n| n <= *old)
+            }
+
+            // MinFloat is subset of FloatNone when no denied float is
+            // still allowed by the new minimum.
+            (Constraint::MinFloat(new), Constraint::FloatNone(denied)) => {
+                new.is_finite() && float_list_is_valid(denied) && denied.iter().all(|&n| n < *new)
+            }
+
+            // MaxFloat is subset of FloatNone when no denied float is
+            // still allowed by the new maximum.
+            (Constraint::MaxFloat(new), Constraint::FloatNone(denied)) => {
+                new.is_finite() && float_list_is_valid(denied) && denied.iter().all(|&n| n > *new)
+            }
+
+            // MaxFloat is subset of FloatOneOf when every finite float
+            // in `[f64::MIN, max]` is listed. Huge ranges fail closed;
+            // only the single smallest finite value can succeed.
+            (Constraint::MaxFloat(new), Constraint::FloatOneOf(allowed)) => {
+                new.is_finite()
+                    && *new == f64::MIN
+                    && float_list_is_valid(allowed)
+                    && float_list_contains(allowed, *new)
+            }
+
+            // MinFloat is subset of FloatOneOf when every finite float
+            // in `[min, f64::MAX]` is listed. Huge ranges fail closed;
+            // only the single largest finite value can succeed.
+            (Constraint::MinFloat(new), Constraint::FloatOneOf(allowed)) => {
+                new.is_finite()
+                    && *new == f64::MAX
+                    && float_list_is_valid(allowed)
+                    && float_list_contains(allowed, *new)
+            }
+
+            // IntRange may replace MinFloat when every integer in the
+            // new range converts exactly to f64 and the lower endpoint
+            // meets the old minimum. Endpoints that cannot be
+            // represented exactly in f64 fail closed.
+            (
+                Constraint::IntRange {
+                    min: new_min,
+                    max: new_max,
+                },
+                Constraint::MinFloat(old),
+            ) => {
+                if !old.is_finite() || new_min > new_max {
+                    false
+                } else {
+                    match (i64_as_exact_f64(*new_min), i64_as_exact_f64(*new_max)) {
+                        (Some(lo), Some(_)) => lo >= *old,
+                        _ => false,
+                    }
+                }
+            }
+
+            // IntRange may replace MaxFloat when every integer in the
+            // new range converts exactly to f64 and the upper endpoint
+            // is within the old maximum.
+            (
+                Constraint::IntRange {
+                    min: new_min,
+                    max: new_max,
+                },
+                Constraint::MaxFloat(old),
+            ) => {
+                if !old.is_finite() || new_min > new_max {
+                    false
+                } else {
+                    match (i64_as_exact_f64(*new_min), i64_as_exact_f64(*new_max)) {
+                        (Some(_), Some(hi)) => hi <= *old,
+                        _ => false,
+                    }
+                }
+            }
+
+            // IntOneOf may replace MinFloat when every listed integer
+            // converts exactly to f64 and satisfies the old minimum.
+            (Constraint::IntOneOf(allowed), Constraint::MinFloat(old)) => {
+                old.is_finite()
+                    && int_list_is_valid(allowed)
+                    && allowed.iter().all(|&n| {
+                        i64_as_exact_f64(n)
+                            .map(|f| f >= *old)
+                            .unwrap_or(false)
+                    })
+            }
+
+            // IntOneOf may replace MaxFloat when every listed integer
+            // converts exactly to f64 and satisfies the old maximum.
+            (Constraint::IntOneOf(allowed), Constraint::MaxFloat(old)) => {
+                old.is_finite()
+                    && int_list_is_valid(allowed)
+                    && allowed.iter().all(|&n| {
+                        i64_as_exact_f64(n)
+                            .map(|f| f <= *old)
+                            .unwrap_or(false)
+                    })
             }
 
             // FloatOneOf → FloatOneOf: every remaining float must already
