@@ -6329,6 +6329,205 @@ mod tests {
     }
 
     #[test]
+    fn attenuation_can_raise_exclusive_min_int() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("limit".to_string(), Constraint::ExclusiveMinInt(1));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut higher: BTreeMap<String, Constraint> = BTreeMap::new();
+        higher.insert("limit".to_string(), Constraint::ExclusiveMinInt(10));
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(higher))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("limit"),
+            Some(&Constraint::ExclusiveMinInt(10))
+        );
+        assert!(attenuated.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn attenuation_cannot_lower_exclusive_min_int() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("limit".to_string(), Constraint::ExclusiveMinInt(10));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut lower: BTreeMap<String, Constraint> = BTreeMap::new();
+        lower.insert("limit".to_string(), Constraint::ExclusiveMinInt(1));
+
+        let result = token.attenuate_with_constraints(SECRET, None, None, Some(lower));
+        assert_eq!(result, Err(TokenError::AttenuationWidens));
+    }
+
+    #[test]
+    fn attenuation_exact_can_replace_exclusive_min_int() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("limit".to_string(), Constraint::ExclusiveMinInt(1));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut exact: BTreeMap<String, Constraint> = BTreeMap::new();
+        exact.insert("limit".to_string(), Constraint::Exact("02".to_string()));
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(exact))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("limit"),
+            Some(&Constraint::Exact("02".to_string()))
+        );
+    }
+
+    #[test]
+    fn attenuation_cannot_replace_exclusive_min_int_with_bound() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("limit".to_string(), Constraint::ExclusiveMinInt(1));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut exact: BTreeMap<String, Constraint> = BTreeMap::new();
+        exact.insert("limit".to_string(), Constraint::Exact("1".to_string()));
+
+        let result = token.attenuate_with_constraints(SECRET, None, None, Some(exact));
+        assert_eq!(result, Err(TokenError::AttenuationWidens));
+    }
+
+    #[test]
+    fn attenuation_can_lower_exclusive_max_int() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("limit".to_string(), Constraint::ExclusiveMaxInt(100));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut tighter: BTreeMap<String, Constraint> = BTreeMap::new();
+        tighter.insert("limit".to_string(), Constraint::ExclusiveMaxInt(10));
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(tighter))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("limit"),
+            Some(&Constraint::ExclusiveMaxInt(10))
+        );
+    }
+
+    #[test]
+    fn attenuation_cannot_raise_exclusive_max_int() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("limit".to_string(), Constraint::ExclusiveMaxInt(10));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut wider: BTreeMap<String, Constraint> = BTreeMap::new();
+        wider.insert("limit".to_string(), Constraint::ExclusiveMaxInt(100));
+
+        let result = token.attenuate_with_constraints(SECRET, None, None, Some(wider));
+        assert_eq!(result, Err(TokenError::AttenuationWidens));
+    }
+
+    #[test]
+    fn attenuation_int_range_can_replace_exclusive_min_int() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("limit".to_string(), Constraint::ExclusiveMinInt(1));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut ranged: BTreeMap<String, Constraint> = BTreeMap::new();
+        ranged.insert(
+            "limit".to_string(),
+            Constraint::IntRange { min: 2, max: 100 },
+        );
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(ranged))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("limit"),
+            Some(&Constraint::IntRange { min: 2, max: 100 })
+        );
+    }
+
+    #[test]
     fn attenuation_can_tighten_suffix() {
         use crate::constraint::Constraint;
         use std::collections::BTreeMap;
@@ -8787,6 +8986,106 @@ mod tests {
         assert!(matches!(
             result,
             Err(TokenError::ConstraintViolation { key }) if key == "score"
+        ));
+    }
+
+    #[test]
+    fn verify_call_with_args_exclusive_min_int_satisfied() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("limit".to_string(), Constraint::ExclusiveMinInt(1));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("limit".to_string(), "02".to_string());
+        assert!(token
+            .verify_call_with_args(SECRET, 1999999999, "read_file", &args, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_call_with_args_exclusive_min_int_violated() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("limit".to_string(), Constraint::ExclusiveMinInt(1));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("limit".to_string(), "1".to_string());
+        let result = token.verify_call_with_args(SECRET, 1999999999, "read_file", &args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { key }) if key == "limit"
+        ));
+    }
+
+    #[test]
+    fn verify_call_with_args_exclusive_max_int_satisfied() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("limit".to_string(), Constraint::ExclusiveMaxInt(10));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("limit".to_string(), "-1".to_string());
+        assert!(token
+            .verify_call_with_args(SECRET, 1999999999, "read_file", &args, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_call_with_args_exclusive_max_int_violated() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("limit".to_string(), Constraint::ExclusiveMaxInt(10));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("limit".to_string(), "10".to_string());
+        let result = token.verify_call_with_args(SECRET, 1999999999, "read_file", &args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { key }) if key == "limit"
         ));
     }
 
