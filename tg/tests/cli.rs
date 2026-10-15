@@ -3631,6 +3631,16 @@ fn mint_rejects_inverted_float_range() {
         "{}",
         String::from_utf8_lossy(&out.stderr)
     );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("exclusive_min_float"),
+        "invalid-range error should name exclusive_min_float: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("exclusive_max_float"),
+        "invalid-range error should name exclusive_max_float: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]

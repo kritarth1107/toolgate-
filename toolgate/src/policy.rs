@@ -155,7 +155,7 @@ impl std::fmt::Display for PolicyError {
             PolicyError::InvalidConstraintRange { tool, key } => {
                 write!(
                     f,
-                    "invalid float_range, min_float, max_float, float_one_of, float_none, len_range, or char_len_range for '{key}' on tool '{tool}' is rejected (min <= max required; float bounds and list members must be finite)"
+                    "invalid float_range, min_float, max_float, exclusive_min_float, exclusive_max_float, float_one_of, float_none, len_range, or char_len_range for '{key}' on tool '{tool}' is rejected (min <= max required; float bounds and list members must be finite)"
                 )
             }
             PolicyError::ZeroTtl { tool: Some(tool) } => {
@@ -1918,6 +1918,56 @@ mod tests {
                 tool: "score_tool".into(),
                 key: "score".into()
             })
+        );
+    }
+
+    #[test]
+    fn validate_non_finite_exclusive_min_float_is_rejected() {
+        let mut policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "score_tool",
+                    "arg_keys": ["score"],
+                    "constraints": {
+                        "score": {"type": "exclusive_min_float", "value": 1.0}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        policy.tools[0]
+            .constraints
+            .as_mut()
+            .unwrap()
+            .insert("score".to_string(), Constraint::ExclusiveMinFloat(f64::NAN));
+        assert_eq!(
+            policy.validate(),
+            Err(PolicyError::InvalidConstraintRange {
+                tool: "score_tool".into(),
+                key: "score".into()
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_constraint_range_message_names_exclusive_float_bounds() {
+        let err = PolicyError::InvalidConstraintRange {
+            tool: "score_tool".into(),
+            key: "score".into(),
+        };
+        let message = err.to_string();
+        assert!(
+            message.contains("exclusive_min_float"),
+            "missing exclusive_min_float: {message}"
+        );
+        assert!(
+            message.contains("exclusive_max_float"),
+            "missing exclusive_max_float: {message}"
+        );
+        assert!(
+            message.contains("float bounds and list members must be finite"),
+            "missing finite-bound guidance: {message}"
         );
     }
 
