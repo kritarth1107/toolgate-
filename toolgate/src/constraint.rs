@@ -939,6 +939,14 @@ impl Constraint {
             // Exact is subset of MinLen if the value length meets the minimum
             (Constraint::Exact(a), Constraint::MinLen(min)) => a.len() >= *min,
 
+            // Exact is subset of ExclusiveMinLen if the value length
+            // is strictly greater than the bound.
+            (Constraint::Exact(a), Constraint::ExclusiveMinLen(min)) => a.len() > *min,
+
+            // Exact is subset of ExclusiveMaxLen if the value length
+            // is strictly less than the bound.
+            (Constraint::Exact(a), Constraint::ExclusiveMaxLen(max)) => a.len() < *max,
+
             // Exact is subset of Matches if the exact value satisfies the glob
             (Constraint::Exact(a), Constraint::Matches(pattern)) => glob_match(pattern, a),
 
@@ -1211,6 +1219,18 @@ impl Constraint {
             // OneOf is subset of MinLen if all values meet the minimum
             (Constraint::OneOf(values), Constraint::MinLen(min)) => {
                 values.iter().all(|v| v.len() >= *min)
+            }
+
+            // OneOf is subset of ExclusiveMinLen if every allowed
+            // value's byte length is strictly greater than the bound.
+            (Constraint::OneOf(values), Constraint::ExclusiveMinLen(min)) => {
+                !values.is_empty() && values.iter().all(|v| v.len() > *min)
+            }
+
+            // OneOf is subset of ExclusiveMaxLen if every allowed
+            // value's byte length is strictly less than the bound.
+            (Constraint::OneOf(values), Constraint::ExclusiveMaxLen(max)) => {
+                !values.is_empty() && values.iter().all(|v| v.len() < *max)
             }
 
             // OneOf is subset of IntRange if all values parse and are in range
@@ -2569,6 +2589,119 @@ impl Constraint {
             // `[0, max]` is listed. Overflowing ranges fail closed.
             (Constraint::MaxLen(new), Constraint::LenOneOf(allowed)) => {
                 len_range_subset_of_one_of(0, *new, allowed)
+            }
+
+            // ExclusiveMinLen is subset of ExclusiveMinLen if new
+            // min >= old min (raise only).
+            (Constraint::ExclusiveMinLen(new), Constraint::ExclusiveMinLen(old)) => new >= old,
+
+            // ExclusiveMaxLen is subset of ExclusiveMaxLen if new
+            // max <= old max (lower only).
+            (Constraint::ExclusiveMaxLen(new), Constraint::ExclusiveMaxLen(old)) => new <= old,
+
+            // ExclusiveMinLen is subset of MinLen when the open
+            // bound is at least the inclusive minimum: (new, ∞) ⊆
+            // [old, ∞) iff new >= old.
+            (Constraint::ExclusiveMinLen(new), Constraint::MinLen(old)) => new >= old,
+
+            // MinLen is subset of ExclusiveMinLen only when the
+            // inclusive min sits strictly above the exclusive bound:
+            // [new, ∞) ⊆ (old, ∞) iff new > old.
+            (Constraint::MinLen(new), Constraint::ExclusiveMinLen(old)) => new > old,
+
+            // ExclusiveMaxLen is subset of MaxLen when the open
+            // bound is within the inclusive maximum: [0, new) ⊆
+            // [0, old] iff new <= old.
+            (Constraint::ExclusiveMaxLen(new), Constraint::MaxLen(old)) => new <= old,
+
+            // MaxLen is subset of ExclusiveMaxLen only when the
+            // inclusive max sits strictly below the exclusive bound:
+            // [0, new] ⊆ [0, old) iff new < old.
+            (Constraint::MaxLen(new), Constraint::ExclusiveMaxLen(old)) => new < old,
+
+            // LenRange may replace ExclusiveMinLen by adding an
+            // upper bound when the inclusive min is strictly above
+            // the exclusive bound (the range includes its min).
+            (
+                Constraint::LenRange {
+                    min: new_min,
+                    max: new_max,
+                },
+                Constraint::ExclusiveMinLen(old),
+            ) => len_range_is_valid(*new_min, *new_max) && *new_min > *old,
+
+            // LenRange may replace ExclusiveMaxLen by adding a
+            // lower bound when the inclusive max is strictly below
+            // the exclusive bound.
+            (
+                Constraint::LenRange {
+                    min: new_min,
+                    max: new_max,
+                },
+                Constraint::ExclusiveMaxLen(old),
+            ) => len_range_is_valid(*new_min, *new_max) && *new_max < *old,
+
+            // ExclusiveMinLen may replace LenRange when the new
+            // min is at least the old min and the old max is still
+            // respected (only when the old max is usize::MAX).
+            (
+                Constraint::ExclusiveMinLen(new),
+                Constraint::LenRange {
+                    min: old_min,
+                    max: old_max,
+                },
+            ) => {
+                len_range_is_valid(*old_min, *old_max) && *new >= *old_min && *old_max == usize::MAX
+            }
+
+            // ExclusiveMaxLen may replace LenRange when the old
+            // min is 0 (still respected) and the new max is within
+            // the old max.
+            (
+                Constraint::ExclusiveMaxLen(new),
+                Constraint::LenRange {
+                    min: old_min,
+                    max: old_max,
+                },
+            ) => len_range_is_valid(*old_min, *old_max) && *old_min == 0 && *new <= *old_max,
+
+            // LenOneOf may replace ExclusiveMinLen when every
+            // listed length is strictly greater than the old bound.
+            (Constraint::LenOneOf(allowed), Constraint::ExclusiveMinLen(old)) => {
+                usize_list_is_valid(allowed) && allowed.iter().all(|&n| n > *old)
+            }
+
+            // LenOneOf may replace ExclusiveMaxLen when every
+            // listed length is strictly less than the old bound.
+            (Constraint::LenOneOf(allowed), Constraint::ExclusiveMaxLen(old)) => {
+                usize_list_is_valid(allowed) && allowed.iter().all(|&n| n < *old)
+            }
+
+            // ExclusiveMinLen is subset of LenNone when no denied
+            // length is still allowed by the open minimum (all
+            // denied n <= new).
+            (Constraint::ExclusiveMinLen(new), Constraint::LenNone(denied)) => {
+                usize_list_is_valid(denied) && denied.iter().all(|&n| n <= *new)
+            }
+
+            // ExclusiveMaxLen is subset of LenNone when no denied
+            // length is still allowed by the open maximum (all
+            // denied n >= new).
+            (Constraint::ExclusiveMaxLen(new), Constraint::LenNone(denied)) => {
+                usize_list_is_valid(denied) && denied.iter().all(|&n| n >= *new)
+            }
+
+            // ExclusiveMinLen is subset of LenOneOf when the open
+            // range matches nothing (new == usize::MAX; vacuous
+            // subset). Huge ranges fail closed.
+            (Constraint::ExclusiveMinLen(new), Constraint::LenOneOf(allowed)) => {
+                *new == usize::MAX && usize_list_is_valid(allowed)
+            }
+
+            // ExclusiveMaxLen is subset of LenOneOf when the open
+            // range matches nothing (new == 0; vacuous subset).
+            (Constraint::ExclusiveMaxLen(new), Constraint::LenOneOf(allowed)) => {
+                *new == 0 && usize_list_is_valid(allowed)
             }
 
             // CharLenRange is subset of CharLenRange if the new interval
