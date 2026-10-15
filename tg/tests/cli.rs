@@ -7682,6 +7682,254 @@ fn mint_from_policy_accepts_exclusive_min_int() {
     let _ = fs::remove_file(&path);
 }
 
+fn mint_exclusive_min_len_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["query"],
+            "expiry": 2000000000,
+            "constraints": {
+                "query": {"type": "exclusive_min_len", "value": 0}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+fn mint_exclusive_max_len_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["query"],
+            "expiry": 2000000000,
+            "constraints": {
+                "query": {"type": "exclusive_max_len", "value": 3}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+#[test]
+fn mint_accepts_exclusive_min_len_and_exclusive_max_len() {
+    let min = mint_exclusive_min_len_token();
+    assert_eq!(min["constraints"]["query"]["type"], "exclusive_min_len");
+    assert_eq!(min["constraints"]["query"]["value"], 0);
+
+    let max = mint_exclusive_max_len_token();
+    assert_eq!(max["constraints"]["query"]["type"], "exclusive_max_len");
+    assert_eq!(max["constraints"]["query"]["value"], 3);
+}
+
+#[test]
+fn check_call_enforces_exclusive_min_len() {
+    let token = mint_exclusive_min_len_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"query": "ab"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"query": ""},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn check_call_enforces_exclusive_max_len() {
+    let token = mint_exclusive_max_len_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"query": "ab"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"query": "abc"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn attenuate_can_raise_exclusive_min_len() {
+    let token = mint_exclusive_min_len_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "query": {"type": "exclusive_min_len", "value": 3}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(
+        attenuated["constraints"]["query"]["type"],
+        "exclusive_min_len"
+    );
+    assert_eq!(attenuated["constraints"]["query"]["value"], 3);
+}
+
+#[test]
+fn attenuate_rejects_lowered_exclusive_min_len() {
+    let token = run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["query"],
+            "expiry": 2000000000,
+            "constraints": {
+                "query": {"type": "exclusive_min_len", "value": 3}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token");
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"query": {"type": "exclusive_min_len", "value": 0}}
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("attenuation"),
+        "looser exclusive_min_len should fail closed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn attenuate_can_lower_exclusive_max_len() {
+    let token = mint_exclusive_max_len_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "query": {"type": "exclusive_max_len", "value": 2}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(
+        attenuated["constraints"]["query"]["type"],
+        "exclusive_max_len"
+    );
+    assert_eq!(attenuated["constraints"]["query"]["value"], 2);
+}
+
+#[test]
+fn attenuate_rejects_wider_exclusive_max_len() {
+    let token = mint_exclusive_max_len_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"query": {"type": "exclusive_max_len", "value": 16}}
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("attenuation"),
+        "wider exclusive_max_len should fail closed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn mint_from_policy_accepts_exclusive_min_len() {
+    let path = write_temp_policy(
+        "exclusive-min-len-grant",
+        r#"{
+            "version": "1",
+            "default_ttl_seconds": 60,
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["open_query", "open_body"],
+                "constraints": {
+                    "open_query": {"type": "exclusive_min_len", "value": 0},
+                    "open_body": {"type": "exclusive_max_len", "value": 256}
+                }
+            }]
+        }"#,
+    );
+    let out = run_json(
+        &[
+            "mint",
+            "--policy",
+            path.to_str().unwrap(),
+            "--tool",
+            "read_file",
+        ],
+        &json!({
+            "secret": "cli-secret",
+            "current_time": 1700000000
+        }),
+    );
+    let token = &out["token"];
+    assert_eq!(token["tool_name"], "read_file");
+    assert_eq!(
+        token["constraints"]["open_query"]["type"],
+        "exclusive_min_len"
+    );
+    assert_eq!(
+        token["constraints"]["open_body"]["type"],
+        "exclusive_max_len"
+    );
+    let _ = fs::remove_file(&path);
+}
+
 fn mint_required_path_token() -> Value {
     run_json(
         &["mint"],
