@@ -7,7 +7,7 @@
   "tools": [
     {
       "name": "read_file",
-      "arg_keys": ["path", "roots", "limit", "score", "floor", "ceiling", "query", "title", "ext", "note", "memo", "file", "skip", "dest", "name", "mode", "port", "choice", "bias", "pin", "label", "caption", "handle", "blurb", "nick", "retries", "cap"],
+      "arg_keys": ["path", "roots", "limit", "score", "floor", "ceiling", "open_floor", "open_ceiling", "query", "title", "ext", "note", "memo", "file", "skip", "dest", "name", "mode", "port", "choice", "bias", "pin", "label", "caption", "handle", "blurb", "nick", "retries", "cap"],
       "required_keys": ["path"],
       "constraints": {
         "path": { "type": "prefix", "value": "/tmp/" },
@@ -16,6 +16,8 @@
         "score": { "type": "float_range", "value": { "min": 0.5, "max": 10.5 } },
         "floor": { "type": "min_float", "value": 0.5 },
         "ceiling": { "type": "max_float", "value": 10.5 },
+        "open_floor": { "type": "exclusive_min_float", "value": 0.5 },
+        "open_ceiling": { "type": "exclusive_max_float", "value": 10.5 },
         "query": { "type": "len_range", "value": { "min": 1, "max": 16 } },
         "title": { "type": "char_len_range", "value": { "min": 1, "max": 16 } },
         "ext": { "type": "suffix_one_of", "value": [".txt", ".md"] },
