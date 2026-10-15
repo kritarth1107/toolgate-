@@ -4500,6 +4500,80 @@ mod tests {
     }
 
     #[test]
+    fn exclusive_min_len_check() {
+        let c = Constraint::ExclusiveMinLen(0);
+        assert!(!c.check(""));
+        assert!(c.check("a"));
+        assert!(c.check("é"));
+        assert!(c.check("ab"));
+        assert!(!Constraint::ExclusiveMinLen(1).check("a"));
+        assert!(Constraint::ExclusiveMinLen(1).check("ab"));
+        assert!(Constraint::ExclusiveMinLen(1).check("é"));
+        assert!(!Constraint::ExclusiveMinLen(2).check("é"));
+        assert!(!Constraint::ExclusiveMinLen(usize::MAX).check(""));
+        assert!(!Constraint::ExclusiveMinLen(usize::MAX).check("abc"));
+    }
+
+    #[test]
+    fn exclusive_max_len_check() {
+        let c = Constraint::ExclusiveMaxLen(3);
+        assert!(c.check(""));
+        assert!(c.check("ab"));
+        assert!(!c.check("abc"));
+        assert!(!c.check("abcd"));
+        assert!(Constraint::ExclusiveMaxLen(2).check("é"));
+        assert!(!Constraint::ExclusiveMaxLen(2).check("abc"));
+        assert!(!Constraint::ExclusiveMaxLen(0).check(""));
+        assert!(!Constraint::ExclusiveMaxLen(0).check("a"));
+        assert!(Constraint::ExclusiveMaxLen(usize::MAX).check(""));
+        assert!(Constraint::ExclusiveMaxLen(usize::MAX).check("abc"));
+    }
+
+    #[test]
+    fn exclusive_len_check_matches_strict_inequality() {
+        let bounds = [0, 1, 2, 3, 8, usize::MAX];
+        let texts = ["", "a", "ab", "abc", "é", "hello"];
+        for bound in bounds {
+            let min = Constraint::ExclusiveMinLen(bound);
+            let max = Constraint::ExclusiveMaxLen(bound);
+            for text in texts {
+                assert_eq!(
+                    min.check(text),
+                    text.len() > bound,
+                    "ExclusiveMinLen({bound}) vs {text:?}"
+                );
+                assert_eq!(
+                    max.check(text),
+                    text.len() < bound,
+                    "ExclusiveMaxLen({bound}) vs {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exclusive_len_is_open_subset_of_closed() {
+        for bound in [0, 1, 8, usize::MAX] {
+            assert!(
+                Constraint::ExclusiveMinLen(bound).is_subset_of(&Constraint::MinLen(bound)),
+                "ExclusiveMinLen({bound}) should be a subset of MinLen({bound})"
+            );
+            assert!(
+                Constraint::ExclusiveMaxLen(bound).is_subset_of(&Constraint::MaxLen(bound)),
+                "ExclusiveMaxLen({bound}) should be a subset of MaxLen({bound})"
+            );
+            assert!(
+                !Constraint::MinLen(bound).is_subset_of(&Constraint::ExclusiveMinLen(bound)),
+                "MinLen({bound}) should not be a subset of ExclusiveMinLen({bound})"
+            );
+            assert!(
+                !Constraint::MaxLen(bound).is_subset_of(&Constraint::ExclusiveMaxLen(bound)),
+                "MaxLen({bound}) should not be a subset of ExclusiveMaxLen({bound})"
+            );
+        }
+    }
+
+    #[test]
     fn suffix_check() {
         let c = Constraint::Suffix(".txt".to_string());
         assert!(c.check("notes.txt"));
@@ -6689,6 +6763,92 @@ mod tests {
     }
 
     #[test]
+    fn exclusive_min_len_subset_tightens_only() {
+        let lower = Constraint::ExclusiveMinLen(0);
+        let higher = Constraint::ExclusiveMinLen(3);
+        assert!(higher.is_subset_of(&lower));
+        assert!(!lower.is_subset_of(&higher));
+        assert!(Constraint::ExclusiveMinLen(0).is_subset_of(&Constraint::ExclusiveMinLen(0)));
+        assert!(Constraint::ExclusiveMinLen(usize::MAX)
+            .is_subset_of(&Constraint::ExclusiveMinLen(usize::MAX)));
+
+        assert!(Constraint::Exact("ab".to_string()).is_subset_of(&lower));
+        assert!(!Constraint::Exact(String::new()).is_subset_of(&lower));
+        assert!(Constraint::Exact("é".to_string()).is_subset_of(&Constraint::ExclusiveMinLen(1)));
+        assert!(!Constraint::Exact("a".to_string()).is_subset_of(&Constraint::ExclusiveMinLen(1)));
+        assert!(Constraint::OneOf(vec!["ab".to_string(), "é".to_string()]).is_subset_of(&lower));
+        assert!(!Constraint::OneOf(vec!["".to_string(), "a".to_string()]).is_subset_of(&lower));
+
+        assert!(Constraint::ExclusiveMinLen(0).is_subset_of(&Constraint::MinLen(0)));
+        assert!(!Constraint::MinLen(0).is_subset_of(&Constraint::ExclusiveMinLen(0)));
+        assert!(Constraint::MinLen(1).is_subset_of(&Constraint::ExclusiveMinLen(0)));
+
+        assert!(Constraint::LenRange { min: 1, max: 16 }.is_subset_of(&lower));
+        assert!(!Constraint::LenRange { min: 0, max: 16 }.is_subset_of(&lower));
+        assert!(
+            Constraint::ExclusiveMinLen(5).is_subset_of(&Constraint::LenRange {
+                min: 1,
+                max: usize::MAX
+            })
+        );
+        assert!(!Constraint::ExclusiveMinLen(5)
+            .is_subset_of(&Constraint::LenRange { min: 1, max: 16 }));
+        assert!(Constraint::LenOneOf(vec![2, 3, 4]).is_subset_of(&lower));
+        assert!(!Constraint::LenOneOf(vec![0, 2, 3]).is_subset_of(&lower));
+        assert!(Constraint::ExclusiveMinLen(1).is_subset_of(&Constraint::LenNone(vec![0, 1])));
+        assert!(!Constraint::ExclusiveMinLen(0).is_subset_of(&Constraint::LenNone(vec![0, 1])));
+        assert!(!Constraint::ExclusiveMinLen(0).is_subset_of(&Constraint::LenNone(vec![1, 2])));
+        assert!(Constraint::ExclusiveMinLen(usize::MAX)
+            .is_subset_of(&Constraint::LenOneOf(vec![usize::MAX])));
+        assert!(!Constraint::ExclusiveMinLen(1).is_subset_of(&Constraint::LenOneOf(vec![2, 3])));
+        // Unclear cross-type pairs fail closed.
+        assert!(!lower.is_subset_of(&Constraint::MinCharLen(1)));
+        assert!(!lower.is_subset_of(&Constraint::MinInt(1)));
+        assert!(!lower.is_subset_of(&Constraint::Exact("ab".to_string())));
+    }
+
+    #[test]
+    fn exclusive_max_len_subset_tightens_only() {
+        let loose = Constraint::ExclusiveMaxLen(16);
+        let tight = Constraint::ExclusiveMaxLen(3);
+        assert!(tight.is_subset_of(&loose));
+        assert!(!loose.is_subset_of(&tight));
+        assert!(Constraint::ExclusiveMaxLen(0).is_subset_of(&Constraint::ExclusiveMaxLen(0)));
+        assert!(Constraint::ExclusiveMaxLen(usize::MAX)
+            .is_subset_of(&Constraint::ExclusiveMaxLen(usize::MAX)));
+
+        assert!(Constraint::Exact("ab".to_string()).is_subset_of(&tight));
+        assert!(Constraint::Exact(String::new()).is_subset_of(&tight));
+        assert!(!Constraint::Exact("abc".to_string()).is_subset_of(&tight));
+        assert!(Constraint::Exact("é".to_string()).is_subset_of(&tight));
+        assert!(Constraint::OneOf(vec!["".to_string(), "ab".to_string()]).is_subset_of(&tight));
+        assert!(!Constraint::OneOf(vec!["ab".to_string(), "abc".to_string()]).is_subset_of(&tight));
+
+        assert!(Constraint::ExclusiveMaxLen(16).is_subset_of(&Constraint::MaxLen(16)));
+        assert!(!Constraint::MaxLen(16).is_subset_of(&Constraint::ExclusiveMaxLen(16)));
+        assert!(Constraint::MaxLen(15).is_subset_of(&Constraint::ExclusiveMaxLen(16)));
+
+        assert!(Constraint::LenRange { min: 0, max: 2 }.is_subset_of(&tight));
+        assert!(!Constraint::LenRange { min: 0, max: 3 }.is_subset_of(&tight));
+        assert!(
+            Constraint::ExclusiveMaxLen(3).is_subset_of(&Constraint::LenRange { min: 0, max: 16 })
+        );
+        assert!(!Constraint::ExclusiveMaxLen(3)
+            .is_subset_of(&Constraint::LenRange { min: 1, max: 16 }));
+        assert!(Constraint::LenOneOf(vec![0, 1, 2]).is_subset_of(&tight));
+        assert!(!Constraint::LenOneOf(vec![2, 3]).is_subset_of(&tight));
+        assert!(Constraint::ExclusiveMaxLen(0).is_subset_of(&Constraint::LenOneOf(vec![0])));
+        assert!(!Constraint::ExclusiveMaxLen(3).is_subset_of(&Constraint::LenOneOf(vec![0, 2])));
+        assert!(Constraint::ExclusiveMaxLen(0).is_subset_of(&Constraint::LenNone(vec![1, 2])));
+        assert!(Constraint::ExclusiveMaxLen(1).is_subset_of(&Constraint::LenNone(vec![1, 2])));
+        assert!(!Constraint::ExclusiveMaxLen(2).is_subset_of(&Constraint::LenNone(vec![1, 2])));
+        // Unclear cross-type pairs fail closed.
+        assert!(!tight.is_subset_of(&Constraint::MaxCharLen(3)));
+        assert!(!tight.is_subset_of(&Constraint::MaxInt(3)));
+        assert!(!tight.is_subset_of(&Constraint::Exact("ab".to_string())));
+    }
+
+    #[test]
     fn json_exact() {
         let c = Constraint::Exact("hello".to_string());
         let json = serde_json::to_string(&c).unwrap();
@@ -7192,6 +7352,36 @@ mod tests {
         let from_cli: Constraint =
             serde_json::from_str(r#"{"type":"exclusive_max_int","value":0}"#).unwrap();
         assert_eq!(from_cli, Constraint::ExclusiveMaxInt(0));
+    }
+
+    #[test]
+    fn json_exclusive_min_len() {
+        let c = Constraint::ExclusiveMinLen(0);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"exclusive_min_len\""));
+        assert!(json.contains("\"value\":0"));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"exclusive_min_len","value":8}"#).unwrap();
+        assert_eq!(from_cli, Constraint::ExclusiveMinLen(8));
+    }
+
+    #[test]
+    fn json_exclusive_max_len() {
+        let c = Constraint::ExclusiveMaxLen(256);
+        let json = serde_json::to_string(&c).unwrap();
+        assert!(json.contains("\"type\":\"exclusive_max_len\""));
+        assert!(json.contains("\"value\":256"));
+
+        let parsed: Constraint = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, c);
+
+        let from_cli: Constraint =
+            serde_json::from_str(r#"{"type":"exclusive_max_len","value":0}"#).unwrap();
+        assert_eq!(from_cli, Constraint::ExclusiveMaxLen(0));
     }
 
     #[test]
