@@ -35,8 +35,10 @@
 //! `{"type":"max_int","value":100}`,
 //! `{"type":"min_float","value":0.5}`,
 //! `{"type":"max_float","value":10.5}`,
-//! `{"type":"exclusive_min_float","value":0.5}`, and
-//! `{"type":"exclusive_max_float","value":10.5}`.
+//! `{"type":"exclusive_min_float","value":0.5}`,
+//! `{"type":"exclusive_max_float","value":10.5}`,
+//! `{"type":"exclusive_min_int","value":1}`, and
+//! `{"type":"exclusive_max_int","value":100}`.
 //! [`Constraint::PrefixOneOf`] requires the value to start with at least
 //! one listed UTF-8 prefix. [`Constraint::SuffixOneOf`] requires the value
 //! to end with at least one listed UTF-8 suffix. [`Constraint::ContainsAny`]
@@ -72,7 +74,11 @@
 //! [`Constraint::ExclusiveMinFloat`] requires the value to parse as a
 //! finite `f64` that is strictly greater than N.
 //! [`Constraint::ExclusiveMaxFloat`] requires the value to parse as a
-//! finite `f64` that is strictly less than N. Empty lists and empty
+//! finite `f64` that is strictly less than N.
+//! [`Constraint::ExclusiveMinInt`] requires the value to parse as an
+//! `i64` that is strictly greater than N.
+//! [`Constraint::ExclusiveMaxInt`] requires the value to parse as an
+//! `i64` that is strictly less than N. Empty lists and empty
 //! members are rejected at mint/validate and never match (fail closed).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -482,6 +488,30 @@ pub enum Constraint {
     /// JSON: `{"type":"exclusive_max_float","value":10.5}`
     #[serde(rename = "exclusive_max_float")]
     ExclusiveMaxFloat(f64),
+    /// Value must parse as an `i64` that is strictly greater than N.
+    ///
+    /// Same parse rules as [`IntRange`] / [`MinInt`]: `"1"`, `"+1"`,
+    /// and `"01"` are the same integer. Values that do not parse as
+    /// `i64` fail closed at check time. The bound itself is excluded:
+    /// `ExclusiveMinInt(1)` rejects `"1"`. `ExclusiveMinInt(i64::MIN)`
+    /// accepts every parseable integer except `i64::MIN`.
+    /// `ExclusiveMinInt(i64::MAX)` is valid and matches no integer.
+    ///
+    /// JSON: `{"type":"exclusive_min_int","value":1}`
+    #[serde(rename = "exclusive_min_int")]
+    ExclusiveMinInt(i64),
+    /// Value must parse as an `i64` that is strictly less than N.
+    ///
+    /// Same parse rules as [`IntRange`] / [`MaxInt`]. Values that do
+    /// not parse as `i64` fail closed at check time. The bound itself
+    /// is excluded: `ExclusiveMaxInt(100)` rejects `"100"`.
+    /// `ExclusiveMaxInt(i64::MAX)` accepts every parseable integer
+    /// except `i64::MAX`. `ExclusiveMaxInt(i64::MIN)` is valid and
+    /// matches no integer.
+    ///
+    /// JSON: `{"type":"exclusive_max_int","value":100}`
+    #[serde(rename = "exclusive_max_int")]
+    ExclusiveMaxInt(i64),
 }
 
 impl PartialEq for Constraint {
@@ -581,6 +611,8 @@ impl PartialEq for Constraint {
             (Constraint::ExclusiveMaxFloat(a), Constraint::ExclusiveMaxFloat(b)) => {
                 a.to_bits() == b.to_bits()
             }
+            (Constraint::ExclusiveMinInt(a), Constraint::ExclusiveMinInt(b)) => a == b,
+            (Constraint::ExclusiveMaxInt(a), Constraint::ExclusiveMaxInt(b)) => a == b,
             _ => false,
         }
     }
@@ -751,6 +783,14 @@ impl Constraint {
                 Some(n) if max.is_finite() => n < *max,
                 _ => false,
             },
+            // Exclusive: the bound itself is excluded. Non-integers
+            // fail closed, same spirit as MinInt.
+            Constraint::ExclusiveMinInt(min) => {
+                value.parse::<i64>().map(|n| n > *min).unwrap_or(false)
+            }
+            Constraint::ExclusiveMaxInt(max) => {
+                value.parse::<i64>().map(|n| n < *max).unwrap_or(false)
+            }
         }
     }
 
