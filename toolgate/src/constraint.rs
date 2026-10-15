@@ -37,8 +37,10 @@
 //! `{"type":"max_float","value":10.5}`,
 //! `{"type":"exclusive_min_float","value":0.5}`,
 //! `{"type":"exclusive_max_float","value":10.5}`,
-//! `{"type":"exclusive_min_int","value":1}`, and
-//! `{"type":"exclusive_max_int","value":100}`.
+//! `{"type":"exclusive_min_int","value":1}`,
+//! `{"type":"exclusive_max_int","value":100}`,
+//! `{"type":"exclusive_min_len","value":0}`, and
+//! `{"type":"exclusive_max_len","value":256}`.
 //! [`Constraint::PrefixOneOf`] requires the value to start with at least
 //! one listed UTF-8 prefix. [`Constraint::SuffixOneOf`] requires the value
 //! to end with at least one listed UTF-8 suffix. [`Constraint::ContainsAny`]
@@ -78,7 +80,11 @@
 //! [`Constraint::ExclusiveMinInt`] requires the value to parse as an
 //! `i64` that is strictly greater than N.
 //! [`Constraint::ExclusiveMaxInt`] requires the value to parse as an
-//! `i64` that is strictly less than N. Empty lists and empty
+//! `i64` that is strictly less than N.
+//! [`Constraint::ExclusiveMinLen`] requires the value's UTF-8 byte
+//! length to be strictly greater than N.
+//! [`Constraint::ExclusiveMaxLen`] requires the value's UTF-8 byte
+//! length to be strictly less than N. Empty lists and empty
 //! members are rejected at mint/validate and never match (fail closed).
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -512,6 +518,28 @@ pub enum Constraint {
     /// JSON: `{"type":"exclusive_max_int","value":100}`
     #[serde(rename = "exclusive_max_int")]
     ExclusiveMaxInt(i64),
+    /// Value UTF-8 byte length must be strictly greater than N.
+    ///
+    /// Same unit as [`MinLen`] / [`MaxLen`] / [`LenRange`]. The bound
+    /// itself is excluded: `ExclusiveMinLen(0)` rejects the empty
+    /// string and accepts every non-empty value. `ExclusiveMinLen(0)`
+    /// is valid. `ExclusiveMinLen(usize::MAX)` is valid and matches
+    /// no value.
+    ///
+    /// JSON: `{"type":"exclusive_min_len","value":0}`
+    #[serde(rename = "exclusive_min_len")]
+    ExclusiveMinLen(usize),
+    /// Value UTF-8 byte length must be strictly less than N.
+    ///
+    /// Same unit as [`MinLen`] / [`MaxLen`] / [`LenRange`]. The bound
+    /// itself is excluded: `ExclusiveMaxLen(256)` rejects a 256-byte
+    /// value. `ExclusiveMaxLen(usize::MAX)` accepts every value except
+    /// those of length `usize::MAX`. `ExclusiveMaxLen(0)` is valid and
+    /// matches no value.
+    ///
+    /// JSON: `{"type":"exclusive_max_len","value":256}`
+    #[serde(rename = "exclusive_max_len")]
+    ExclusiveMaxLen(usize),
 }
 
 impl PartialEq for Constraint {
@@ -613,6 +641,8 @@ impl PartialEq for Constraint {
             }
             (Constraint::ExclusiveMinInt(a), Constraint::ExclusiveMinInt(b)) => a == b,
             (Constraint::ExclusiveMaxInt(a), Constraint::ExclusiveMaxInt(b)) => a == b,
+            (Constraint::ExclusiveMinLen(a), Constraint::ExclusiveMinLen(b)) => a == b,
+            (Constraint::ExclusiveMaxLen(a), Constraint::ExclusiveMaxLen(b)) => a == b,
             _ => false,
         }
     }
@@ -791,6 +821,10 @@ impl Constraint {
             Constraint::ExclusiveMaxInt(max) => {
                 value.parse::<i64>().map(|n| n < *max).unwrap_or(false)
             }
+            // Exclusive: the bound itself is excluded. Byte length,
+            // the same unit as MinLen / MaxLen.
+            Constraint::ExclusiveMinLen(min) => value.len() > *min,
+            Constraint::ExclusiveMaxLen(max) => value.len() < *max,
         }
     }
 

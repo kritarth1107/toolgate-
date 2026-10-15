@@ -595,6 +595,14 @@ fn encode_constraint(buf: &mut Vec<u8>, constraint: &Constraint) {
             buf.push(46); // type = ExclusiveMaxInt
             buf.extend_from_slice(&max.to_be_bytes());
         }
+        Constraint::ExclusiveMinLen(min) => {
+            buf.push(47); // type = ExclusiveMinLen
+            buf.extend_from_slice(&(*min as u64).to_be_bytes());
+        }
+        Constraint::ExclusiveMaxLen(max) => {
+            buf.push(48); // type = ExclusiveMaxLen
+            buf.extend_from_slice(&(*max as u64).to_be_bytes());
+        }
     }
 }
 
