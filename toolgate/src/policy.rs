@@ -1893,6 +1893,35 @@ mod tests {
     }
 
     #[test]
+    fn from_json_parses_exclusive_min_float_and_exclusive_max_float() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 60,
+                "tools": [{
+                    "name": "score_tool",
+                    "arg_keys": ["open_floor", "open_ceiling"],
+                    "constraints": {
+                        "open_floor": {"type": "exclusive_min_float", "value": 0.5},
+                        "open_ceiling": {"type": "exclusive_max_float", "value": 10.5}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        policy.validate().unwrap();
+        let grant = policy.grant("score_tool").unwrap();
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("open_floor"),
+            Some(&Constraint::ExclusiveMinFloat(0.5))
+        );
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("open_ceiling"),
+            Some(&Constraint::ExclusiveMaxFloat(10.5))
+        );
+    }
+
+    #[test]
     fn validate_non_finite_min_float_is_rejected() {
         let mut policy = Policy::from_json(
             r#"{
