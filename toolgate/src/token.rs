@@ -6528,6 +6528,205 @@ mod tests {
     }
 
     #[test]
+    fn attenuation_can_raise_exclusive_min_len() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::ExclusiveMinLen(0));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut higher: BTreeMap<String, Constraint> = BTreeMap::new();
+        higher.insert("query".to_string(), Constraint::ExclusiveMinLen(3));
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(higher))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("query"),
+            Some(&Constraint::ExclusiveMinLen(3))
+        );
+        assert!(attenuated.verify(SECRET, 1999999999).is_ok());
+    }
+
+    #[test]
+    fn attenuation_cannot_lower_exclusive_min_len() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::ExclusiveMinLen(3));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut lower: BTreeMap<String, Constraint> = BTreeMap::new();
+        lower.insert("query".to_string(), Constraint::ExclusiveMinLen(0));
+
+        let result = token.attenuate_with_constraints(SECRET, None, None, Some(lower));
+        assert_eq!(result, Err(TokenError::AttenuationWidens));
+    }
+
+    #[test]
+    fn attenuation_exact_can_replace_exclusive_min_len() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::ExclusiveMinLen(0));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut exact: BTreeMap<String, Constraint> = BTreeMap::new();
+        exact.insert("query".to_string(), Constraint::Exact("ab".to_string()));
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(exact))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("query"),
+            Some(&Constraint::Exact("ab".to_string()))
+        );
+    }
+
+    #[test]
+    fn attenuation_cannot_replace_exclusive_min_len_with_empty() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::ExclusiveMinLen(0));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut exact: BTreeMap<String, Constraint> = BTreeMap::new();
+        exact.insert("query".to_string(), Constraint::Exact(String::new()));
+
+        let result = token.attenuate_with_constraints(SECRET, None, None, Some(exact));
+        assert_eq!(result, Err(TokenError::AttenuationWidens));
+    }
+
+    #[test]
+    fn attenuation_can_lower_exclusive_max_len() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::ExclusiveMaxLen(16));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut tighter: BTreeMap<String, Constraint> = BTreeMap::new();
+        tighter.insert("query".to_string(), Constraint::ExclusiveMaxLen(8));
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(tighter))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("query"),
+            Some(&Constraint::ExclusiveMaxLen(8))
+        );
+    }
+
+    #[test]
+    fn attenuation_cannot_raise_exclusive_max_len() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::ExclusiveMaxLen(8));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut wider: BTreeMap<String, Constraint> = BTreeMap::new();
+        wider.insert("query".to_string(), Constraint::ExclusiveMaxLen(16));
+
+        let result = token.attenuate_with_constraints(SECRET, None, None, Some(wider));
+        assert_eq!(result, Err(TokenError::AttenuationWidens));
+    }
+
+    #[test]
+    fn attenuation_len_range_can_replace_exclusive_min_len() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::ExclusiveMinLen(0));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut ranged: BTreeMap<String, Constraint> = BTreeMap::new();
+        ranged.insert(
+            "query".to_string(),
+            Constraint::LenRange { min: 1, max: 16 },
+        );
+
+        let attenuated = token
+            .attenuate_with_constraints(SECRET, None, None, Some(ranged))
+            .unwrap();
+        assert_eq!(
+            attenuated.constraints.as_ref().unwrap().get("query"),
+            Some(&Constraint::LenRange { min: 1, max: 16 })
+        );
+    }
+
+    #[test]
     fn attenuation_can_tighten_suffix() {
         use crate::constraint::Constraint;
         use std::collections::BTreeMap;
@@ -9086,6 +9285,106 @@ mod tests {
         assert!(matches!(
             result,
             Err(TokenError::ConstraintViolation { key }) if key == "limit"
+        ));
+    }
+
+    #[test]
+    fn verify_call_with_args_exclusive_min_len_satisfied() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::ExclusiveMinLen(0));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("query".to_string(), "ab".to_string());
+        assert!(token
+            .verify_call_with_args(SECRET, 1999999999, "read_file", &args, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_call_with_args_exclusive_min_len_violated() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::ExclusiveMinLen(0));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("query".to_string(), String::new());
+        let result = token.verify_call_with_args(SECRET, 1999999999, "read_file", &args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { key }) if key == "query"
+        ));
+    }
+
+    #[test]
+    fn verify_call_with_args_exclusive_max_len_satisfied() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::ExclusiveMaxLen(3));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("query".to_string(), "ab".to_string());
+        assert!(token
+            .verify_call_with_args(SECRET, 1999999999, "read_file", &args, None)
+            .is_ok());
+    }
+
+    #[test]
+    fn verify_call_with_args_exclusive_max_len_violated() {
+        use crate::constraint::Constraint;
+
+        let mut constraints = std::collections::BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::ExclusiveMaxLen(3));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints),
+        );
+
+        let mut args = std::collections::BTreeMap::new();
+        args.insert("query".to_string(), "abc".to_string());
+        let result = token.verify_call_with_args(SECRET, 1999999999, "read_file", &args, None);
+        assert!(matches!(
+            result,
+            Err(TokenError::ConstraintViolation { key }) if key == "query"
         ));
     }
 
