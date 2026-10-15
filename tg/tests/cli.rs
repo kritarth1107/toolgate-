@@ -6982,6 +6982,228 @@ fn mint_from_policy_accepts_min_int() {
     let _ = fs::remove_file(&path);
 }
 
+fn mint_min_float_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["score"],
+            "expiry": 2000000000,
+            "constraints": {
+                "score": {"type": "min_float", "value": 0.5}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+fn mint_max_float_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["score"],
+            "expiry": 2000000000,
+            "constraints": {
+                "score": {"type": "max_float", "value": 1.5}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+#[test]
+fn mint_accepts_min_float_and_max_float() {
+    let min = mint_min_float_token();
+    assert_eq!(min["constraints"]["score"]["type"], "min_float");
+    assert_eq!(min["constraints"]["score"]["value"], 0.5);
+
+    let max = mint_max_float_token();
+    assert_eq!(max["constraints"]["score"]["type"], "max_float");
+    assert_eq!(max["constraints"]["score"]["value"], 1.5);
+}
+
+#[test]
+fn check_call_enforces_min_float() {
+    let token = mint_min_float_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"score": "1e0"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"score": "0.4"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn check_call_enforces_max_float() {
+    let token = mint_max_float_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"score": "-1"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"score": "1.6"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn attenuate_can_raise_min_float() {
+    let token = mint_min_float_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "score": {"type": "min_float", "value": 1.5}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(attenuated["constraints"]["score"]["type"], "min_float");
+    assert_eq!(attenuated["constraints"]["score"]["value"], 1.5);
+}
+
+#[test]
+fn attenuate_rejects_looser_min_float() {
+    let token = mint_min_float_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"score": {"type": "min_float", "value": 0.0}}
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("attenuation"),
+        "looser min_float should fail closed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn attenuate_can_lower_max_float() {
+    let token = mint_max_float_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "score": {"type": "max_float", "value": 0.5}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(attenuated["constraints"]["score"]["type"], "max_float");
+    assert_eq!(attenuated["constraints"]["score"]["value"], 0.5);
+}
+
+#[test]
+fn attenuate_rejects_wider_max_float() {
+    let token = mint_max_float_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"score": {"type": "max_float", "value": 10.5}}
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("attenuation"),
+        "wider max_float should fail closed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn mint_from_policy_accepts_min_float() {
+    let path = write_temp_policy(
+        "min-float-grant",
+        r#"{
+            "version": "1",
+            "default_ttl_seconds": 60,
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["floor", "ceiling"],
+                "constraints": {
+                    "floor": {"type": "min_float", "value": 0.5},
+                    "ceiling": {"type": "max_float", "value": 10.5}
+                }
+            }]
+        }"#,
+    );
+    let out = run_json(
+        &[
+            "mint",
+            "--policy",
+            path.to_str().unwrap(),
+            "--tool",
+            "read_file",
+        ],
+        &json!({
+            "secret": "cli-secret",
+            "current_time": 1700000000
+        }),
+    );
+    let token = &out["token"];
+    assert_eq!(token["tool_name"], "read_file");
+    assert_eq!(token["constraints"]["floor"]["type"], "min_float");
+    assert_eq!(token["constraints"]["ceiling"]["type"], "max_float");
+    let _ = fs::remove_file(&path);
+}
+
 fn mint_required_path_token() -> Value {
     run_json(
         &["mint"],

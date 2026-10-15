@@ -401,7 +401,7 @@ fn reject_empty_constraint_patterns(
         }
         if constraint.is_invalid_range() {
             return Err(format!(
-                "invalid float_range, float_one_of, float_none, len_range, or char_len_range for '{key}' is rejected (min <= max required; float bounds and list members must be finite)"
+                "invalid float_range, min_float, max_float, float_one_of, float_none, len_range, or char_len_range for '{key}' is rejected (min <= max required; float bounds and list members must be finite)"
             )
             .into());
         }

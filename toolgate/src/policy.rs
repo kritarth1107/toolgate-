@@ -92,9 +92,10 @@ pub enum PolicyError {
     EmptyConstraintPattern { tool: String, key: String },
     /// An All/Any/Not tree deeper than [`crate::MAX_CONSTRAINT_NESTING`] is rejected.
     ConstraintNestingTooDeep { tool: String, key: String },
-    /// A FloatRange with non-finite bounds or `min > max`, a FloatOneOf
-    /// or FloatNone list with a non-finite member, or a LenRange or
-    /// CharLenRange with `min > max`, is rejected.
+    /// A FloatRange with non-finite bounds or `min > max`, a MinFloat
+    /// or MaxFloat with a non-finite bound, a FloatOneOf or FloatNone
+    /// list with a non-finite member, or a LenRange or CharLenRange
+    /// with `min > max`, is rejected.
     InvalidConstraintRange { tool: String, key: String },
     /// A TTL (default or per-grant) is present and zero.
     ZeroTtl {
@@ -154,7 +155,7 @@ impl std::fmt::Display for PolicyError {
             PolicyError::InvalidConstraintRange { tool, key } => {
                 write!(
                     f,
-                    "invalid float_range, float_one_of, float_none, len_range, or char_len_range for '{key}' on tool '{tool}' is rejected (min <= max required; float bounds and list members must be finite)"
+                    "invalid float_range, min_float, max_float, float_one_of, float_none, len_range, or char_len_range for '{key}' on tool '{tool}' is rejected (min <= max required; float bounds and list members must be finite)"
                 )
             }
             PolicyError::ZeroTtl { tool: Some(tool) } => {
@@ -1859,6 +1860,64 @@ mod tests {
         assert_eq!(
             grant.constraints.as_ref().unwrap().get("offset"),
             Some(&Constraint::MaxInt(100))
+        );
+    }
+
+    #[test]
+    fn from_json_parses_min_float_and_max_float() {
+        let policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "default_ttl_seconds": 60,
+                "tools": [{
+                    "name": "score_tool",
+                    "arg_keys": ["floor", "ceiling"],
+                    "constraints": {
+                        "floor": {"type": "min_float", "value": 0.5},
+                        "ceiling": {"type": "max_float", "value": 10.5}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        policy.validate().unwrap();
+        let grant = policy.grant("score_tool").unwrap();
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("floor"),
+            Some(&Constraint::MinFloat(0.5))
+        );
+        assert_eq!(
+            grant.constraints.as_ref().unwrap().get("ceiling"),
+            Some(&Constraint::MaxFloat(10.5))
+        );
+    }
+
+    #[test]
+    fn validate_non_finite_min_float_is_rejected() {
+        let mut policy = Policy::from_json(
+            r#"{
+                "version": "1",
+                "tools": [{
+                    "name": "score_tool",
+                    "arg_keys": ["score"],
+                    "constraints": {
+                        "score": {"type": "min_float", "value": 1.0}
+                    }
+                }]
+            }"#,
+        )
+        .unwrap();
+        policy.tools[0]
+            .constraints
+            .as_mut()
+            .unwrap()
+            .insert("score".to_string(), Constraint::MinFloat(f64::NAN));
+        assert_eq!(
+            policy.validate(),
+            Err(PolicyError::InvalidConstraintRange {
+                tool: "score_tool".into(),
+                key: "score".into()
+            })
         );
     }
 
