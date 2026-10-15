@@ -17,7 +17,7 @@
 //! | audience | u16 length + UTF-8 bytes (0 = none) |
 //! | kid | u16 length + UTF-8 bytes (0 = none) |
 //! | constraints_count | u16 (0 = none) |
-//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone, 27=PrefixNone, 28=SuffixNone, 29=IntOneOf, 30=IntNone, 31=FloatOneOf, 32=FloatNone, 33=LenOneOf, 34=LenNone, 35=CharLenOneOf, 36=CharLenNone, 37=MinCharLen, 38=MaxCharLen, 39=MinInt, 40=MaxInt, 41=MinFloat, 42=MaxFloat, 43=ExclusiveMinFloat, 44=ExclusiveMaxFloat, 45=ExclusiveMinInt, 46=ExclusiveMaxInt) |
+//! | constraints | for each: key + type + data (same encoding as canonical; 0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone, 27=PrefixNone, 28=SuffixNone, 29=IntOneOf, 30=IntNone, 31=FloatOneOf, 32=FloatNone, 33=LenOneOf, 34=LenNone, 35=CharLenOneOf, 36=CharLenNone, 37=MinCharLen, 38=MaxCharLen, 39=MinInt, 40=MaxInt, 41=MinFloat, 42=MaxFloat, 43=ExclusiveMinFloat, 44=ExclusiveMaxFloat, 45=ExclusiveMinInt, 46=ExclusiveMaxInt, 47=ExclusiveMinLen, 48=ExclusiveMaxLen) |
 //! | jti | u16 length + UTF-8 bytes (0 = none) |
 //! | nbf_flag | u8 (v5+ only; 0 = none, 1 = present) |
 //! | nbf | u64 (v5+ only, if nbf_flag = 1) |
@@ -2608,6 +2608,157 @@ mod tests {
             wire.windows(8)
                 .any(|w| w == [0x00, 0x05, b's', b'c', b'o', b'r', b'e', 43]),
             "ExclusiveMinFloat must keep type tag 43"
+        );
+    }
+
+    #[test]
+    fn wire_roundtrip_constraint_exclusive_min_len() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::ExclusiveMinLen(0));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+        assert!(
+            wire.windows(8)
+                .any(|w| w == [0x00, 0x05, b'q', b'u', b'e', b'r', b'y', 47]),
+            "wire must include ExclusiveMinLen type tag 47 after key query"
+        );
+    }
+
+    #[test]
+    fn wire_roundtrip_constraint_exclusive_max_len() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::ExclusiveMaxLen(256));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+        assert!(
+            wire.windows(8)
+                .any(|w| w == [0x00, 0x05, b'q', b'u', b'e', b'r', b'y', 48]),
+            "wire must include ExclusiveMaxLen type tag 48 after key query"
+        );
+    }
+
+    #[test]
+    fn wire_roundtrip_constraint_exclusive_min_len_nonzero() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("query".to_string(), Constraint::ExclusiveMinLen(8));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["query".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(decoded.verify(SECRET, 1999999999).is_ok());
+        match decoded.constraints.as_ref().unwrap().get("query").unwrap() {
+            Constraint::ExclusiveMinLen(min) => assert_eq!(*min, 8),
+            other => panic!("expected ExclusiveMinLen(8), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wire_roundtrip_exclusive_len_bounds_table() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let cases = [
+            Constraint::ExclusiveMinLen(0),
+            Constraint::ExclusiveMinLen(1),
+            Constraint::ExclusiveMinLen(8),
+            Constraint::ExclusiveMinLen(usize::MAX),
+            Constraint::ExclusiveMaxLen(0),
+            Constraint::ExclusiveMaxLen(1),
+            Constraint::ExclusiveMaxLen(256),
+            Constraint::ExclusiveMaxLen(usize::MAX),
+        ];
+        for constraint in cases {
+            let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+            constraints.insert("query".to_string(), constraint.clone());
+            let token = Token::mint_full(
+                SECRET,
+                "read_file",
+                vec!["query".into()],
+                2000000000,
+                None,
+                None,
+                Some(constraints.clone()),
+            );
+            let decoded = Token::from_wire(&token.to_wire()).unwrap();
+            assert_eq!(decoded.constraints, Some(constraints), "{constraint:?}");
+            assert!(decoded.verify(SECRET, 1999999999).is_ok(), "{constraint:?}");
+        }
+    }
+
+    #[test]
+    fn wire_without_exclusive_min_len_keeps_prior_type_tags() {
+        // Tokens that do not use ExclusiveMinLen/ExclusiveMaxLen must keep the 0.39.0 tags.
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+        constraints.insert("limit".to_string(), Constraint::ExclusiveMinInt(1));
+
+        let token = Token::mint_full(
+            SECRET,
+            "read_file",
+            vec!["limit".into()],
+            2000000000,
+            None,
+            None,
+            Some(constraints.clone()),
+        );
+
+        let wire = token.to_wire();
+        let decoded = Token::from_wire(&wire).unwrap();
+        assert_eq!(decoded.constraints, Some(constraints));
+        assert!(
+            wire.windows(8)
+                .any(|w| w == [0x00, 0x05, b'l', b'i', b'm', b'i', b't', 45]),
+            "ExclusiveMinInt must keep type tag 45"
         );
     }
 
