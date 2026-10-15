@@ -33,8 +33,10 @@
 //! `{"type":"max_char_len","value":16}`,
 //! `{"type":"min_int","value":1}`,
 //! `{"type":"max_int","value":100}`,
-//! `{"type":"min_float","value":0.5}`, and
-//! `{"type":"max_float","value":10.5}`.
+//! `{"type":"min_float","value":0.5}`,
+//! `{"type":"max_float","value":10.5}`,
+//! `{"type":"exclusive_min_float","value":0.5}`, and
+//! `{"type":"exclusive_max_float","value":10.5}`.
 //! [`Constraint::PrefixOneOf`] requires the value to start with at least
 //! one listed UTF-8 prefix. [`Constraint::SuffixOneOf`] requires the value
 //! to end with at least one listed UTF-8 suffix. [`Constraint::ContainsAny`]
@@ -66,9 +68,12 @@
 //! requires the value to parse as an `i64` that is at most N.
 //! [`Constraint::MinFloat`] requires the value to parse as a finite
 //! `f64` that is at least N. [`Constraint::MaxFloat`] requires the
-//! value to parse as a finite `f64` that is at most N. Empty lists
-//! and empty members are rejected at mint/validate and never match
-//! (fail closed).
+//! value to parse as a finite `f64` that is at most N.
+//! [`Constraint::ExclusiveMinFloat`] requires the value to parse as a
+//! finite `f64` that is strictly greater than N.
+//! [`Constraint::ExclusiveMaxFloat`] requires the value to parse as a
+//! finite `f64` that is strictly less than N. Empty lists and empty
+//! members are rejected at mint/validate and never match (fail closed).
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -449,6 +454,34 @@ pub enum Constraint {
     /// JSON: `{"type":"max_float","value":10.5}`
     #[serde(rename = "max_float")]
     MaxFloat(f64),
+    /// Value must parse as a finite `f64` that is strictly greater than N.
+    ///
+    /// Same parse rules as [`FloatRange`] / [`MinFloat`]: `"1"`, `"1.0"`,
+    /// and `"1e0"` are the same float. The bound itself must be finite;
+    /// NaN and ±inf are rejected at mint/validate and never match (fail
+    /// closed). Values that do not parse as a finite `f64` fail closed
+    /// at check time. The bound itself is excluded: `ExclusiveMinFloat(0.5)`
+    /// rejects `"0.5"`. `ExclusiveMinFloat(f64::MIN)` accepts every
+    /// finite float except `f64::MIN`. `ExclusiveMinFloat(f64::MAX)`
+    /// is valid and matches no finite float.
+    ///
+    /// JSON: `{"type":"exclusive_min_float","value":0.5}`
+    #[serde(rename = "exclusive_min_float")]
+    ExclusiveMinFloat(f64),
+    /// Value must parse as a finite `f64` that is strictly less than N.
+    ///
+    /// Same parse rules as [`FloatRange`] / [`MaxFloat`]. The bound
+    /// itself must be finite; NaN and ±inf are rejected at mint/validate
+    /// and never match (fail closed). Values that do not parse as a
+    /// finite `f64` fail closed at check time. The bound itself is
+    /// excluded: `ExclusiveMaxFloat(10.5)` rejects `"10.5"`.
+    /// `ExclusiveMaxFloat(f64::MAX)` accepts every finite float except
+    /// `f64::MAX`. `ExclusiveMaxFloat(f64::MIN)` is valid and matches
+    /// no finite float.
+    ///
+    /// JSON: `{"type":"exclusive_max_float","value":10.5}`
+    #[serde(rename = "exclusive_max_float")]
+    ExclusiveMaxFloat(f64),
 }
 
 impl PartialEq for Constraint {
@@ -542,6 +575,12 @@ impl PartialEq for Constraint {
             // are still rejected at mint/validate).
             (Constraint::MinFloat(a), Constraint::MinFloat(b)) => a.to_bits() == b.to_bits(),
             (Constraint::MaxFloat(a), Constraint::MaxFloat(b)) => a.to_bits() == b.to_bits(),
+            (Constraint::ExclusiveMinFloat(a), Constraint::ExclusiveMinFloat(b)) => {
+                a.to_bits() == b.to_bits()
+            }
+            (Constraint::ExclusiveMaxFloat(a), Constraint::ExclusiveMaxFloat(b)) => {
+                a.to_bits() == b.to_bits()
+            }
             _ => false,
         }
     }
@@ -702,6 +741,16 @@ impl Constraint {
                 Some(n) if max.is_finite() => n <= *max,
                 _ => false,
             },
+            // Exclusive: the bound itself is excluded. Non-finite
+            // bounds or values fail closed, same spirit as MinFloat.
+            Constraint::ExclusiveMinFloat(min) => match parse_finite_f64(value) {
+                Some(n) if min.is_finite() => n > *min,
+                _ => false,
+            },
+            Constraint::ExclusiveMaxFloat(max) => match parse_finite_f64(value) {
+                Some(n) if max.is_finite() => n < *max,
+                _ => false,
+            },
         }
     }
 
@@ -750,14 +799,17 @@ impl Constraint {
 
     /// True when a [`Constraint::FloatRange`], [`Constraint::LenRange`],
     /// or [`Constraint::CharLenRange`] (or a composite containing one)
-    /// has inverted bounds, when a FloatRange, MinFloat, or MaxFloat
-    /// has non-finite bounds, or when a FloatOneOf / FloatNone list
-    /// contains a non-finite member. Rejected at mint/validate and
-    /// never matches a value (fail closed).
+    /// has inverted bounds, when a FloatRange, MinFloat, MaxFloat,
+    /// ExclusiveMinFloat, or ExclusiveMaxFloat has non-finite bounds, or
+    /// when a FloatOneOf / FloatNone list contains a non-finite member.
+    /// Rejected at mint/validate and never matches a value (fail closed).
     pub fn is_invalid_range(&self) -> bool {
         match self {
             Constraint::FloatRange { min, max } => !float_range_is_valid(*min, *max),
-            Constraint::MinFloat(bound) | Constraint::MaxFloat(bound) => !bound.is_finite(),
+            Constraint::MinFloat(bound)
+            | Constraint::MaxFloat(bound)
+            | Constraint::ExclusiveMinFloat(bound)
+            | Constraint::ExclusiveMaxFloat(bound) => !bound.is_finite(),
             Constraint::FloatOneOf(values) | Constraint::FloatNone(values) => {
                 values.iter().any(|n| !n.is_finite())
             }
