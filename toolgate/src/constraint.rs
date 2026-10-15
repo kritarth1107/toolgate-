@@ -4266,6 +4266,73 @@ mod tests {
     }
 
     #[test]
+    fn exclusive_int_check_matches_strict_inequality() {
+        let bounds = [
+            i64::MIN,
+            i64::MIN + 1,
+            -1,
+            0,
+            1,
+            99,
+            100,
+            i64::MAX - 1,
+            i64::MAX,
+        ];
+        let texts = [
+            i64::MIN.to_string(),
+            "-1".to_string(),
+            "0".to_string(),
+            "1".to_string(),
+            "02".to_string(),
+            "+2".to_string(),
+            "100".to_string(),
+            i64::MAX.to_string(),
+            "abc".to_string(),
+            "1.5".to_string(),
+            String::new(),
+        ];
+        for bound in bounds {
+            let min = Constraint::ExclusiveMinInt(bound);
+            let max = Constraint::ExclusiveMaxInt(bound);
+            for text in &texts {
+                let parsed = text.parse::<i64>().ok();
+                assert_eq!(
+                    min.check(text),
+                    parsed.map(|n| n > bound).unwrap_or(false),
+                    "ExclusiveMinInt({bound}) vs {text:?}"
+                );
+                assert_eq!(
+                    max.check(text),
+                    parsed.map(|n| n < bound).unwrap_or(false),
+                    "ExclusiveMaxInt({bound}) vs {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn exclusive_int_is_open_subset_of_closed() {
+        for bound in [i64::MIN, -1, 0, 1, i64::MAX] {
+            assert!(
+                Constraint::ExclusiveMinInt(bound).is_subset_of(&Constraint::MinInt(bound)),
+                "ExclusiveMinInt({bound}) should be a subset of MinInt({bound})"
+            );
+            assert!(
+                Constraint::ExclusiveMaxInt(bound).is_subset_of(&Constraint::MaxInt(bound)),
+                "ExclusiveMaxInt({bound}) should be a subset of MaxInt({bound})"
+            );
+            assert!(
+                !Constraint::MinInt(bound).is_subset_of(&Constraint::ExclusiveMinInt(bound)),
+                "MinInt({bound}) should not be a subset of ExclusiveMinInt({bound})"
+            );
+            assert!(
+                !Constraint::MaxInt(bound).is_subset_of(&Constraint::ExclusiveMaxInt(bound)),
+                "MaxInt({bound}) should not be a subset of ExclusiveMaxInt({bound})"
+            );
+        }
+    }
+
+    #[test]
     fn suffix_check() {
         let c = Constraint::Suffix(".txt".to_string());
         assert!(c.check("notes.txt"));

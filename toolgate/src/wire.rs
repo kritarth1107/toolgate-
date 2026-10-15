@@ -2532,6 +2532,39 @@ mod tests {
     }
 
     #[test]
+    fn wire_roundtrip_exclusive_int_bounds_table() {
+        use crate::constraint::Constraint;
+        use std::collections::BTreeMap;
+
+        let cases = [
+            Constraint::ExclusiveMinInt(i64::MIN),
+            Constraint::ExclusiveMinInt(-1),
+            Constraint::ExclusiveMinInt(0),
+            Constraint::ExclusiveMinInt(i64::MAX),
+            Constraint::ExclusiveMaxInt(i64::MIN),
+            Constraint::ExclusiveMaxInt(0),
+            Constraint::ExclusiveMaxInt(100),
+            Constraint::ExclusiveMaxInt(i64::MAX),
+        ];
+        for constraint in cases {
+            let mut constraints: BTreeMap<String, Constraint> = BTreeMap::new();
+            constraints.insert("limit".to_string(), constraint.clone());
+            let token = Token::mint_full(
+                SECRET,
+                "read_file",
+                vec!["limit".into()],
+                2000000000,
+                None,
+                None,
+                Some(constraints.clone()),
+            );
+            let decoded = Token::from_wire(&token.to_wire()).unwrap();
+            assert_eq!(decoded.constraints, Some(constraints), "{constraint:?}");
+            assert!(decoded.verify(SECRET, 1999999999).is_ok(), "{constraint:?}");
+        }
+    }
+
+    #[test]
     fn wire_without_exclusive_min_int_keeps_prior_type_tags() {
         // Tokens that do not use ExclusiveMinInt/ExclusiveMaxInt must keep the 0.38.0 tags.
         use crate::constraint::Constraint;
