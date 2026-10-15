@@ -7,7 +7,7 @@
   "tools": [
     {
       "name": "read_file",
-      "arg_keys": ["path", "roots", "limit", "score", "floor", "ceiling", "open_floor", "open_ceiling", "query", "title", "ext", "note", "memo", "file", "skip", "dest", "name", "mode", "port", "choice", "bias", "pin", "label", "caption", "handle", "blurb", "nick", "retries", "cap", "open_retries", "open_cap"],
+      "arg_keys": ["path", "roots", "limit", "score", "floor", "ceiling", "open_floor", "open_ceiling", "query", "title", "ext", "note", "memo", "file", "skip", "dest", "name", "mode", "port", "choice", "bias", "pin", "label", "caption", "handle", "blurb", "nick", "retries", "cap", "open_retries", "open_cap", "open_query", "open_body"],
       "required_keys": ["path"],
       "constraints": {
         "path": { "type": "prefix", "value": "/tmp/" },
@@ -40,7 +40,9 @@
         "retries": { "type": "min_int", "value": 1 },
         "cap": { "type": "max_int", "value": 100 },
         "open_retries": { "type": "exclusive_min_int", "value": 1 },
-        "open_cap": { "type": "exclusive_max_int", "value": 100 }
+        "open_cap": { "type": "exclusive_max_int", "value": 100 },
+        "open_query": { "type": "exclusive_min_len", "value": 0 },
+        "open_body": { "type": "exclusive_max_len", "value": 256 }
       }
     },
     {
