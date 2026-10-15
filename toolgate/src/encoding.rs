@@ -20,7 +20,7 @@
 //! - constraints_count: u16
 //! - for each constraint (sorted by key):
 //!   - key: u16 length + UTF-8 bytes
-//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone, 27=PrefixNone, 28=SuffixNone, 29=IntOneOf, 30=IntNone, 31=FloatOneOf, 32=FloatNone, 33=LenOneOf, 34=LenNone, 35=CharLenOneOf, 36=CharLenNone, 37=MinCharLen, 38=MaxCharLen, 39=MinInt, 40=MaxInt, 41=MinFloat, 42=MaxFloat, 43=ExclusiveMinFloat, 44=ExclusiveMaxFloat)
+//!   - constraint_type: u8 (0=Exact, 1=OneOf, 2=Prefix, 3=MaxLen, 4=IntRange, 5=Suffix, 6=Contains, 7=MinLen, 8=Matches, 9=NotEquals, 10=NotOneOf, 11=NotContains, 12=NotPrefix, 13=NotSuffix, 14=NotMatches, 15=All, 16=Any, 17=Not, 18=FloatRange, 19=LenRange, 20=CharLenRange, 21=PrefixOneOf, 22=SuffixOneOf, 23=ContainsAny, 24=ContainsNone, 25=MatchesAny, 26=MatchesNone, 27=PrefixNone, 28=SuffixNone, 29=IntOneOf, 30=IntNone, 31=FloatOneOf, 32=FloatNone, 33=LenOneOf, 34=LenNone, 35=CharLenOneOf, 36=CharLenNone, 37=MinCharLen, 38=MaxCharLen, 39=MinInt, 40=MaxInt, 41=MinFloat, 42=MaxFloat, 43=ExclusiveMinFloat, 44=ExclusiveMaxFloat, 45=ExclusiveMinInt, 46=ExclusiveMaxInt)
 //!   - constraint_data: type-specific encoding
 //!
 //! Format v5 (backward-compatible extension):
@@ -91,6 +91,8 @@
 //! - MaxFloat: IEEE-754 f64 (same float encoding as one FloatRange bound)
 //! - ExclusiveMinFloat: IEEE-754 f64 (same float encoding as one FloatRange bound)
 //! - ExclusiveMaxFloat: IEEE-754 f64 (same float encoding as one FloatRange bound)
+//! - ExclusiveMinInt: i64 (same integer encoding as one IntRange bound)
+//! - ExclusiveMaxInt: i64 (same integer encoding as one IntRange bound)
 //!
 //! The v5 format appends jti after constraints. Tokens without jti
 //! encode identically to v4. Tokens without constraints and without jti
@@ -1775,6 +1777,71 @@ mod tests {
             0x00, 0x04, b'b', b'i', b'a', b's', // key "bias"
             0x29, // type = MinFloat
             0xBF, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // f64 -1.0
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_exclusive_min_int() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("limit".to_string(), Constraint::ExclusiveMinInt(1));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x05, b'l', b'i', b'm', b'i', b't', // key "limit"
+            0x2D, // type = ExclusiveMinInt
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, // i64 1
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_exclusive_max_int() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("limit".to_string(), Constraint::ExclusiveMaxInt(100));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x05, b'l', b'i', b'm', b'i', b't', // key "limit"
+            0x2E, // type = ExclusiveMaxInt
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, // i64 100
+        ]));
+    }
+
+    #[test]
+    fn encoding_constraint_exclusive_min_int_negative() {
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("offset".to_string(), Constraint::ExclusiveMinInt(-1));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x06, b'o', b'f', b'f', b's', b'e', b't', // key "offset"
+            0x2D, // type = ExclusiveMinInt
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, // i64 -1
+        ]));
+    }
+
+    #[test]
+    fn encoding_without_exclusive_min_int_identical_to_prior() {
+        // Tokens that do not use ExclusiveMinInt/ExclusiveMaxInt must keep the 0.38.0 bytes.
+        use std::collections::BTreeMap;
+        let mut constraints: Constraints = BTreeMap::new();
+        constraints.insert("score".to_string(), Constraint::ExclusiveMinFloat(0.5));
+
+        let bytes = encode_canonical_v4("t", &[], 0, &[], None, None, Some(&constraints));
+
+        assert!(bytes.ends_with(&[
+            0x00, 0x01, // 1 constraint
+            0x00, 0x05, b's', b'c', b'o', b'r', b'e', // key "score"
+            0x2B, // type = ExclusiveMinFloat
+            0x3F, 0xE0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // f64 0.5
         ]));
     }
 
