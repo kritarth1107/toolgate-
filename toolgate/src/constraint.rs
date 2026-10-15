@@ -4222,6 +4222,50 @@ mod tests {
     }
 
     #[test]
+    fn exclusive_min_int_check() {
+        let c = Constraint::ExclusiveMinInt(1);
+        assert!(!c.check("1"));
+        assert!(c.check("2"));
+        assert!(c.check("02"));
+        assert!(c.check("+2"));
+        assert!(c.check("100"));
+        assert!(c.check(&i64::MAX.to_string()));
+        assert!(!c.check("0"));
+        assert!(!c.check("-1"));
+        assert!(!c.check("abc"));
+        assert!(!c.check("1.5"));
+        assert!(!c.check(""));
+        assert!(!Constraint::ExclusiveMinInt(0).check("0"));
+        assert!(Constraint::ExclusiveMinInt(0).check("1"));
+        assert!(!Constraint::ExclusiveMinInt(0).check("-1"));
+        assert!(!Constraint::ExclusiveMinInt(i64::MIN).check(&i64::MIN.to_string()));
+        assert!(Constraint::ExclusiveMinInt(i64::MIN).check("0"));
+        assert!(!Constraint::ExclusiveMinInt(i64::MAX).check(&i64::MAX.to_string()));
+        assert!(!Constraint::ExclusiveMinInt(i64::MAX).check("0"));
+    }
+
+    #[test]
+    fn exclusive_max_int_check() {
+        let c = Constraint::ExclusiveMaxInt(100);
+        assert!(!c.check("100"));
+        assert!(c.check("99"));
+        assert!(c.check("0"));
+        assert!(c.check("-1"));
+        assert!(c.check(&i64::MIN.to_string()));
+        assert!(!c.check("101"));
+        assert!(!c.check("abc"));
+        assert!(!c.check("10.5"));
+        assert!(!c.check(""));
+        assert!(!Constraint::ExclusiveMaxInt(0).check("0"));
+        assert!(Constraint::ExclusiveMaxInt(0).check("-1"));
+        assert!(!Constraint::ExclusiveMaxInt(0).check("1"));
+        assert!(!Constraint::ExclusiveMaxInt(i64::MAX).check(&i64::MAX.to_string()));
+        assert!(Constraint::ExclusiveMaxInt(i64::MAX).check("0"));
+        assert!(!Constraint::ExclusiveMaxInt(i64::MIN).check(&i64::MIN.to_string()));
+        assert!(!Constraint::ExclusiveMaxInt(i64::MIN).check("0"));
+    }
+
+    #[test]
     fn suffix_check() {
         let c = Constraint::Suffix(".txt".to_string());
         assert!(c.check("notes.txt"));
