@@ -7448,6 +7448,240 @@ fn mint_from_policy_accepts_exclusive_min_float() {
     let _ = fs::remove_file(&path);
 }
 
+fn mint_exclusive_min_int_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["limit"],
+            "expiry": 2000000000,
+            "constraints": {
+                "limit": {"type": "exclusive_min_int", "value": 1}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+fn mint_exclusive_max_int_token() -> Value {
+    run_json(
+        &["mint"],
+        &json!({
+            "secret": "cli-secret",
+            "tool_name": "read_file",
+            "arg_keys": ["limit"],
+            "expiry": 2000000000,
+            "constraints": {
+                "limit": {"type": "exclusive_max_int", "value": 10}
+            }
+        }),
+    )
+    .get("token")
+    .cloned()
+    .expect("mint token")
+}
+
+#[test]
+fn mint_accepts_exclusive_min_int_and_exclusive_max_int() {
+    let min = mint_exclusive_min_int_token();
+    assert_eq!(min["constraints"]["limit"]["type"], "exclusive_min_int");
+    assert_eq!(min["constraints"]["limit"]["value"], 1);
+
+    let max = mint_exclusive_max_int_token();
+    assert_eq!(max["constraints"]["limit"]["type"], "exclusive_max_int");
+    assert_eq!(max["constraints"]["limit"]["value"], 10);
+}
+
+#[test]
+fn check_call_enforces_exclusive_min_int() {
+    let token = mint_exclusive_min_int_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"limit": "02"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"limit": "1"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn check_call_enforces_exclusive_max_int() {
+    let token = mint_exclusive_max_int_token();
+    let ok = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"limit": "-1"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(ok.get("authorized"), Some(&Value::Bool(true)));
+
+    let denied = run_json(
+        &["check-call"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "tool_name": "read_file",
+            "args": {"limit": "10"},
+            "current_time": 1999999999
+        }),
+    );
+    assert_eq!(denied.get("authorized"), Some(&Value::Bool(false)));
+    assert_eq!(
+        denied.get("error_kind").and_then(Value::as_str),
+        Some("constraint_violation")
+    );
+}
+
+#[test]
+fn attenuate_can_raise_exclusive_min_int() {
+    let token = mint_exclusive_min_int_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "limit": {"type": "exclusive_min_int", "value": 10}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(
+        attenuated["constraints"]["limit"]["type"],
+        "exclusive_min_int"
+    );
+    assert_eq!(attenuated["constraints"]["limit"]["value"], 10);
+}
+
+#[test]
+fn attenuate_rejects_looser_exclusive_min_int() {
+    let token = mint_exclusive_min_int_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"limit": {"type": "exclusive_min_int", "value": 0}}
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("attenuation"),
+        "looser exclusive_min_int should fail closed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn attenuate_can_lower_exclusive_max_int() {
+    let token = mint_exclusive_max_int_token();
+    let out = run_json(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {
+                "limit": {"type": "exclusive_max_int", "value": 5}
+            }
+        }),
+    );
+    let attenuated = &out["token"];
+    assert_eq!(
+        attenuated["constraints"]["limit"]["type"],
+        "exclusive_max_int"
+    );
+    assert_eq!(attenuated["constraints"]["limit"]["value"], 5);
+}
+
+#[test]
+fn attenuate_rejects_wider_exclusive_max_int() {
+    let token = mint_exclusive_max_int_token();
+    let out = run_with_status(
+        &["attenuate"],
+        &json!({
+            "secret": "cli-secret",
+            "token": token,
+            "constraints": {"limit": {"type": "exclusive_max_int", "value": 100}}
+        }),
+    );
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("attenuation"),
+        "wider exclusive_max_int should fail closed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[test]
+fn mint_from_policy_accepts_exclusive_min_int() {
+    let path = write_temp_policy(
+        "exclusive-min-int-grant",
+        r#"{
+            "version": "1",
+            "default_ttl_seconds": 60,
+            "tools": [{
+                "name": "read_file",
+                "arg_keys": ["open_retries", "open_cap"],
+                "constraints": {
+                    "open_retries": {"type": "exclusive_min_int", "value": 1},
+                    "open_cap": {"type": "exclusive_max_int", "value": 100}
+                }
+            }]
+        }"#,
+    );
+    let out = run_json(
+        &[
+            "mint",
+            "--policy",
+            path.to_str().unwrap(),
+            "--tool",
+            "read_file",
+        ],
+        &json!({
+            "secret": "cli-secret",
+            "current_time": 1700000000
+        }),
+    );
+    let token = &out["token"];
+    assert_eq!(token["tool_name"], "read_file");
+    assert_eq!(
+        token["constraints"]["open_retries"]["type"],
+        "exclusive_min_int"
+    );
+    assert_eq!(
+        token["constraints"]["open_cap"]["type"],
+        "exclusive_max_int"
+    );
+    let _ = fs::remove_file(&path);
+}
+
 fn mint_required_path_token() -> Value {
     run_json(
         &["mint"],
